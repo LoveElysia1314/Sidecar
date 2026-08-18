@@ -1,4 +1,4 @@
-"""Dualign 0.7.0 — 服务层"""
+"""Dualign 服务层。"""
 
 from dualign.services.repair import (
     RepairState,

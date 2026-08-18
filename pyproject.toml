@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dualign"
-version = "0.7.0"
+version = "0.8.0"
 description = "双语平行文档对齐与辅助校验工具"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "Dualign Contributors"}
 ]
@@ -27,12 +27,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "black>=24.0",
     "pytest>=7.4",
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/dualign"
-Repository = "https://github.com/your-org/dualign"
+Homepage = "https://github.com/LoveElysia1314/dualign"
+Repository = "https://github.com/LoveElysia1314/dualign"
 
 [project.scripts]
 dualign = "dualign.__main__:main"
@@ -43,6 +44,10 @@ where = ["src"]
 # ═══════════════════════════════════════════════════════════════
 # 代码质量工具配置
 # ═══════════════════════════════════════════════════════════════
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
 
 [tool.vulture]
 exclude = ["tests/", "demo/", "scripts/"]

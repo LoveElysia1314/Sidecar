@@ -995,8 +995,7 @@ class AiRepairAgent:
     """Tool-Calling AI 校订代理 (v2)。
 
     工具: ok / edit / merge / delete / flag / view / append / done
-    使用 DeepSeek (OpenAI 兼容) 后端，支持工具调用。
-    已移除 Ollama 后端（仅嵌入服务使用 Ollama）。
+    使用 Responses API 后端，支持 DeepSeek 与本地 Ollama 工具调用。
     """
 
     def __init__(

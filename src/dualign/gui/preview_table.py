@@ -1,5 +1,5 @@
 """
-Dualign 0.7.0 — SuggestionPreviewTable + AiSuggestionItem
+Dualign — SuggestionPreviewTable + AiSuggestionItem
 
 AI 建议表格的行数据模型 + 预览表。
 7 列，与主对齐表完全一致，仅 3 列覆写为预览。

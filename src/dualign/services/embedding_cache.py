@@ -36,17 +36,14 @@ class EmbeddingCache:
             try:
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA synchronous=NORMAL")
-                conn.execute(
-                    """CREATE TABLE IF NOT EXISTS vecs(
+                conn.execute("""CREATE TABLE IF NOT EXISTS vecs(
                     hash       TEXT PRIMARY KEY,
                     blob       BLOB    NOT NULL,
                     model      TEXT    NOT NULL,
                     dim        INTEGER NOT NULL,
                     created_at TEXT    DEFAULT (datetime('now'))
-                )"""
-                )
-                conn.execute(
-                    """CREATE TABLE IF NOT EXISTS merge_cache(
+                )""")
+                conn.execute("""CREATE TABLE IF NOT EXISTS merge_cache(
                     side       TEXT    NOT NULL,
                     snap_i     INTEGER NOT NULL,
                     sub_key    TEXT    NOT NULL,
@@ -55,8 +52,7 @@ class EmbeddingCache:
                     dim        INTEGER NOT NULL,
                     created_at TEXT    DEFAULT (datetime('now')),
                     PRIMARY KEY (side, snap_i, sub_key)
-                )"""
-                )
+                )""")
                 conn.commit()
             except Exception:
                 try:

@@ -1,5 +1,5 @@
 """
-Dualign 0.7.0 — 嵌入编码器与模型加载
+Dualign — 嵌入编码器与模型加载
 
 所有嵌入编码通过 API 后端（Ollama / LM Studio / 自定义 OpenAI 兼容 API）完成。
 此模块仅负责编码器类和模型加载，不处理缓存。

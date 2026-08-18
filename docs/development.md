@@ -8,7 +8,7 @@
 
 1. [环境搭建](#1-环境搭建)
 2. [项目结构](#2-项目结构)
-3. [运行测试](#3-运行测试)
+3. [代码质量与测试](#3-代码质量与测试)
 4. [自定义嵌入模型](#4-自定义嵌入模型)
 5. [自定义 AI 审校后端](#5-自定义-ai-审校后端)
 6. [构建与打包](#6-构建与打包)
@@ -21,13 +21,8 @@
 git clone <repo-url>
 cd dualign
 
-# 创建虚拟环境
-python -m venv venv
-venv\Scripts\activate     # Windows
-source venv/bin/activate  # macOS/Linux
-
-# 开发模式安装（全部功能）
-pip install -e ".[all,dev]"
+# 同步开发环境（运行时依赖 + Black + pytest）
+uv sync --extra dev
 
 # 启动嵌入后端
 ollama serve
@@ -39,7 +34,7 @@ ollama pull leoipulsar/harrier-0.6b
 | 分组 | 命令                      | 包含                                  |
 | ---- | ------------------------- | ------------------------------------- |
 | 完整 | `pip install -e .`        | 对齐引擎 + CLI + AI 审校 + GUI 工作台 |
-| 开发 | `pip install -e ".[dev]"` | 完整安装 + pytest                     |
+| 开发 | `uv sync --extra dev`       | 完整安装 + Black + pytest             |
 
 ---
 
@@ -50,6 +45,7 @@ dualign/
 ├── pyproject.toml
 ├── src/dualign/                 # 核心源码
 │   ├── __init__.py              # 公共 API
+│   ├── version.py               # 从包元数据读取版本
 │   ├── __main__.py              # CLI 入口 (gui/align/check/models)
 │   ├── common.py                # 工具函数 (hash/I/O/晋升)
 │   ├── config.py                # 配置常量 + 缓存路径
@@ -64,7 +60,6 @@ dualign/
 │   │   ├── state.py             # AlignmentSnapshot, ChapterState, etc.
 │   │   ├── action.py            # RepairAction, AiProposal, AiProposalStore
 │   │   ├── marker.py            # 操作标记编解码
-│   │   ├── report.py            # 异常类型常量
 │   │   └── snap_state.py        # SnapState 三层模型 + 审批四态
 │   │
 │   ├── services/                # 业务逻辑
@@ -76,7 +71,6 @@ dualign/
 │   │   ├── ai_repair_agent.py   # AiRepairAgent (tool-calling)
 │   │   ├── quality_gate.py      # G1/G2/G3 质量门控
 │   │   ├── cli_pipeline.py      # CLI 对齐流水线
-│   │   ├── report_io.py         # 报告 I/O
 │   │   ├── score_manager.py     # 异步评分管理器
 │   │   └── prompts/             # Agent 提示词 + tools.json
 │   │
@@ -97,7 +91,6 @@ dualign/
 │       ├── focus.py             # FocusManager
 │       ├── preview_table.py     # AI 建议预览
 │       ├── workers.py           # 后台工作线程
-│       ├── snap_indicator.py    # 导航按钮组
 │       └── text_hover.py        # 悬浮窗
 │
 ├── tests/                       # 单元测试
@@ -107,18 +100,26 @@ dualign/
 
 ---
 
-## 3. 运行测试
+## 3. 代码质量与测试
+
+提交和发布前必须先用 Black 格式化仓库中的全部 Python 代码，再执行格式检查与测试：
 
 ```bash
+# 格式化全部 Python 代码
+uv run --extra dev black .
+
+# 验证没有遗漏格式化
+uv run --extra dev black --check .
+
 # 全部测试
-pytest tests/ -v
+uv run --extra dev pytest tests/ -v
 
 # 指定模块
-pytest tests/test_align_core.py -v
-pytest tests/test_repair_state.py -v
+uv run --extra dev pytest tests/test_align_core.py -v
+uv run --extra dev pytest tests/test_repair_state.py -v
 
 # 覆盖率
-pytest tests/ --cov=src/dualign --cov-report=term-missing
+uv run --extra dev pytest tests/ --cov=src/dualign --cov-report=term-missing
 ```
 
 ---
@@ -166,7 +167,7 @@ class MyBackend(LLMBackend):
 agent = AiRepairAgent(backend=MyBackend())
 ```
 
-当前仅内置 `DeepSeekNativeBackend`。Ollama 作为 AI 审校后端已被移除。
+当前内置 `DeepSeekNativeBackend`，使用 Responses API，并兼容本地 Ollama 的 `/v1/responses` 端点。
 
 ---
 
@@ -195,7 +196,7 @@ python scripts/build_exe.py
 ```bash
 # 需安装 Inno Setup 6
 python scripts/build_exe.py --installer
-# → dist/Dualign_Setup_0.7.0.exe
+# → Dualign_Setup_v0.8.0.exe
 ```
 
 ### PyPI 发布

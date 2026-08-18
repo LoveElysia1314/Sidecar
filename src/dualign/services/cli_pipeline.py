@@ -1,5 +1,5 @@
 """
-Dualign 0.7.0 — CLI 对齐流水线
+Dualign — CLI 对齐流水线
 
 将 common.py 中与具体业务逻辑相关的对齐流水线提取到此，
 common.py 回归纯工具函数库角色。

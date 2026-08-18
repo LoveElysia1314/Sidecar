@@ -1,4 +1,4 @@
-"""Dualign 0.7.0 — 核心算法模块（无状态纯函数）"""
+"""Dualign 核心算法模块（无状态纯函数）。"""
 
 from dualign.core.aligner import (
     AlignConfig,

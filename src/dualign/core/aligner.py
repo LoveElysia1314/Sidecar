@@ -1,5 +1,5 @@
 """
-Dualign 0.7.0 — DP 对齐引擎
+Dualign — DP 对齐引擎
 =============================
 纯函数实现，无 GUI 依赖，可独立单元测试。
 
@@ -32,6 +32,8 @@ from typing import Callable, Dict, Iterator, List, Optional, Set, Tuple, Union
 
 import numpy as np
 
+from dualign.version import __version__
+
 from .punctuation import PunctuationHandler
 
 _IndexTuple = Tuple[int, ...]
@@ -50,8 +52,8 @@ elif not logger.handlers:
     logger.propagate = False
 
 
-# ── 对齐器核心版本 ──
-ALIGN_CORE_VERSION = "0.7.0"
+# Backwards-compatible public alias; the package metadata remains authoritative.
+ALIGN_CORE_VERSION = __version__
 
 # ── 双边信任余量锚点参数 ──
 ANCHOR_MARGIN_SLOPE = 0.10

@@ -1,4 +1,4 @@
-# Dualign ![version](https://img.shields.io/badge/version-0.7.0-blue)
+# Dualign ![version](https://img.shields.io/badge/version-0.8.0-blue)
 
 > **双语平行文档对齐与 AI 辅助校验工具**
 

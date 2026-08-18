@@ -1,5 +1,5 @@
 """
-Dualign 0.7.0 — SimilarityScorer: 统一文本对评分器
+Dualign — SimilarityScorer: 统一文本对评分器
 
 职责:
   1. 统一入口：谁要评分都来找我

@@ -1518,8 +1518,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         # ── Dock 样式 ──
         from dualign.gui.theme import T
 
-        dock.setStyleSheet(
-            f"""
+        dock.setStyleSheet(f"""
             QDockWidget > QWidget {{
                 border: 1px solid {T.BORDER_DIM};
                 border-radius: 0px;
@@ -1534,8 +1533,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
                 border: none;
                 width: 14px; height: 14px;
             }}
-        """
-        )
+        """)
 
         # 动态管理：单栏显示原生标题栏，多栏(tabified)时隐藏避免与 QTabBar 重复
         dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable)

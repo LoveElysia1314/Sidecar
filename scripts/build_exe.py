@@ -36,6 +36,17 @@ import subprocess
 import platform
 from pathlib import Path
 
+
+def _configure_utf8_stdio() -> None:
+    """Keep build output printable on Windows consoles using a legacy code page."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+_configure_utf8_stdio()
+
 # ── 项目根目录 ──
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = PROJECT_ROOT / "src"
@@ -133,7 +144,6 @@ def build_spec_content(
         "dualign.models",
         "dualign.models.state",
         "dualign.models.action",
-        "dualign.models.report",
         "dualign.models.snap_state",
         "dualign.services",
         "dualign.services.repair",
@@ -147,7 +157,6 @@ def build_spec_content(
         "dualign.gui.filter",
         "dualign.gui.dialogs",
         "dualign.gui.panels",
-        "dualign.gui.snap_indicator",
         "dualign.gui.preview_table",
         # 懒加载的第三方库
         "numpy",
@@ -172,11 +181,13 @@ def build_spec_content(
     return f"""# -*- mode: python ; coding: utf-8 -*-
 # Dualign GUI 打包配置 — 由 build_exe.py 自动生成
 
+from PyInstaller.utils.hooks import copy_metadata
+
 a = Analysis(
     ['{ENTRY_POINT}'],
     pathex=[],
     binaries=[],
-    datas=[
+    datas=copy_metadata('dualign') + [
         ('{demo_data_src}', '{demo_data_dst}'),
         ('{docs_data_src}', '{docs_data_dst}'),
         ('{prompts_src}', '{prompts_dst}'),

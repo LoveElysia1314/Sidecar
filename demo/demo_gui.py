@@ -1,5 +1,5 @@
 ﻿"""
-Dualign 0.7.0 — GUI Demo
+Dualign — GUI Demo
 
 等价于欢迎页的"体验 Demo"按钮行为，通过 dualign.demo 加载。
 

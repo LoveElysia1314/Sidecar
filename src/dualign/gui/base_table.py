@@ -1,5 +1,5 @@
 """
-Dualign 0.7.0 — BaseTextTable: 文本对表格基类
+Dualign — BaseTextTable: 文本对表格基类
 
 封装 QTableWidget 的通用设置、跨行合并、颜色单元创建、焦点/滚动管理等。
 同时包含 HighlightDelegate（统一高亮/虚线/色标）和颜色工具函数。
