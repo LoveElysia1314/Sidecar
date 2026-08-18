@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import logging
+import threading
 from typing import Optional
 
 import numpy as np
@@ -27,6 +28,10 @@ logger = logging.getLogger(__name__)
 
 # ── Ollama 配置 ──
 OLLAMA_BASE_URL = os.environ.get("DUALIGN_OLLAMA_URL", "http://localhost:11434")
+
+# 全局编码锁：Ollama 的 tokenizer 子进程无法承受高并发请求
+# （实测 4 并发时 400 持续超过重试窗口），串行化 /api/embed 请求根治。
+_OLLAMA_ENCODE_LOCK = threading.Lock()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -65,6 +70,70 @@ class OllamaEncoder:
             self._session = requests.Session()
         return self._session
 
+    _TOKENIZE_RETRY_STATUS = (400,)
+    _TOKENIZE_RETRY_ATTEMPTS = 5
+    _TOKENIZE_RETRY_DELAYS = (2.0, 3.0, 5.0, 8.0, 12.0)
+
+    def _post_embed(self, batch):
+        """POST /api/embed，对 Ollama tokenizer 子进程瞬时故障自动重试。
+
+        Ollama 的 /api/embed 在内部 tokenizer 服务（127.0.0.1:123xx）未就绪
+        或瞬时崩溃时会返回 400，错误体含 "tokenize"。这是临时性故障，
+        通常下一次重试即可恢复。此处对这类 400 自动重试最多 3 次。
+        """
+        import requests as _requests
+        import time as _time
+
+        last_error = None
+        attempts = self._TOKENIZE_RETRY_ATTEMPTS
+        for attempt in range(attempts):
+            try:
+                # 单次请求持锁：同一时刻仅 1 个 /api/embed 请求在途，
+                # 避免并发触发 Ollama tokenizer 过载；重试等待期间释放锁，
+                # 其他章节的请求可插入，不长时间独占。
+                with _OLLAMA_ENCODE_LOCK:
+                    resp = self.session.post(
+                        f"{self._url}/api/embed",
+                        json={"model": self._model, "input": batch},
+                        timeout=120,
+                    )
+                    resp.raise_for_status()
+                return resp
+            except _requests.exceptions.HTTPError as e:
+                status = getattr(resp, "status_code", 0)
+                body = getattr(resp, "text", "") or ""
+                is_tokenize_issue = (
+                    status in self._TOKENIZE_RETRY_STATUS and "tokenize" in body
+                )
+                if is_tokenize_issue and attempt < attempts - 1:
+                    delay = self._TOKENIZE_RETRY_DELAYS[
+                        min(attempt, len(self._TOKENIZE_RETRY_DELAYS) - 1)
+                    ]
+                    logger.warning(
+                        "Ollama tokenizer 瞬时故障 (400), %.1fs 后重试 %d/%d",
+                        delay,
+                        attempt + 1,
+                        attempts,
+                    )
+                    _time.sleep(delay)
+                    last_error = e
+                    continue
+                raise
+            except (
+                _requests.exceptions.SSLError,
+                _requests.exceptions.ConnectTimeout,
+                _requests.exceptions.ConnectionError,
+                _requests.exceptions.Timeout,
+                _requests.exceptions.MissingSchema,
+                _requests.exceptions.InvalidSchema,
+                _requests.exceptions.InvalidURL,
+                _requests.exceptions.URLRequired,
+                _requests.exceptions.RequestException,
+            ):
+                raise
+        # 理论不可达：attempts > 0 时最后一次 is_tokenize_issue 会 raise
+        raise last_error
+
     def encode(
         self,
         sentences,
@@ -93,21 +162,44 @@ class OllamaEncoder:
                 "❌ Ollama 模型名为空\n" "   请在设置面板中选择或输入嵌入模型名"
             )
 
+        # ── 档位化 batch 收缩：仅当估算整批字符超限时才收缩到固定档位 ──
+        # 实测 qwen3-embedding:0.6b 单请求约 100K 字符(32K tokens)为上限；
+        # 默认 batch_size=256 (≈40K 字符) 远低于上限，通常无需收缩。
+        # 仅当 行均长 x batch_size 估算超限时，收缩到 ≤ 上限的最大档位。
+        _HARD_LIMIT_CHARS = 90000  # 略低于实测 100K，留安全余量
+        _BATCH_LEVELS = (256, 128, 64, 32, 16, 8, 4, 2, 1)  # 收缩档位表
+        _bs = batch_size
+        if _bs > 1:
+            _window = texts[: min(_bs * 2, 64)]  # 抽样估算行均长（封顶 64 行）
+            _avg = sum(len(x) for x in _window) / max(len(_window), 1)
+            _est_total = _avg * _bs
+            if _est_total > _HARD_LIMIT_CHARS:
+                # 按档位收缩：选 ≤ min(batch_size, limit/avg) 的最大档位
+                _fit = int(_HARD_LIMIT_CHARS / max(_avg, 1))
+                _bs = max(
+                    (lv for lv in _BATCH_LEVELS if lv <= min(batch_size, _fit)),
+                    default=batch_size,
+                )
+                if _bs < batch_size:
+                    logger.debug(
+                        "batch 档位收缩: %d -> %d (行均长 %d, 估算总量 %d > 上限 %d)",
+                        batch_size,
+                        _bs,
+                        int(_avg),
+                        int(_est_total),
+                        _HARD_LIMIT_CHARS,
+                    )
+
         all_embs = []
-        for i in range(0, len(texts), batch_size):
+        for i in range(0, len(texts), _bs):
             # ── 检查停止信号（GUI 窗口关闭时中断编码）──
             if stop_event is not None and stop_event.is_set():
                 break
-            batch = texts[i : i + batch_size]
+            batch = texts[i : i + _bs]
             import requests as _requests
 
             try:
-                resp = self.session.post(
-                    f"{self._url}/api/embed",
-                    json={"model": self._model, "input": batch},
-                    timeout=120,
-                )
-                resp.raise_for_status()
+                resp = self._post_embed(batch)
             except _requests.exceptions.SSLError:
                 raise RuntimeError(
                     f"❌ Ollama SSL 连接错误 ({self._url})\n"
@@ -128,7 +220,8 @@ class OllamaEncoder:
                     f"❌ Ollama 请求超时 ({self._url})\n" f"   请检查网络或模型是否过大"
                 )
             except _requests.exceptions.HTTPError as e:
-                status = resp.status_code
+                resp_obj = getattr(e, "response", None)
+                status = resp_obj.status_code if resp_obj is not None else 0
                 if status == 404:
                     raise RuntimeError(
                         f"❌ Ollama 模型未找到: {self._model}\n"
