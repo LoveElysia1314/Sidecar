@@ -242,7 +242,7 @@ class DockPanelHelper:
         # 找对侧的第一个 dock 作为 tab 锚点
         dock_map = getattr(main_window, "_dock_map", {})
         target_tab = None
-        for pid, d in dock_map.items():
+        for d in dock_map.values():
             if d is dock:
                 continue
             if main_window.dockWidgetArea(d) == new_area:
@@ -388,8 +388,6 @@ class DockPanelHelper:
         )
 
         menu.exec(pos)
-
-    # REFACTOR: _safe_dock 已移除（仅 pass 的预留方法，vulture 死代码检测）
 
 
 # ═══════════════════════════════════════════════════════════════

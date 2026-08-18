@@ -23,16 +23,22 @@ Phase 5: 单一 DP 最终决选
 trust margin 对高度平行语料影响极小——其真实价值需在非逐句对应数据上验证。
 """
 
+import logging
 import sys
 import time
-import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict, Set
+from typing import Callable, Dict, Iterator, List, Optional, Set, Tuple, Union
 
 import numpy as np
 
 from .punctuation import PunctuationHandler
+
+_IndexTuple = Tuple[int, ...]
+_AlignmentOperation = Tuple[_IndexTuple, _IndexTuple, float]
+_AlignmentPair = Tuple[_IndexTuple, _IndexTuple]
+_EncodeFn = Callable[[List[str]], np.ndarray]
+_Stats = Dict[str, Union[int, float]]
 
 logger = logging.getLogger(__name__)
 if not logger.handlers and not logging.getLogger().handlers:
@@ -67,7 +73,7 @@ MAX_CONTAINER_SIZE = 10
 
 @dataclass
 class AlignConfig:
-    """对齐参数配置"""
+    """对齐参数配置。"""
 
     allow_deletions: bool = True
     allow_insertions: bool = True
@@ -76,12 +82,12 @@ class AlignConfig:
 
 @dataclass
 class AlignmentResult:
-    """对齐结果"""
+    """对齐结果。"""
 
-    all_ops: List[Tuple[Tuple[int, ...], Tuple[int, ...], float]]
-    anchors: List[Tuple[Tuple[int, ...], Tuple[int, ...], float]]
-    anchor_op_indices: dict
-    stats: dict
+    all_ops: List[_AlignmentOperation]
+    anchors: List[_AlignmentOperation]
+    anchor_op_indices: Dict[int, str]
+    stats: _Stats
     sim_matrix: Optional[np.ndarray] = None
 
 
@@ -95,7 +101,8 @@ def count_punct_info(text: str) -> int:
     return PunctuationHandler.count_punctuation_line(text)
 
 
-def op_type_str(s_tuple, t_tuple) -> str:
+def op_type_str(s_tuple: _IndexTuple, t_tuple: _IndexTuple) -> str:
+    """Return the compact source-to-target cardinality label for an operation."""
     ls, lt = len(s_tuple), len(t_tuple)
     if ls == 1 and lt == 1:
         return "1:1"
@@ -133,9 +140,9 @@ def _normalize_batch(v: np.ndarray) -> np.ndarray:
 def pair_score(
     src_emb: np.ndarray,
     tgt_emb: np.ndarray,
-    src_indices: Tuple[int, ...],
-    tgt_indices: Tuple[int, ...],
-    encode_fn=None,
+    src_indices: _IndexTuple,
+    tgt_indices: _IndexTuple,
+    encode_fn: Optional[_EncodeFn] = None,
     src_texts: Optional[List[str]] = None,
     tgt_texts: Optional[List[str]] = None,
 ) -> float:
@@ -162,8 +169,6 @@ def pair_score(
         vt = tgt_emb[tgt_indices[0]]
         return float(np.dot(vs, vt))
 
-    return 0.0
-
 
 # ═══════════════════════════════════════════════════════════════
 # 锚点搜索（双边信任余量 + 单调链 DP）
@@ -179,10 +184,8 @@ def bilateral_trust_margin(score: float) -> float:
 
 def find_bilateral_anchors(
     sim_matrix: np.ndarray,
-) -> List[Tuple[Tuple[int, ...], Tuple[int, ...], float]]:
+) -> List[_AlignmentOperation]:
     """双边信任余量锚点搜索（向量化）。"""
-    n, m = sim_matrix.shape
-
     src_top1 = np.max(sim_matrix, axis=1)
     tgt_top1 = np.max(sim_matrix, axis=0)
 
@@ -210,16 +213,16 @@ def find_bilateral_anchors(
 
 
 def select_monotonic_anchors_weighted(
-    anchors: List[Tuple[Tuple[int, ...], Tuple[int, ...], float]],
-) -> List[Tuple[Tuple[int, ...], Tuple[int, ...], float]]:
+    anchors: List[_AlignmentOperation],
+) -> List[_AlignmentOperation]:
     """加权单调链 DP：保持 src/tgt 严格递增，最大化置信度总和。"""
     if not anchors:
         return []
-    N = len(anchors)
-    dp = np.zeros(N, dtype=np.float64)
-    prev = -np.ones(N, dtype=int)
+    n_anchors = len(anchors)
+    dp = np.zeros(n_anchors, dtype=np.float64)
+    prev = -np.ones(n_anchors, dtype=int)
 
-    for i in range(N):
+    for i in range(n_anchors):
         dp[i] = anchors[i][2]
         prev[i] = -1
         ai_src_end = anchors[i][0][-1] if anchors[i][0] else -1
@@ -244,7 +247,7 @@ def select_monotonic_anchors_weighted(
 
 
 def _validate_coverage(
-    all_ops: List[Tuple[Tuple[int, ...], Tuple[int, ...], float]],
+    all_ops: List[_AlignmentOperation],
     n: int,
     m: int,
 ) -> None:
@@ -279,8 +282,8 @@ def _validate_coverage(
 
 
 def _count_op_types(
-    all_ops: List[Tuple[Tuple[int, ...], Tuple[int, ...], float]],
-) -> dict:
+    all_ops: List[_AlignmentOperation],
+) -> Dict[str, int]:
     """统计各操作类型数量。"""
     counts = {"1to1": 0, "merge": 0, "split": 0, "delete": 0, "insert": 0}
     for s, t, _ in all_ops:
@@ -297,7 +300,7 @@ def _count_op_types(
     return counts
 
 
-def _normalize_int_types(ops):
+def _normalize_int_types(ops: List[_AlignmentOperation]) -> List[_AlignmentOperation]:
     """Ensure no NumPy type leakage."""
     return [
         (tuple(int(x) for x in s), tuple(int(x) for x in t), float(sc))
@@ -305,14 +308,19 @@ def _normalize_int_types(ops):
     ]
 
 
-def _anchor_index(all_ops, anchors):
+def _anchor_index(
+    all_ops: List[_AlignmentOperation], anchors: List[_AlignmentOperation]
+) -> Dict[int, str]:
     """标注 all_ops 中哪些对应锚点。"""
     anchor_set = {(s[0], t[0]) for s, t, _ in anchors if len(s) == 1 and len(t) == 1}
     result = {}
     for idx, (s_tuple, t_tuple, _) in enumerate(all_ops):
-        if len(s_tuple) == 1 and len(t_tuple) == 1:
-            if (s_tuple[0], t_tuple[0]) in anchor_set:
-                result[idx] = "primary"
+        if (
+            len(s_tuple) == 1
+            and len(t_tuple) == 1
+            and (s_tuple[0], t_tuple[0]) in anchor_set
+        ):
+            result[idx] = "primary"
     return result
 
 
@@ -324,15 +332,14 @@ def _anchor_index(all_ops, anchors):
 def _restricted_dp(
     sim_matrix: np.ndarray,
     config: AlignConfig,
-) -> Tuple[List[Tuple[Tuple[int, ...], Tuple[int, ...], float]], float]:
+) -> Tuple[List[_AlignmentOperation], float]:
     """受限 DP：仅 1:1/1:0/0:1 三种移动，无 N:1/1:M。
 
     回溯标记: 0=1:1, 3=src删除, 4=tgt插入。
     """
     n, m = sim_matrix.shape
     dp = np.full((n + 1, m + 1), -np.inf, dtype=np.float64)
-    bt = np.zeros((n + 1, m + 1), dtype=np.int8)
-    bt[:] = -1
+    bt = np.full((n + 1, m + 1), -1, dtype=np.int8)
     dp[0, 0] = 0.0
 
     for i in range(n + 1):
@@ -380,13 +387,41 @@ def _restricted_dp(
 # ═══════════════════════════════════════════════════════════════
 
 
+def _iter_alignment_gaps(
+    anchors: List[_AlignmentOperation], n: int, m: int
+) -> Iterator[Tuple[int, int, int, int]]:
+    """Yield source and target bounds between consecutive anchors."""
+    prev_src = prev_tgt = -1
+    for src_indices, tgt_indices, _ in anchors:
+        src = src_indices[0]
+        tgt = tgt_indices[0]
+        yield prev_src + 1, src, prev_tgt + 1, tgt
+        prev_src, prev_tgt = src, tgt
+    yield prev_src + 1, n, prev_tgt + 1, m
+
+
+def _offset_one_to_one_ops(
+    ops: List[_AlignmentOperation], src_offset: int, tgt_offset: int
+) -> List[_AlignmentOperation]:
+    """Translate 1:1 operations from submatrix coordinates to global indices."""
+    return [
+        (
+            tuple(src_offset + index for index in src_indices),
+            tuple(tgt_offset + index for index in tgt_indices),
+            score,
+        )
+        for src_indices, tgt_indices, score in ops
+        if len(src_indices) == 1 and len(tgt_indices) == 1
+    ]
+
+
 def _recursive_anchor_search(
     sim_matrix: np.ndarray,
     n: int,
     m: int,
     depth: int = 0,
     max_depth: int = 100,
-) -> List[Tuple[Tuple[int, ...], Tuple[int, ...], float]]:
+) -> List[_AlignmentOperation]:
     """Phase 1: 递归双边信任余量锚点搜索。
 
     核心洞察：在全局范围内，某个正确的 (i,j) 可能因同行其他高分候选
@@ -403,51 +438,19 @@ def _recursive_anchor_search(
     if not anchors:
         return []
 
-    all_anchors: List[Tuple[Tuple[int, ...], Tuple[int, ...], float]] = list(anchors)
+    all_anchors = list(anchors)
 
-    prev_s, prev_t = -1, -1
-    for a_s, a_t, _a_sc in anchors:
-        s, t = a_s[0], a_t[0]
-
-        sub_s, sub_e = prev_s + 1, s
-        sub_t_start, sub_t_end = prev_t + 1, t
-        sub_n = sub_e - sub_s
-        sub_m = sub_t_end - sub_t_start
-
-        if sub_n > 0 and sub_m > 0:
+    for sub_s, sub_e, sub_t_start, sub_t_end in _iter_alignment_gaps(anchors, n, m):
+        if sub_s < sub_e and sub_t_start < sub_t_end:
             sub_sim = sim_matrix[sub_s:sub_e, sub_t_start:sub_t_end]
             sub_anchors = _recursive_anchor_search(
-                sub_sim, sub_n, sub_m, depth + 1, max_depth
+                sub_sim,
+                sub_e - sub_s,
+                sub_t_end - sub_t_start,
+                depth + 1,
+                max_depth,
             )
-            for sa_s, sa_t, sa_sc in sub_anchors:
-                all_anchors.append(
-                    (
-                        tuple(sub_s + x for x in sa_s),
-                        tuple(sub_t_start + y for y in sa_t),
-                        sa_sc,
-                    )
-                )
-
-        prev_s, prev_t = s, t
-
-    sub_s, sub_e = prev_s + 1, n
-    sub_t_start, sub_t_end = prev_t + 1, m
-    sub_n = sub_e - sub_s
-    sub_m = sub_t_end - sub_t_start
-
-    if sub_n > 0 and sub_m > 0:
-        sub_sim = sim_matrix[sub_s:sub_e, sub_t_start:sub_t_end]
-        sub_anchors = _recursive_anchor_search(
-            sub_sim, sub_n, sub_m, depth + 1, max_depth
-        )
-        for sa_s, sa_t, sa_sc in sub_anchors:
-            all_anchors.append(
-                (
-                    tuple(sub_s + x for x in sa_s),
-                    tuple(sub_t_start + y for y in sa_t),
-                    sa_sc,
-                )
-            )
+            all_anchors.extend(_offset_one_to_one_ops(sub_anchors, sub_s, sub_t_start))
 
     all_anchors.sort(key=lambda a: (a[0][0], a[1][0]))
     # 子段锚点排序后天然单调——递归产生的锚点严格位于父锚点间隙内。
@@ -460,65 +463,22 @@ def _recursive_anchor_search(
 
 
 def _supplement_micro_anchors(
-    anchors: List[Tuple[Tuple[int, ...], Tuple[int, ...], float]],
+    anchors: List[_AlignmentOperation],
     sim_matrix: np.ndarray,
     n: int,
     m: int,
     config: AlignConfig,
-) -> List[Tuple[Tuple[int, ...], Tuple[int, ...], float]]:
+) -> List[_AlignmentOperation]:
     """Phase 2: 在未覆盖区域用受限 DP 补全微锚点。"""
-    if not anchors:
-        rdp_ops, _ = _restricted_dp(sim_matrix, config)
-        micro = []
-        for s, t, sc in rdp_ops:
-            if len(s) == 1 and len(t) == 1:
-                micro.append((s, t, sc))
-        return micro
-
-    micro: List[Tuple[Tuple[int, ...], Tuple[int, ...], float]] = []
-
-    prev_s, prev_t = -1, -1
+    micro: List[_AlignmentOperation] = []
     sorted_anchors = sorted(anchors, key=lambda a: (a[0][0], a[1][0]))
-    for a_s, a_t, _a_sc in sorted_anchors:
-        s, t = a_s[0], a_t[0]
-
-        sub_s, sub_e = prev_s + 1, s
-        sub_t_start, sub_t_end = prev_t + 1, t
-        sub_n = sub_e - sub_s
-        sub_m = sub_t_end - sub_t_start
-
-        if sub_n > 0 and sub_m > 0:
+    for sub_s, sub_e, sub_t_start, sub_t_end in _iter_alignment_gaps(
+        sorted_anchors, n, m
+    ):
+        if sub_s < sub_e and sub_t_start < sub_t_end:
             sub_sim = sim_matrix[sub_s:sub_e, sub_t_start:sub_t_end]
             rdp_ops, _ = _restricted_dp(sub_sim, config)
-            for r_s, r_t, r_sc in rdp_ops:
-                if len(r_s) == 1 and len(r_t) == 1:
-                    micro.append(
-                        (
-                            tuple(sub_s + x for x in r_s),
-                            tuple(sub_t_start + y for y in r_t),
-                            r_sc,
-                        )
-                    )
-
-        prev_s, prev_t = s, t
-
-    sub_s, sub_e = prev_s + 1, n
-    sub_t_start, sub_t_end = prev_t + 1, m
-    sub_n = sub_e - sub_s
-    sub_m = sub_t_end - sub_t_start
-
-    if sub_n > 0 and sub_m > 0:
-        sub_sim = sim_matrix[sub_s:sub_e, sub_t_start:sub_t_end]
-        rdp_ops, _ = _restricted_dp(sub_sim, config)
-        for r_s, r_t, r_sc in rdp_ops:
-            if len(r_s) == 1 and len(r_t) == 1:
-                micro.append(
-                    (
-                        tuple(sub_s + x for x in r_s),
-                        tuple(sub_t_start + y for y in r_t),
-                        r_sc,
-                    )
-                )
+            micro.extend(_offset_one_to_one_ops(rdp_ops, sub_s, sub_t_start))
 
     return micro
 
@@ -529,13 +489,10 @@ def _supplement_micro_anchors(
 
 
 def _enumerate_merge_combos(
-    anchors: List[Tuple[Tuple[int, ...], Tuple[int, ...], float]],
+    anchors: List[_AlignmentOperation],
     n: int,
     m: int,
-) -> Tuple[
-    List[Tuple[Tuple[int, ...], Tuple[int, ...]]],
-    List[Tuple[Tuple[int, ...], Tuple[int, ...]]],
-]:
+) -> Tuple[List[_AlignmentPair], List[_AlignmentPair]]:
     """Phase 3: 从锚点集合出发，全局枚举所有合法合并组合。
 
     规则：连续 · ≥2行 · 恰好含1个基准行 · ≤MERGE_LENGTH_LIMIT。
@@ -543,8 +500,8 @@ def _enumerate_merge_combos(
     B_S: Set[int] = {a[0][0] for a in anchors}
     B_T: Set[int] = {a[1][0] for a in anchors}
 
-    src_combos: List[Tuple[Tuple[int, ...], Tuple[int, ...]]] = []
-    tgt_combos: List[Tuple[Tuple[int, ...], Tuple[int, ...]]] = []
+    src_combos: List[_AlignmentPair] = []
+    tgt_combos: List[_AlignmentPair] = []
 
     theta = MERGE_LENGTH_LIMIT
     min_len = MERGE_MIN_LENGTH
@@ -604,19 +561,19 @@ def _enumerate_merge_combos(
 
 
 def _build_merge_scores(
-    src_combos: List[Tuple[Tuple[int, ...], Tuple[int, ...]]],
-    tgt_combos: List[Tuple[Tuple[int, ...], Tuple[int, ...]]],
+    src_combos: List[_AlignmentPair],
+    tgt_combos: List[_AlignmentPair],
     src_lines: List[str],
     tgt_lines: List[str],
     src_emb: np.ndarray,
     tgt_emb: np.ndarray,
-    encode_fn,
-) -> Dict[Tuple[Tuple[int, ...], Tuple[int, ...]], float]:
+    encode_fn: Optional[_EncodeFn],
+) -> Dict[_AlignmentPair, float]:
     """Phase 4: 批量编码所有合并组合并评分。
 
     encode_fn 应为 CachedEncoder.encode()——自动查缓存/编码/回存。
     """
-    scores: Dict[Tuple[Tuple[int, ...], Tuple[int, ...]], float] = {}
+    scores: Dict[_AlignmentPair, float] = {}
 
     if encode_fn is None:
         return scores
@@ -626,7 +583,7 @@ def _build_merge_scores(
 
     # ── N:1 (src 合并) ──
     src_texts: List[str] = []
-    src_keys: List[Tuple[Tuple[int, ...], Tuple[int, ...]]] = []
+    src_keys: List[_AlignmentPair] = []
     for c_s, c_t in src_combos:
         text = _smart_join_lines_fast(
             [src_lines[i] for i in c_s],
@@ -643,7 +600,7 @@ def _build_merge_scores(
 
     # ── 1:M (tgt 合并) ──
     tgt_texts: List[str] = []
-    tgt_keys: List[Tuple[Tuple[int, ...], Tuple[int, ...]]] = []
+    tgt_keys: List[_AlignmentPair] = []
     for c_s, c_t in tgt_combos:
         text = _smart_join_lines_fast(
             [tgt_lines[j] for j in c_t],
@@ -667,21 +624,21 @@ def _build_merge_scores(
 
 
 def _final_dp(
-    anchors: List[Tuple[Tuple[int, ...], Tuple[int, ...], float]],
-    src_combos: List[Tuple[Tuple[int, ...], Tuple[int, ...]]],
-    tgt_combos: List[Tuple[Tuple[int, ...], Tuple[int, ...]]],
-    merge_scores: Dict[Tuple[Tuple[int, ...], Tuple[int, ...]], float],
+    anchors: List[_AlignmentOperation],
+    src_combos: List[_AlignmentPair],
+    tgt_combos: List[_AlignmentPair],
+    merge_scores: Dict[_AlignmentPair, float],
     n: int,
     m: int,
     config: AlignConfig,
-) -> List[Tuple[Tuple[int, ...], Tuple[int, ...], float]]:
+) -> List[_AlignmentOperation]:
     """Phase 5: 单一 DP 最终决选。"""
     if n == 0 and m == 0:
         return []
 
     INF_NEG = -1e308
 
-    ops: List[Tuple[Tuple[int, ...], Tuple[int, ...], float]] = []
+    ops: List[_AlignmentOperation] = []
     op_ranges: List[Tuple[int, int, int, int, float]] = []
 
     for a_s, a_t, a_sc in anchors:
@@ -700,7 +657,7 @@ def _final_dp(
 
     if not ops:
         # 无候选：退化为全部孤行
-        out: List[Tuple[Tuple[int, ...], Tuple[int, ...], float]] = []
+        out: List[_AlignmentOperation] = []
         for i in range(n):
             out.append(((i,), (), 0.0))
         for j in range(m):
@@ -741,7 +698,7 @@ def _final_dp(
             for op_idx in ops_by_start.get((i, j), []):
                 si, se, ti, te, sc = op_ranges[op_idx]
                 nv = cur + sc
-                if se <= n + 1 and te <= m + 1 and nv > dp[se, te]:
+                if se <= n and te <= m and nv > dp[se, te]:
                     dp[se, te] = nv
                     bt_i[se, te] = i
                     bt_j[se, te] = j
@@ -787,7 +744,7 @@ def align(
     src_emb: np.ndarray,
     tgt_emb: np.ndarray,
     config: Optional[AlignConfig] = None,
-    encode_fn=None,
+    encode_fn: Optional[_EncodeFn] = None,
     build_merge_cache: bool = True,
     silent: bool = False,
 ) -> AlignmentResult:
@@ -872,9 +829,9 @@ def align(
         )
 
     # Phase 3
-    src_combos: List[Tuple[Tuple[int, ...], Tuple[int, ...]]] = []
-    tgt_combos: List[Tuple[Tuple[int, ...], Tuple[int, ...]]] = []
-    merge_scores: Dict[Tuple[Tuple[int, ...], Tuple[int, ...]], float] = {}
+    src_combos: List[_AlignmentPair] = []
+    tgt_combos: List[_AlignmentPair] = []
+    merge_scores: Dict[_AlignmentPair, float] = {}
 
     if config.allow_merge and build_merge_cache:
         src_combos, tgt_combos = _enumerate_merge_combos(anchors, n, m)
@@ -944,29 +901,29 @@ def align(
 
 
 def _build_stats(
-    n,
-    m,
-    all_ops,
-    n_restricted_ops,
-    n_anchors,
-    elapsed,
-    t_sim,
-    t_info,
-    t_anchor,
-    t_dp,
-    n_containers=0,
-    n_overflow_rows=0,
-):
+    n: int,
+    m: int,
+    all_ops: List[_AlignmentOperation],
+    n_restricted_ops: int,
+    n_anchors: int,
+    elapsed: float,
+    t_sim: float,
+    t_info: float,
+    t_anchor: float,
+    t_dp: float,
+    n_containers: int = 0,
+    n_overflow_rows: int = 0,
+) -> _Stats:
     """构建对齐统计信息字典。"""
     total_sim = sum(op[2] for op in all_ops)
     avg_sim = total_sim / len(all_ops) if all_ops else 0.0
     op_counts = _count_op_types(all_ops)
 
     n_non11_src = sum(
-        len(s) for s, t, sc in all_ops if not (len(s) == 1 and len(t) == 1)
+        len(s) for s, t, _ in all_ops if not (len(s) == 1 and len(t) == 1)
     )
     n_non11_tgt = sum(
-        len(t) for s, t, sc in all_ops if not (len(s) == 1 and len(t) == 1)
+        len(t) for s, t, _ in all_ops if not (len(s) == 1 and len(t) == 1)
     )
     n_non11 = n_non11_src + n_non11_tgt
     non11_row_ratio = n_non11 / (n + m) if (n + m) > 0 else 0.0
@@ -1014,57 +971,49 @@ def _build_stats(
 
 
 def _merge_consecutive_solo_ops(
-    ops: List[Tuple[Tuple[int, ...], Tuple[int, ...], float]],
-) -> List[Tuple[Tuple[int, ...], Tuple[int, ...], float]]:
+    ops: List[_AlignmentOperation],
+) -> List[_AlignmentOperation]:
     """将 DP 输出中连续的同侧孤行分批合并为 N:0 / 0:M。"""
     if not ops:
         return []
 
-    result: List[Tuple[Tuple[int, ...], Tuple[int, ...], float]] = []
-    buf: List[str] = []
-    buf_srcs: List[Tuple[int, ...]] = []
+    result: List[_AlignmentOperation] = []
+    buffer_type: Optional[str] = None
+    buffer_indices: List[_IndexTuple] = []
 
-    def _flush():
-        if not buf:
+    def _flush() -> None:
+        nonlocal buffer_type
+        if buffer_type is None:
             return
-        if buf[0] == "src_solo":
-            for chunk_start in range(0, len(buf_srcs), MAX_CONTAINER_SIZE):
-                chunk = buf_srcs[chunk_start : chunk_start + MAX_CONTAINER_SIZE]
-                merged = tuple(sorted(set().union(*chunk)))
+        for chunk_start in range(0, len(buffer_indices), MAX_CONTAINER_SIZE):
+            chunk = buffer_indices[chunk_start : chunk_start + MAX_CONTAINER_SIZE]
+            merged = tuple(sorted(set().union(*chunk)))
+            if buffer_type == "src_solo":
                 result.append((merged, (), 0.0))
-        else:
-            for chunk_start in range(0, len(buf_srcs), MAX_CONTAINER_SIZE):
-                chunk = buf_srcs[chunk_start : chunk_start + MAX_CONTAINER_SIZE]
-                merged = tuple(sorted(set().union(*chunk)))
+            else:
                 result.append(((), merged, 0.0))
+        buffer_type = None
+        buffer_indices.clear()
 
     for s_idx, t_idx, sc in ops:
         ls, lt = len(s_idx), len(t_idx)
         if ls >= 1 and lt >= 1:
             _flush()
-            buf.clear()
-            buf_srcs.clear()
             result.append((s_idx, t_idx, sc))
         elif ls >= 1 and lt == 0:
             cur_type = "src_solo"
-            if buf and buf[-1] != cur_type:
+            if buffer_type is not None and buffer_type != cur_type:
                 _flush()
-                buf.clear()
-                buf_srcs.clear()
-            buf.append(cur_type)
-            buf_srcs.append(s_idx)
+            buffer_type = cur_type
+            buffer_indices.append(s_idx)
         elif ls == 0 and lt >= 1:
             cur_type = "tgt_solo"
-            if buf and buf[-1] != cur_type:
+            if buffer_type is not None and buffer_type != cur_type:
                 _flush()
-                buf.clear()
-                buf_srcs.clear()
-            buf.append(cur_type)
-            buf_srcs.append(t_idx)
+            buffer_type = cur_type
+            buffer_indices.append(t_idx)
         else:
             _flush()
-            buf.clear()
-            buf_srcs.clear()
             result.append((s_idx, t_idx, sc))
 
     _flush()
@@ -1072,7 +1021,7 @@ def _merge_consecutive_solo_ops(
 
 
 def _count_overflow_rows(
-    anchors: List[Tuple[Tuple[int, ...], Tuple[int, ...], float]],
+    anchors: List[_AlignmentOperation],
     n: int,
     m: int,
 ) -> int:
@@ -1129,7 +1078,7 @@ def _count_overflow_rows(
 # ═══════════════════════════════════════════════════════════════
 
 
-def _smart_join_lines(lines: List[str], sep: str = None) -> str:
+def _smart_join_lines(lines: List[str], sep: Optional[str] = None) -> str:
     """拼接多行文本。"""
     if not lines:
         return ""
@@ -1165,10 +1114,7 @@ _CJK_RANGES = (
 
 def _is_cjk(c: str) -> bool:
     """单字符 CJK 判断。"""
-    for lo, hi in _CJK_RANGES:
-        if lo <= c <= hi:
-            return True
-    return False
+    return any(lo <= c <= hi for lo, hi in _CJK_RANGES)
 
 
 def _precompute_cjk_ends(lines: List[str]) -> List[bool]:

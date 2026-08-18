@@ -142,8 +142,6 @@ class OllamaEncoder:
         stop_event=None,
         **kwargs,
     ):
-        pass
-
         texts = [sentences] if isinstance(sentences, str) else list(sentences)
         if not texts:
             return np.zeros((0, self._dim or 768))

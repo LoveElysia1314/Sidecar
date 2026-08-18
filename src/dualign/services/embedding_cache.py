@@ -14,13 +14,11 @@ Dualign — EmbeddingCache: 行级嵌入向量缓存（SQLite 后端）
 
 from __future__ import annotations
 
+import os
 import sqlite3
-import logging
 from typing import Optional
 
 import numpy as np
-
-logger = logging.getLogger(__name__)
 
 
 class EmbeddingCache:
@@ -34,34 +32,54 @@ class EmbeddingCache:
 
     def _ensure_conn(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(self._db_path)
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
-            self._conn.execute("""CREATE TABLE IF NOT EXISTS vecs(
-                hash       TEXT PRIMARY KEY,
-                blob       BLOB    NOT NULL,
-                model      TEXT    NOT NULL,
-                dim        INTEGER NOT NULL,
-                created_at TEXT    DEFAULT (datetime('now'))
-            )""")
-            self._conn.execute("""CREATE TABLE IF NOT EXISTS merge_cache(
-                side       TEXT    NOT NULL,
-                snap_i     INTEGER NOT NULL,
-                sub_key    TEXT    NOT NULL,
-                blob       BLOB    NOT NULL,
-                model      TEXT    NOT NULL,
-                dim        INTEGER NOT NULL,
-                created_at TEXT    DEFAULT (datetime('now')),
-                PRIMARY KEY (side, snap_i, sub_key)
-            )""")
-            self._conn.commit()
+            conn = sqlite3.connect(self._db_path)
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS vecs(
+                    hash       TEXT PRIMARY KEY,
+                    blob       BLOB    NOT NULL,
+                    model      TEXT    NOT NULL,
+                    dim        INTEGER NOT NULL,
+                    created_at TEXT    DEFAULT (datetime('now'))
+                )"""
+                )
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS merge_cache(
+                    side       TEXT    NOT NULL,
+                    snap_i     INTEGER NOT NULL,
+                    sub_key    TEXT    NOT NULL,
+                    blob       BLOB    NOT NULL,
+                    model      TEXT    NOT NULL,
+                    dim        INTEGER NOT NULL,
+                    created_at TEXT    DEFAULT (datetime('now')),
+                    PRIMARY KEY (side, snap_i, sub_key)
+                )"""
+                )
+                conn.commit()
+            except Exception:
+                try:
+                    conn.close()
+                finally:
+                    raise
+            self._conn = conn
         return self._conn
 
-    def close(self):
-        """显式关闭连接。"""
+    def close(self) -> None:
+        """显式关闭连接（释放 Windows 上的文件锁）。"""
         if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+            try:
+                self._conn.close()
+            finally:
+                self._conn = None
+
+    def __enter__(self) -> "EmbeddingCache":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
 
     # ═══════════════════════════════════════════════════════════
     # 行级嵌入：vecs 表
@@ -91,7 +109,7 @@ class EmbeddingCache:
             r[0]: np.frombuffer(r[1], dtype=np.float32).reshape((r[2],)) for r in rows
         }
 
-    def put_batch(self, items: list[tuple[str, np.ndarray, str]]):
+    def put_batch(self, items: list[tuple[str, np.ndarray, str]]) -> None:
         """批量写入（单事务）。"""
         conn = self._ensure_conn()
         rows = [(h, v.astype(np.float32).tobytes(), m, v.shape[0]) for h, v, m in items]
@@ -116,8 +134,6 @@ class EmbeddingCache:
     @property
     def size_bytes(self) -> int:
         """数据库文件大小（字节）。"""
-        import os
-
         if os.path.isfile(self._db_path):
             return os.path.getsize(self._db_path)
         return 0

@@ -21,9 +21,9 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Callable
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional
 
 from dualign.models.action import RepairAction
 from dualign.models.state import AlignmentSnapshot
@@ -101,7 +101,7 @@ class ChapterContext:
         return None
 
     @property
-    def reviewable_infos(self):
+    def reviewable_infos(self) -> List[SnapInfo]:
         """返回需要审校的 SnapInfo 列表。"""
         return [si for si in self.snap_infos if si.is_reviewable]
 
@@ -269,10 +269,10 @@ def _get_prompts_dir() -> str:
     )
 
 
-_tools_cache: tuple | None = None
+_tools_cache: tuple[list[dict], str] | None = None
 
 
-def _load_tools():
+def _load_tools() -> tuple[list[dict], str]:
     """从 tools.json 加载工具定义，返回 (TOOLS_OPENAI, TOOLS_TEXT_DESCRIPTION)。
 
     懒加载：首次调用时解析 prompts 目录。
@@ -311,7 +311,7 @@ def _load_tools():
     return result
 
 
-def _get_tools_openai():
+def _get_tools_openai() -> list[dict]:
     """懒加载 TOOLS_OPENAI。"""
     return _load_tools()[0]
 
@@ -479,7 +479,7 @@ class DeepSeekNativeBackend(LLMBackend):
             return result_box["value"]
         raise TimeoutError(f"DeepSeek API 调用超过 {self.request_timeout:.0f}s 未完成")
 
-    def chat(self, messages, thinking=True, tools=None):
+    def chat(self, messages, thinking=True, tools=None) -> LLMResponse:
         try:
             from openai import OpenAI
         except ImportError:
@@ -634,7 +634,7 @@ class ToolExecutor:
         self._model = model
         self._state = initial_state
         self._strategy = strategy
-        self.reviewed_ids: set = set()
+        self.reviewed_ids: set[int] = set()
         self.reviewed_actions: Dict[int, RepairAction] = {}
 
     def execute(self, tool_call: ToolCall) -> str:
@@ -664,14 +664,7 @@ class ToolExecutor:
             return json.dumps({"error": f"工具执行异常: {e}"}, ensure_ascii=False)
 
     @staticmethod
-    def _require(args: dict, key: str, tool: str, hint: str) -> object | None:
-        """安全取参：缺失时返回 None 并记录（由调用方返回引导消息）。"""
-        if key not in args or args[key] is None:
-            return None
-        return args[key]
-
-    @staticmethod
-    def _get_target(args: dict):
+    def _get_target(args: dict) -> object | None:
         """Read snap targeting param; fall back to legacy names."""
         v = args.get("target")
         if v is None:
@@ -696,10 +689,18 @@ class ToolExecutor:
             else f"**进度**: {done}/{total} ✅ 全部完成"
         )
 
-    def _record_review(self, snap_list: List[int], action: RepairAction):
+    def _record_review(self, snap_list: List[int], action: RepairAction) -> None:
         for si in snap_list:
             self.reviewed_ids.add(si)
             self.reviewed_actions[si] = action
+
+    def _replay_reviewed_actions(self):
+        """Apply reviewed actions to the initial state in insertion order."""
+        state = self._state
+        for action in self.reviewed_actions.values():
+            if action is not None:
+                state = state.apply(action)
+        return state
 
     def _handle_view(self, args: dict) -> str:
         tgt = self._get_target(args)
@@ -721,15 +722,12 @@ class ToolExecutor:
         ]
         return "\n".join(lines)
 
-    def _build_current_snap_infos(self):
+    def _build_current_snap_infos(self) -> List[SnapInfo]:
         """如果有 initial_state，通过重放已审校操作构建最新 SnapInfo 列表。"""
         if self._state is None:
             return self.ctx.snap_infos
-        s = self._state
-        for a in self.reviewed_actions.values():
-            if a is not None:
-                s = s.apply(a)
-        fresh_ctx = ChapterContext.from_repair_state(s)
+        state = self._replay_reviewed_actions()
+        fresh_ctx = ChapterContext.from_repair_state(state)
         return fresh_ctx.snap_infos
 
     def _get_current_snap_action(self, snap_id: int) -> Optional[RepairAction]:
@@ -740,12 +738,9 @@ class ToolExecutor:
         """
         if self._state is None:
             return None
-        s = self._state
-        for a in self.reviewed_actions.values():
-            if a is not None:
-                s = s.apply(a)
+        state = self._replay_reviewed_actions()
         META_KINDS = {"ok", "flag"}
-        for a in reversed(s._repair_log):
+        for a in reversed(state._repair_log):
             if a.op_index == snap_id and a.kind not in META_KINDS:
                 return a
         return None
@@ -993,7 +988,7 @@ class ToolExecutor:
 
 
 class MaxTurnsExceeded(Exception):
-    pass
+    """Raised when an agent exceeds its configured turn limit."""
 
 
 class AiRepairAgent:
@@ -1045,7 +1040,6 @@ class AiRepairAgent:
         )
         messages = self._build_initial_messages(ctx)
         turn_log: List[dict] = []
-        all_actions: List[RepairAction] = []
 
         def _emit(evt_type, **kw):
             if on_event:
@@ -1424,8 +1418,6 @@ def dump_agent_debug(
         elapsed: 耗时（秒）
         extra_info: 额外信息（如标准答案命中率），附加在文件头
     """
-    import json as _json
-
     lines: list[str] = []
 
     # ── 文件头统计 ──
@@ -1478,7 +1470,7 @@ def dump_agent_debug(
         for tc in resp.get("tool_calls", []):
             args_str = tc.get("arguments", "")
             if isinstance(args_str, dict):
-                args_str = _json.dumps(args_str, ensure_ascii=False)
+                args_str = json.dumps(args_str, ensure_ascii=False)
             name = tc.get("name", "?")
             lines.append(f"**Tool:** `{name}({args_str})`\n")
 
@@ -1504,7 +1496,9 @@ def dump_agent_debug(
         lines.append("（无操作）")
     lines.append("")
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    parent_dir = os.path.dirname(path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
@@ -1535,8 +1529,6 @@ def dump_agent_raw(
         "turn_log": [...]    // 包含完整的 request_messages + response + tool_results
     }
     """
-    import json as _json
-
     data = {
         "chapter_id": ctx.chapter_id,
         "strategy": getattr(ctx, "_strategy", ""),
@@ -1556,6 +1548,8 @@ def dump_agent_raw(
         "turn_log": turn_log,
     }
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    parent_dir = os.path.dirname(path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        _json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        json.dump(data, f, ensure_ascii=False, indent=2, default=str)

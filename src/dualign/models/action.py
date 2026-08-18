@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from dualign.models.marker import from_kind as _marker_from_kind
 
@@ -49,7 +49,7 @@ class RepairAction:
     data: Dict[str, Any] = field(default_factory=dict)
     timestamp: str = ""
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.kind not in _VALID_KINDS:
             raise ValueError(f"未知操作类型: {self.kind}")
         if not self.timestamp:
@@ -160,19 +160,19 @@ class AiProposal:
     resolved_at: str = ""
     summary: str = ""
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.created_at:
             self.created_at = time.strftime("%Y-%m-%dT%H:%M:%S")
 
-    def accept(self):
+    def accept(self) -> None:
         self.status = "accepted"
         self.resolved_at = time.strftime("%Y-%m-%dT%H:%M:%S")
 
-    def reject(self):
+    def reject(self) -> None:
         self.status = "rejected"
         self.resolved_at = time.strftime("%Y-%m-%dT%H:%M:%S")
 
-    def reset(self):
+    def reset(self) -> None:
         self.status = "pending"
         self.resolved_at = ""
 
@@ -209,18 +209,35 @@ class AiProposalStore:
 
     proposals: Dict[int, List[AiProposal]] = field(default_factory=dict)
 
-    def add(self, snap_i: int, action: RepairAction, summary: str = ""):
+    @staticmethod
+    def _find(
+        proposals: List[AiProposal], action: RepairAction
+    ) -> Optional[AiProposal]:
+        """Return the proposal matching an action's stable identity."""
+        for proposal in proposals:
+            if (
+                proposal.action.op_index == action.op_index
+                and proposal.action.kind == action.kind
+            ):
+                return proposal
+        return None
+
+    def add(self, snap_i: int, action: RepairAction, summary: str = "") -> None:
         """添加一条 AI 建议到指定 snap。"""
         existing = self.proposals.get(snap_i, [])
-        for p in existing:
-            if p.action.op_index == action.op_index and p.action.kind == action.kind:
-                if p.status == "accepted":
-                    return
-                if p.status == "pending":
-                    p.action = action
-                    p.summary = summary
-                    p.created_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-                    return
+        for proposal in existing:
+            if (
+                proposal.action.op_index != action.op_index
+                or proposal.action.kind != action.kind
+            ):
+                continue
+            if proposal.status == "accepted":
+                return
+            if proposal.status == "pending":
+                proposal.action = action
+                proposal.summary = summary
+                proposal.created_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+                return
         prop = AiProposal(action=action, summary=summary)
         self.proposals.setdefault(snap_i, []).append(prop)
 
@@ -236,35 +253,33 @@ class AiProposalStore:
         return result
 
     def accept(self, snap_i: int, action: RepairAction) -> bool:
-        for p in self.proposals.get(snap_i, []):
-            if p.action.op_index == action.op_index and p.action.kind == action.kind:
-                p.accept()
-                return True
-        return False
+        proposal = self._find(self.proposals.get(snap_i, []), action)
+        if proposal is None:
+            return False
+        proposal.accept()
+        return True
 
     def reject(self, snap_i: int, action: RepairAction) -> bool:
-        for p in self.proposals.get(snap_i, []):
-            if p.action.op_index == action.op_index and p.action.kind == action.kind:
-                p.reject()
-                return True
-        return False
+        proposal = self._find(self.proposals.get(snap_i, []), action)
+        if proposal is None:
+            return False
+        proposal.reject()
+        return True
 
     def restore(self, snap_i: int, action: RepairAction) -> bool:
-        for p in self.proposals.get(snap_i, []):
-            if p.action.op_index == action.op_index and p.action.kind == action.kind:
-                p.reset()
-                return True
-        return False
+        proposal = self._find(self.proposals.get(snap_i, []), action)
+        if proposal is None:
+            return False
+        proposal.reset()
+        return True
 
-    def reset(self, snap_i: int):
+    def reset(self, snap_i: int) -> None:
         for p in self.proposals.get(snap_i, []):
             p.reset()
 
     def get_status(self, snap_i: int, action: RepairAction) -> str | None:
-        for p in self.proposals.get(snap_i, []):
-            if p.action.op_index == action.op_index and p.action.kind == action.kind:
-                return p.status
-        return None
+        proposal = self._find(self.proposals.get(snap_i, []), action)
+        return proposal.status if proposal is not None else None
 
     def to_dict(self) -> dict:
         return {

@@ -12,7 +12,7 @@ Dualign 0.7.0 — BaseTextTable: 文本对表格基类
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import ClassVar, List, Optional, Set, Tuple
+from typing import Any, ClassVar, List, Optional, Set, Tuple
 import math
 
 from PySide6.QtCore import Qt, QPointF, QTimer, QSize
@@ -93,7 +93,6 @@ TEXT_CL_DELETED = QColor(_DARK_TEXT_DELETED)
 TEXT_CL_CONTEXT = QColor(_DARK_TEXT_CONTEXT)
 
 _SELECTED_BG = QColor(79, 195, 247, 50)
-_DIVIDER_COLOR = QColor("#B0B0B0")
 
 
 def refresh_theme_colors():
@@ -102,7 +101,7 @@ def refresh_theme_colors():
 
     global TYPE_CL_11, TYPE_CL_NON11, TYPE_CL_10_01
     global TEXT_CL_NORMAL, TEXT_CL_DELETED, TEXT_CL_CONTEXT
-    global _SELECTED_BG, _DIVIDER_COLOR
+    global _SELECTED_BG
     if _T.is_dark:
         TYPE_CL_11 = QColor(_DARK_TYPE_11)
         TYPE_CL_NON11 = QColor(_DARK_TYPE_NON11)
@@ -111,7 +110,6 @@ def refresh_theme_colors():
         TEXT_CL_DELETED = QColor(_DARK_TEXT_DELETED)
         TEXT_CL_CONTEXT = QColor(_DARK_TEXT_CONTEXT)
         _SELECTED_BG = QColor(79, 195, 247, 50)
-        _DIVIDER_COLOR = QColor("#B0B0B0")
     else:
         TYPE_CL_11 = QColor(_LIGHT_TYPE_11)
         TYPE_CL_NON11 = QColor(_LIGHT_TYPE_NON11)
@@ -120,7 +118,6 @@ def refresh_theme_colors():
         TEXT_CL_DELETED = QColor(_LIGHT_TEXT_DELETED)
         TEXT_CL_CONTEXT = QColor(_LIGHT_TEXT_CONTEXT)
         _SELECTED_BG = QColor(0, 122, 204, 40)
-        _DIVIDER_COLOR = QColor("#8C8C8C")
 
 
 def type_cl(init_type: str) -> QColor:
@@ -177,8 +174,8 @@ def compute_text_colors(
     snap_index: int,
     marker: str,
     atypes: set,
-    action: any,
-    snapshot: any,
+    action: Any,
+    snapshot: Any,
 ) -> tuple[bool, bool]:
     """判断该 Snap 的 src/tgt 侧是否有变化，供文本列着色使用。"""
     if action is None:
@@ -186,7 +183,7 @@ def compute_text_colors(
 
     src_changed = False
     tgt_changed = False
-    s_idx, t_idx, _sc = snapshot.original_ops[snap_index]
+    s_idx, t_idx, _ = snapshot.original_ops[snap_index]
 
     if action.kind == "edit":
         d = action.data
@@ -199,13 +196,11 @@ def compute_text_colors(
             src_changed = new_src != orig_src
         if new_tgt is not None:
             tgt_changed = new_tgt != orig_tgt
-        if not src_changed and not tgt_changed:
-            pass
-        elif edit_side == "src" and src_changed:
+        if edit_side == "src" and src_changed:
             tgt_changed = False
         elif edit_side == "tgt" and tgt_changed:
             src_changed = False
-    elif action.kind in ("merge",):
+    elif action.kind == "merge":
         src_changed = True
         tgt_changed = True
     elif action.kind == "split":
@@ -225,14 +220,14 @@ def compute_text_colors(
 
 def has_snap_text_changed(
     snap_index: int,
-    action: any,
-    snapshot: any,
+    action: Any,
+    snapshot: Any,
 ) -> tuple[bool, bool]:
     """判断该 Snap 的文本内容是否与初始对齐输出不同（用于星标）。"""
     if action is None:
         return False, False
 
-    s_idx, t_idx, _sc = snapshot.original_ops[snap_index]
+    s_idx, t_idx, _ = snapshot.original_ops[snap_index]
 
     if action.kind == "edit":
         d = action.data
@@ -264,8 +259,6 @@ def has_snap_text_changed(
         tgt_ch = (new_tgt is not None) and (new_tgt != orig_tgt)
         return src_ch, tgt_ch
 
-    if action.kind == "merge":
-        return False, False
     return False, False
 
 

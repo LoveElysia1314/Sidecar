@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from typing import List, Optional, TYPE_CHECKING
 
-from PySide6.QtCore import Qt, Signal, QTimer, QUrl
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -30,9 +30,6 @@ from dualign.models.action import AiProposalStore
 from dualign.gui.preview_table import AiSuggestionItem
 from dualign.gui.preview_table import SuggestionPreviewTable
 from dualign.gui.filter import FilterPanel
-
-# ── 禁用按钮文字色（从 Fusion 主题 palette 动态获取，共享自 theme）──
-_DISABLED_FG: str | None = None
 
 
 def _disabled_fg() -> str:
@@ -56,8 +53,6 @@ if TYPE_CHECKING:
 # ═══════════════════════════════════════════════════════════════
 # AgentRunThread — 后台运行 AiRepairAgent
 # ═══════════════════════════════════════════════════════════════
-
-from PySide6.QtCore import QThread
 
 
 class AgentRunThread(QThread):

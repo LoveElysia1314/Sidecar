@@ -1,8 +1,14 @@
 """Dualign — 数据模型（统一公共 API 面）"""
 
-from dualign.models.state import AlignmentSnapshot, OpT, MISSING
+from dualign.models.state import (
+    AlignmentSnapshot,
+    AlignedRow,
+    ChapterState,
+    MISSING,
+    OpT,
+    SnapGroup,
+)
 from dualign.models.action import RepairAction, AiProposal, AiProposalStore
-from dualign.models.state import AlignedRow, SnapGroup, ChapterState
 from dualign.models.snap_state import (
     SnapState,
     SnapInfo,

@@ -13,12 +13,12 @@ Dualign — ChapterState: 重放后的章节状态
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple, Optional, List
+from typing import List, Optional, Tuple
 
 from dualign.models.marker import (
+    is_merge,
     is_resolved_to_11,
     needs_zero_score,
-    is_merge,
 )
 from dualign.core import op_type_str
 

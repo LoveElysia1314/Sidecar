@@ -13,9 +13,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 
-from dualign.config import (
-    _ui_session_cache_path,
-)
+from dualign.config import _ui_session_cache_path
 
 # ═══════════════════════════════════════════════════════════════
 # 哈希与缓存工具
@@ -355,8 +353,6 @@ def refresh_repaired_from_report(
             f.write(format_markdown_output(tgt_out))
 
         # 写入 AI 审校完成状态
-        from dualign.common import set_ai_review
-
         set_ai_review(report_path, "completed", "")
     except Exception:
         pass

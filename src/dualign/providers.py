@@ -10,11 +10,11 @@ ProviderManager（单例）管理所有嵌入模型提供方，支持：
 
 from __future__ import annotations
 
+import base64
 import json
 import os
-import base64
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import ClassVar, List, Optional, Tuple
 
 from dualign.config import APP_DATA_DIR, INSTRUCTION_TEXT
 
@@ -47,10 +47,10 @@ class ProviderConfig:
     # ── forward-compat：保留 from_dict 时未知的键 ──
     # 用户手动编辑 providers.json 添加 GUI 不支持的字段时，
     # 这些字段在 GUI 保存周期中不会丢失。
-    _extra: dict = field(default_factory=dict, repr=False)
+    _extra: dict[str, object] = field(default_factory=dict, repr=False)
 
     # ── 已知字段白名单（to_dict / from_dict 使用）──
-    _KNOWN_KEYS = frozenset(
+    _KNOWN_KEYS: ClassVar[frozenset[str]] = frozenset(
         {
             "provider_id",
             "label",
@@ -70,11 +70,11 @@ class ProviderConfig:
             return ""
         return ProviderManager.decrypt_key(self.api_key)
 
-    def set_key_plain(self, plaintext: str):
+    def set_key_plain(self, plaintext: str) -> None:
         """加密并存储 API Key。"""
         self.api_key = ProviderManager.encrypt_key(plaintext) if plaintext else ""
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         result = {
             "provider_id": self.provider_id,
             "label": self.label,
@@ -132,10 +132,10 @@ class AiRepairAgentConfig:
             return os.environ.get("DEEPSEEK_API_KEY", "")
         return ProviderManager.decrypt_key(self.api_key)
 
-    def set_key_plain(self, plaintext: str):
+    def set_key_plain(self, plaintext: str) -> None:
         self.api_key = ProviderManager.encrypt_key(plaintext) if plaintext else ""
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return {
             "agent_id": self.agent_id,
             "label": self.label,
@@ -272,7 +272,7 @@ def load_repair_agents() -> List[AiRepairAgentConfig]:
     return _repair_agents
 
 
-def save_repair_agents():
+def save_repair_agents() -> None:
     if _repair_agents is None:
         return
     os.makedirs(APP_DATA_DIR, exist_ok=True)
@@ -290,7 +290,7 @@ def active_repair_agent() -> Optional[AiRepairAgentConfig]:
     return None
 
 
-def set_active_repair_agent(agent_id: str):
+def set_active_repair_agent(agent_id: str) -> None:
     agents = load_repair_agents()
     for a in agents:
         a.is_active = a.agent_id == agent_id
@@ -324,17 +324,20 @@ def _get_or_create_key() -> bytes:
                 k = f.read()
                 if len(k) == 32:
                     return k
-        except (OSError, PermissionError):
+        except OSError:
             pass
     # 生成新密钥
     key = os.urandom(32)
     os.makedirs(os.path.dirname(KEYFILE_PATH), exist_ok=True)
     try:
         with open(KEYFILE_PATH, "wb") as f:
-            os.chmod(KEYFILE_PATH, 0o600)
             f.write(key)
-    except (OSError, PermissionError):
-        # Windows: chmod 可能不支持，仍尝试写入
+        try:
+            os.chmod(KEYFILE_PATH, 0o600)
+        except OSError:
+            # Windows: chmod 可能不支持；密钥已经成功写入。
+            pass
+    except OSError:
         pass
     return key
 
@@ -389,7 +392,7 @@ class ProviderManager:
         return cls._providers
 
     @classmethod
-    def save(cls):
+    def save(cls) -> None:
         """加密 Key 后写入 providers.json。"""
         os.makedirs(APP_DATA_DIR, exist_ok=True)
         with open(PROVIDERS_PATH, "w", encoding="utf-8") as f:
@@ -398,7 +401,7 @@ class ProviderManager:
             )
 
     @classmethod
-    def reset_to_defaults(cls):
+    def reset_to_defaults(cls) -> None:
         """重置所有提供方配置到默认值并保存。"""
         import copy
 
@@ -414,7 +417,7 @@ class ProviderManager:
         return None
 
     @classmethod
-    def set_active(cls, provider_id: str):
+    def set_active(cls, provider_id: str) -> None:
         """切换活跃提供方。"""
         for p in cls._providers:
             p.is_active = p.provider_id == provider_id

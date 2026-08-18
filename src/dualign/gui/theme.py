@@ -161,7 +161,7 @@ class ThemeManager(QObject):
 
     theme_changed = Signal(str)  # "dark" | "light"
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._data: ThemeData = DARK
 
@@ -268,15 +268,15 @@ class ThemeManager(QObject):
 
     # ── 切换 ──
 
-    def set_dark(self):
+    def set_dark(self) -> None:
         self._data = DARK
         self.theme_changed.emit("dark")
 
-    def set_light(self):
+    def set_light(self) -> None:
         self._data = LIGHT
         self.theme_changed.emit("light")
 
-    def apply_to_app(self, app):
+    def apply_to_app(self, app) -> None:
         """设置调色板并跟随系统切换。"""
         hints = app.styleHints()
         self._apply_scheme(hints.colorScheme())
@@ -285,13 +285,13 @@ class ThemeManager(QObject):
         except Exception:
             pass
 
-    def _on_scheme_changed(self):
+    def _on_scheme_changed(self) -> None:
         from PySide6.QtWidgets import QApplication
 
         hints = QApplication.styleHints()
         self._apply_scheme(hints.colorScheme())
 
-    def _apply_scheme(self, scheme):
+    def _apply_scheme(self, scheme) -> None:
         from PySide6.QtWidgets import QApplication
 
         is_dark = scheme == Qt.ColorScheme.Dark

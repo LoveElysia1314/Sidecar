@@ -49,6 +49,16 @@ _ZERO_SCORE_TAGS = frozenset({"[D]", "[P]"})
 # ── 有效操作标记集合 ──
 _VALID_TAGS = frozenset(KIND_MAP.values())
 
+_DISPLAY_MAP = {
+    "[M]": "合并",
+    "[S]": "拆分",
+    "[E]": "校订",
+    "[D]": "删除",
+    "[P]": "占位",
+    "[F]": "异常",
+    "[OK]": "通过",
+}
+
 # 来源前缀
 AI_PREFIX = "[AI]"
 
@@ -175,20 +185,11 @@ def get_display_text(marker: str) -> str:
     if not marker:
         return ""
     tags = get_tags(marker)
-    display_map = {
-        "[M]": "合并",
-        "[S]": "拆分",
-        "[E]": "校订",
-        "[D]": "删除",
-        "[P]": "占位",
-        "[F]": "异常",
-        "[OK]": "通过",
-    }
     parts = []
     if AI_PREFIX in marker:
         parts.append("AI")
     for t in tags:
-        parts.append(display_map.get(t, t))
+        parts.append(_DISPLAY_MAP.get(t, t))
     return " ".join(parts)
 
 

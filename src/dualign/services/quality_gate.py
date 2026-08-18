@@ -12,7 +12,6 @@ G3 → n_overflow_rows > 0 → 合并编码触顶
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -56,7 +55,7 @@ def assess_alignment_quality(
     n_tgt: int,
     gap_row_ratio: float,
     n_overflow_rows: int = 0,
-    config: Optional[QualityGateConfig] = None,
+    config: QualityGateConfig | None = None,
 ) -> dict:
     """G1/G2/G3 质量门控。
 

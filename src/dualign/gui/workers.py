@@ -10,8 +10,8 @@ from __future__ import annotations
 import os
 import sys
 import time
-import logging
 import threading
+import traceback
 
 import numpy as np
 from PySide6.QtCore import QThread, Signal
@@ -35,7 +35,15 @@ from dualign.services.embedding import (
 from dualign.services.cached_encoder import CachedEncoder
 from dualign.services.embedding_cache import EmbeddingCache
 
-logger = logging.getLogger(__name__)
+
+def _format_worker_exception(worker_name: str) -> str:
+    """Format and print the active worker exception consistently."""
+    tb_str = traceback.format_exc()
+    print(f"\n{'='*60}", file=sys.stderr)
+    print(f"[{worker_name}] 未捕获异常:", file=sys.stderr)
+    print(tb_str, file=sys.stderr)
+    print(f"{'='*60}\n", file=sys.stderr)
+    return tb_str
 
 
 # ── 编码线程 ────────────────────────────────────────────────
@@ -79,13 +87,7 @@ class EncodeThread(QThread):
         try:
             self._run_impl()
         except Exception as e:
-            import traceback as _tb
-
-            tb_str = _tb.format_exc()
-            print(f"\n{'='*60}", file=sys.stderr)
-            print("[EncodeThread] 未捕获异常:", file=sys.stderr)
-            print(tb_str, file=sys.stderr)
-            print(f"{'='*60}\n", file=sys.stderr)
+            tb_str = _format_worker_exception("EncodeThread")
             self.error_signal.emit(f"编码失败: {e}", tb_str)
 
     def _run_impl(self):
@@ -120,20 +122,23 @@ class EncodeThread(QThread):
         cache_dir = get_embedding_cache_dir(self.entry_id)
         db_path = os.path.join(cache_dir, "vecs.db")
         cache = EmbeddingCache(db_path)
-        cenc = CachedEncoder(model, cache)
+        try:
+            cenc = CachedEncoder(model, cache)
 
-        # ── 缓存优先编码（内部自动查缓存 / 编码 / 回存）──
-        src_emb = cenc.encode(src_lines)
-        if self._stop_event.is_set():
-            return
-        tgt_emb = cenc.encode(tgt_lines)
+            # ── 缓存优先编码（内部自动查缓存 / 编码 / 回存）──
+            src_emb = cenc.encode(src_lines)
+            if self._stop_event.is_set():
+                return
+            tgt_emb = cenc.encode(tgt_lines)
 
-        self.time_s = time.time() - t0
-        self.status_signal.emit(
-            f"✓ 嵌入编码完成 — {self.time_s:.1f}s "
-            f"({len(src_lines)}×{len(tgt_lines)} 行, "
-            f"缓存命中率 {cenc.cache_hit_rate:.0%})"
-        )
+            self.time_s = time.time() - t0
+            self.status_signal.emit(
+                f"✓ 嵌入编码完成 — {self.time_s:.1f}s "
+                f"({len(src_lines)}×{len(tgt_lines)} 行, "
+                f"缓存命中率 {cenc.cache_hit_rate:.0%})"
+            )
+        finally:
+            cache.close()
         self.finished_signal.emit(
             src_emb,
             tgt_emb,
@@ -185,13 +190,7 @@ class AlignWorker(QThread):
         try:
             self._run_impl()
         except Exception as e:
-            import traceback as _tb
-
-            tb_str = _tb.format_exc()
-            print(f"\n{'='*60}", file=sys.stderr)
-            print("[AlignWorker] 未捕获异常:", file=sys.stderr)
-            print(tb_str, file=sys.stderr)
-            print(f"{'='*60}\n", file=sys.stderr)
+            tb_str = _format_worker_exception("AlignWorker")
             self.status_signal.emit(f"对齐异常: {e}")
             self.error_signal.emit(f"对齐失败: {e}", tb_str)
 
@@ -203,10 +202,12 @@ class AlignWorker(QThread):
 
         # ── CachedEncoder: 合并文本编码也走缓存 ──
         encode_fn = self.encode_fn
+        _cache_to_close = None
         if self.entry_id and encode_fn:
             cache_dir = get_embedding_cache_dir(self.entry_id)
             db_path = os.path.join(cache_dir, "vecs.db")
             cache = EmbeddingCache(db_path)
+            _cache_to_close = cache
             # 从 encode_fn 反查 model 引用（window_actions 传入的是 model.encode）
             from dualign.services.embedding import _try_lazy_load_model
 
@@ -215,14 +216,18 @@ class AlignWorker(QThread):
                 cenc = CachedEncoder(model, cache)
                 encode_fn = cenc.encode
 
-        result = align(
-            self.src_lines,
-            self.tgt_lines,
-            self.src_emb,
-            self.tgt_emb,
-            self.config,
-            encode_fn=encode_fn,
-        )
+        try:
+            result = align(
+                self.src_lines,
+                self.tgt_lines,
+                self.src_emb,
+                self.tgt_emb,
+                self.config,
+                encode_fn=encode_fn,
+            )
+        finally:
+            if _cache_to_close is not None:
+                _cache_to_close.close()
         self.progress_signal.emit(100)
         s = result.stats
         self.status_signal.emit(
@@ -263,23 +268,31 @@ class AutoRepairWorker(QThread):
 
         self.status_signal.emit("一键修复中…")
         try:
-            before = len(self._state._repair_log)
-            result = RepairService.auto_repair(
-                self._state, self._strategy, model=self._model, cache=self._cache
-            )
-            for act in result._repair_log[before:]:
-                act.data["approvals"] = {"auto"}
-            self.finished_signal.emit(result)
+            try:
+                before = len(self._state._repair_log)
+                result = RepairService.auto_repair(
+                    self._state, self._strategy, model=self._model, cache=self._cache
+                )
+                for act in result._repair_log[before:]:
+                    act.data["approvals"] = {"auto"}
+                self.finished_signal.emit(result)
+            finally:
+                # 无论成败都释放嵌入缓存连接（避免 Windows 文件锁泄漏）
+                self._close_cache()
         except Exception as e:
-            import traceback as _tb
-
-            tb_str = _tb.format_exc()
-            print(f"\n{'='*60}", file=sys.stderr)
-            print("[AutoRepairWorker] 未捕获异常:", file=sys.stderr)
-            print(tb_str, file=sys.stderr)
-            print(f"{'='*60}\n", file=sys.stderr)
+            tb_str = _format_worker_exception("AutoRepairWorker")
             self.status_signal.emit(f"修复异常: {e}")
             self.error_signal.emit(f"自动修复失败: {e}", tb_str)
+
+    def _close_cache(self):
+        """释放传入的嵌入缓存连接（若无则 no-op）。"""
+        cache = getattr(self, "_cache", None)
+        if cache is not None:
+            try:
+                cache.close()
+            except Exception:
+                pass
+            self._cache = None
 
 
 # ── 环境检测线程 ────────────────────────────────────────────
@@ -313,9 +326,7 @@ class EnvCheckThread(QThread):
                 result["embed_model"] = ""
                 result["models_available"] = []
         except Exception as e:
-            import traceback as _tb
-
-            _tb.print_exc()
+            traceback.print_exc()
             result["embed_ok"] = False
             result["embed_detail"] = f"检测失败: {e}"
             result["embed_provider"] = ""
@@ -336,9 +347,7 @@ class EnvCheckThread(QThread):
                 result["ai_ok"] = False
                 result["ai_detail"] = "未配置（可选）"
         except Exception:
-            import traceback as _tb
-
-            _tb.print_exc()
+            traceback.print_exc()
             result["ai_ok"] = False
             result["ai_detail"] = "检测失败"
 

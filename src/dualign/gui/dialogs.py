@@ -33,6 +33,10 @@ from PySide6.QtWidgets import (
     QComboBox,
 )
 
+_DEFAULT_EMBEDDING_INSTRUCTION = (
+    "Instruct: Identify parallel sentences across languages\nQuery: "
+)
+
 # ═══════════════════════════════════════════════════════════════
 # ConfigDialog — 对齐参数设置
 # ═══════════════════════════════════════════════════════════════
@@ -367,15 +371,11 @@ class AgentConfigDialog(QDialog):
         self._embed_instruction_edit.setEnabled(checked)
         if checked and not self._embed_instruction_edit.text().strip():
             # 用户刚打开开关但文本框为空 → 自动填入默认值
-            self._embed_instruction_edit.setText(
-                "Instruct: Identify parallel sentences across languages\nQuery: "
-            )
+            self._embed_instruction_edit.setText(_DEFAULT_EMBEDDING_INSTRUCTION)
 
     def _on_reset_instruction(self):
         """恢复 Instruction 文本为内置默认值。"""
-        self._embed_instruction_edit.setText(
-            "Instruct: Identify parallel sentences across languages\nQuery: "
-        )
+        self._embed_instruction_edit.setText(_DEFAULT_EMBEDDING_INSTRUCTION)
         self._embed_instr_enabled_cb.setChecked(True)
 
     def _on_test_embedding(self):

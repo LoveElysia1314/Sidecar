@@ -30,12 +30,9 @@ class PunctuationHandler:
         if 0 < pos < len(text) - 1:
             left = text[pos - 1]
             right = text[pos + 1]
-            try:
-                left_ok = left.isascii() and (left.isalpha() or left.isdigit())
-                right_ok = right.isascii() and (right.isalpha() or right.isdigit())
-                return left_ok and right_ok
-            except (UnicodeDecodeError, AttributeError):
-                return False
+            left_ok = left.isascii() and (left.isalpha() or left.isdigit())
+            right_ok = right.isascii() and (right.isalpha() or right.isdigit())
+            return left_ok and right_ok
         return False
 
     @staticmethod
@@ -55,7 +52,7 @@ class PunctuationHandler:
     @staticmethod
     def count_punctuation_line(line: str) -> int:
         """统计一行的标点符号数量（去重连续相同标点）"""
-        puncts = []
+        count = 0
         prev_end = -1
         prev_punct = None
         for m in PunctuationHandler.ALL_PUNCT_PATTERN.finditer(line):
@@ -64,10 +61,38 @@ class PunctuationHandler:
             if PunctuationHandler.is_between_ascii_letters(line, start):
                 continue
             if start != prev_end or punct != prev_punct:
-                puncts.append(punct)
+                count += 1
             prev_end = end
             prev_punct = punct
-        return len(puncts)
+        return count
+
+
+def _scan_quote_pairs(
+    text: str,
+    quote_pairs: dict[str, str],
+    openers: set[str],
+    closers: set[str],
+) -> List[Tuple[int, int]]:
+    """Scan text once and return matched quote boundaries."""
+    pairs = []
+    stack = []
+    for index, char in enumerate(text):
+        if PunctuationHandler.is_between_ascii_letters(text, index):
+            continue
+        if char in openers and char in closers and quote_pairs.get(char) == char:
+            if stack and stack[-1][0] == char:
+                _, start = stack.pop()
+                pairs.append((start, index))
+            else:
+                stack.append((char, index))
+        elif char in openers:
+            stack.append((char, index))
+        elif char in closers and stack:
+            last_opener, start = stack[-1]
+            if char == quote_pairs[last_opener]:
+                pairs.append((start, index))
+                stack.pop()
+    return pairs
 
 
 # ══════════════════════════════════════════════
@@ -126,103 +151,17 @@ class UniversalSplitter:
     @classmethod
     def _build_quote_context(cls, text: str) -> List[bool]:
         """构建引号上下文数组。in_quoted[i] = True 表示位置 i 处于某个引号对内部。"""
-        n = len(text)
-        in_quoted = [False] * n
-        stack = []
-        i = 0
-        while i < n:
-            char = text[i]
-            try:
-                if PunctuationHandler.is_between_ascii_letters(text, i):
-                    i += 1
-                    continue
-            except (IndexError, AttributeError):
-                pass
-            if (
-                char in cls.OPENERS
-                and char in cls.CLOSERS
-                and cls.PAIRS.get(char) == char
-            ):
-                if stack and stack[-1][0] == char:
-                    _, start = stack.pop()
-                    for j in range(start + 1, i):
-                        if j < n:
-                            in_quoted[j] = True
-                else:
-                    stack.append((char, i))
-            elif char in cls.OPENERS:
-                stack.append((char, i))
-            elif char in cls.CLOSERS:
-                if stack:
-                    last_opener, start = stack[-1]
-                    expected_closer = cls.PAIRS[last_opener]
-                    if char == expected_closer:
-                        for j in range(start + 1, i):
-                            if j < n:
-                                in_quoted[j] = True
-                        stack.pop()
-            i += 1
+        in_quoted = [False] * len(text)
+        for start, close in _scan_quote_pairs(
+            text, cls.PAIRS, cls.OPENERS, cls.CLOSERS
+        ):
+            in_quoted[start + 1 : close] = [True] * (close - start - 1)
         return in_quoted
 
     @classmethod
     def _find_quote_pairs(cls, text: str) -> List[Tuple[int, int]]:
         """找到所有引号对 (start, close) 位置"""
-        n = len(text)
-        pairs = []
-        stack = []
-        i = 0
-        while i < n:
-            char = text[i]
-            try:
-                if PunctuationHandler.is_between_ascii_letters(text, i):
-                    i += 1
-                    continue
-            except (IndexError, AttributeError):
-                pass
-            if (
-                char in cls.OPENERS
-                and char in cls.CLOSERS
-                and cls.PAIRS.get(char) == char
-            ):
-                if stack and stack[-1][0] == char:
-                    _, start = stack.pop()
-                    pairs.append((start, i))
-                else:
-                    stack.append((char, i))
-            elif char in cls.OPENERS:
-                stack.append((char, i))
-            elif char in cls.CLOSERS:
-                if stack:
-                    last_opener, start = stack[-1]
-                    if char == cls.PAIRS[last_opener]:
-                        pairs.append((start, i))
-                        stack.pop()
-            i += 1
-        return pairs
-
-    @classmethod
-    def _find_unclosed_openers(cls, text: str) -> set:
-        """找到未闭合的开放引号位置"""
-        n = len(text)
-        stack = []
-        i = 0
-        while i < n:
-            char = text[i]
-            try:
-                if PunctuationHandler.is_between_ascii_letters(text, i):
-                    i += 1
-                    continue
-            except (IndexError, AttributeError):
-                pass
-            if char in cls.OPENERS:
-                stack.append((char, i))
-            elif char in cls.CLOSERS:
-                if stack:
-                    last_opener, _ = stack[-1]
-                    if char == cls.PAIRS[last_opener]:
-                        stack.pop()
-            i += 1
-        return {pos for _, pos in stack}
+        return _scan_quote_pairs(text, cls.PAIRS, cls.OPENERS, cls.CLOSERS)
 
     @classmethod
     def _analyze_quote_pair_split_point(
@@ -241,9 +180,6 @@ class UniversalSplitter:
             char_before = text[pos_before_close]
             if re.match(r"[.!?。！？]", char_before):
                 return (True, "hard")
-            if char_before == "." and pos_before_close >= 2:
-                if cls._is_part_of_ellipsis(text, pos_before_close):
-                    return (True, "hard")
         pos_before_open = start_pos - 1
         while pos_before_open >= 0 and text[pos_before_open].isspace():
             pos_before_open -= 1
@@ -251,9 +187,6 @@ class UniversalSplitter:
             char_before = text[pos_before_open]
             if re.match(r"[.!?。！？]", char_before):
                 return (True, "hard")
-            if char_before == "." and pos_before_open >= 2:
-                if cls._is_part_of_ellipsis(text, pos_before_open):
-                    return (True, "hard")
             return (True, "soft")
         return (True, "soft")
 
@@ -302,7 +235,6 @@ class UniversalSplitter:
         if not text:
             return []
         in_quoted = cls._build_quote_context(text)
-        unclosed = cls._find_unclosed_openers(text)
         points = []
 
         for match in re.finditer(cls.SOFT_SPLIT_PATTERN, text):
@@ -313,14 +245,14 @@ class UniversalSplitter:
                 continue
             if in_quoted[i]:
                 continue
-            if i in unclosed:
-                continue
             if i - 1 < 0 or i + 1 >= len(text):
                 continue
-            if char in {",", "\uff0c"}:
-                if i > 0 and i + 1 < len(text):
-                    if text[i - 1].isdigit() and text[i + 1].isdigit():
-                        continue
+            if (
+                char in {",", "\uff0c"}
+                and text[i - 1].isdigit()
+                and text[i + 1].isdigit()
+            ):
+                continue
             if 0 < pos < len(text):
                 points.append(pos)
 
