@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 
 # 窗口与布局
 KEY_STRATEGY = "strategy"
+KEY_AUTO_NEXT_CHAPTER = "auto_next_chapter"
 
 # 筛选
 KEY_SHOW_ALL = "show_all"
@@ -46,6 +47,7 @@ ALL_APPROVAL_STATES = [
 
 # 质量门控
 KEY_QUALITY_GATE = "quality_gate"
+KEY_SOLIDIFY_TYPES = "solidify_types"
 
 # ═══════════════════════════════════════════════════════════════
 # DualignConfig — 配置管理单例
@@ -141,6 +143,10 @@ class DualignConfig:
             KEY_APPROVAL_STATES: list(ALL_APPROVAL_STATES),
             # 修复策略
             KEY_STRATEGY: 1,
+            KEY_AUTO_NEXT_CHAPTER: False,
+            # 固化修改：出厂默认仅校订（双侧）+ 译文拆分；
+            # 原文合并/拆分/删除等破坏性效果需用户显式启用
+            KEY_SOLIDIFY_TYPES: ["edit_a", "edit_b", "split_b"],
             # 质量门控
             KEY_QUALITY_GATE: {
                 "anchor_density_min": 0.60,

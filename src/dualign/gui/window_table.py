@@ -52,13 +52,13 @@ import dualign.gui.base_table as _color_table  # 主题感知颜色，通过模�
 # ═══════════════════════════════════════════════════════════════
 
 COLUMN_HEADERS = [
-    "Snap",
+    "关系",
     "初始类型",
     "初始评分",
     "当前状态",
     "当前评分",
-    "原文",
-    "译文",
+    "文档 A",
+    "文档 B",
 ]
 
 
@@ -126,6 +126,30 @@ class WindowTableMixin:
                     item, QAbstractItemView.ScrollHint.PositionAtCenter
                 )
                 break
+
+    def _initial_focus_target(self) -> Optional[int]:
+        """返回新章节应聚焦的文本对。"""
+        if self._anomalies:
+            snaps = self._anomalies[0].get(
+                "snap_indices", [self._anomalies[0].get("snap_index")]
+            )
+            return next((snap for snap in snaps if snap is not None), None)
+        if (
+            not getattr(self, "_all_anomaly_snaps", set())
+            and self._filter_panel.show_all
+            and self._row_op_map
+        ):
+            return self._row_op_map[min(self._row_op_map)]
+        return None
+
+    def _focus_initial_text_pair(self):
+        """新章节载入后建立明确的初始焦点。"""
+        snap_i = self._initial_focus_target()
+        if snap_i is None:
+            return
+        if self._anomalies:
+            self._review.go(0, scroll_to=False)
+        self._on_go_to_row(snap_i)
 
     def _on_row_clicked(self, item):
         """itemClicked → 同步所有焦点组件。委托给 FocusManager。
@@ -444,7 +468,7 @@ class WindowTableMixin:
         if len(selected_snaps) > 1:
             menu.addSeparator()
             a = menu.addAction(f"⤓ 合并选中 ({len(selected_snaps)} → 1) [M]")
-            a.setToolTip("将多个 snap 捆绑合并为一个文本对，原文和译文均合并")
+            a.setToolTip("旧格式操作：将多个关系合并为一个等行文本对")
             a.triggered.connect(lambda: self.do_bundle_snaps(selected_snaps))
 
         menu.addSeparator()
@@ -459,8 +483,9 @@ class WindowTableMixin:
         a = menu.addAction("审核通过")
         a.setEnabled(ops.get("ok", False))
         a.triggered.connect(lambda: self.do_ok(snap_i))
-        a = menu.addAction("标记异常")
-        a.triggered.connect(lambda: self.do_flag(snap_i))
+        flag_label = "编辑标记…" if len(selected_snaps) == 1 else "批量编辑标记…"
+        a = menu.addAction(flag_label)
+        a.triggered.connect(lambda: self.do_flag_selected(selected_snaps))
         if len(selected_snaps) > 1:
             a = menu.addAction(f"✕ 删除选中 ({len(selected_snaps)} 组)")
             a.triggered.connect(lambda: self._delete_selected_snaps(selected_snaps))
@@ -521,7 +546,7 @@ class WindowTableMixin:
         if fmt == "markdown":
             # ── 统一单张 Markdown 表格 ──
             md_lines: List[str] = []
-            md_lines.append("| Snap | 类型 | 标记 | 原文 | 译文 |")
+            md_lines.append("| 关系 | 类型 | 标记 | 文档 A | 文档 B |")
             md_lines.append("|---|---|---|---|---|")
             for si in snaps:
                 if si >= len(snap.original_ops):
@@ -609,11 +634,23 @@ class WindowTableMixin:
             return
         self._score_mgr.set_text_provider(self._get_subrow_text_for_score)
         for g in self._repair_state.current.groups:
+            action = self._repair_state.action_for_op(g.snap_i)
+            split_scores = (
+                action.data.get("split_scores", [])
+                if action is not None and action.kind == "split"
+                else []
+            )
             for r in g.rows:
                 key = f"{g.snap_i}_{r.sub}"
-                score = getattr(self, "_score_cache", {}).get(key)
+                score = (
+                    split_scores[r.sub]
+                    if r.sub < len(split_scores)
+                    else getattr(self, "_score_cache", {}).get(key)
+                )
                 if score is not None:
+                    score = float(score)
                     self._score_mgr.set_ready_score(g.snap_i, r.sub, score)
+                    self._score_cache[key] = score
                 else:
                     # 无持久化分数→留 pending，_poll 异步重算
                     self._score_mgr.set_ready_score(g.snap_i, r.sub, r.score)
@@ -769,6 +806,7 @@ class WindowTableMixin:
             st = snap_states[si]
             r0 = g.rows[0]
             action = state.action_for_op(si)
+            flag_action = state.flag_for_op(si) if st.is_flagged else None
 
             # ── 异常匹配（同组 OR）──
             # 按检测依据模式选择 anomaly 来源：
@@ -820,6 +858,7 @@ class WindowTableMixin:
                     "score": r0.score,
                     "marker": r0.marker,
                     "resolution": resolution,
+                    "note": (flag_action.data.get("note", "") if flag_action else ""),
                     "approval": st.approval,
                     "signals": st.signals,
                     "anomaly_types": st.initial_anomaly_types,
@@ -846,7 +885,6 @@ class WindowTableMixin:
         is_unreliable = qa and qa.get("quality") == "unreliable"
         if is_unreliable and not self._preview_active:
             self._on_view_mode_toggled(True)
-            # 视图模式开关也会相应更新（由 toggled 信号链触发）
 
         # 切换预览/普通模式 — 由 StatusBar 视图模式切换触发
         preview = self._preview_active
@@ -1400,6 +1438,16 @@ class WindowTableMixin:
 
             # ── 变化标记：该 snap 文本内容与初始对齐输出不同时，所有行均标星 ──
             si = row.snap_index
+            flag_action = (
+                self._repair_state.flag_for_op(si)
+                if self._repair_state is not None
+                else None
+            )
+            flag_note = flag_action.data.get("note", "") if flag_action else ""
+            if flag_note:
+                tooltip = f"标记注释：{flag_note}"
+                items[0].setToolTip(tooltip)
+                items[3].setToolTip(tooltip)
             if si in snap_changed_src and len(items) > 5:
                 items[5].setData(CHANGED_FLAG_ROLE, True)
             if si in snap_changed_tgt and len(items) > 6:

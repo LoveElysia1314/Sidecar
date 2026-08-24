@@ -23,6 +23,7 @@ from dualign.models.marker import (
     is_edit,
     is_split,
     is_flagged,
+    is_from_ai,
     combine,
     is_divider,
     AI_PREFIX,
@@ -30,6 +31,10 @@ from dualign.models.marker import (
 from dualign.models.state import AlignedRow, ChapterState, SnapGroup
 from dualign.core import op_type_str, _smart_join_lines, AlignConfig, align
 from dualign.services.embedding_cache import EmbeddingCache
+from dualign.services.repair_policy import choose_auto_repair
+
+SPLIT_FAILURE_UNSPLITTABLE = "文本无法进一步拆分"
+SPLIT_FAILURE_REALIGN = "文本重对齐失败"
 
 # ═══════════════════════════════════════════════════════════════
 # 1. 内部纯函数：重放辅助
@@ -47,6 +52,68 @@ def _expand_text_lines(texts: List[str]) -> List[str]:
             else:
                 expanded.append(line)
     return expanded
+
+
+def _best_monotonic_partition(parts: List[str], references: List[str], encode_fn):
+    """将连续分句组合为指定行数，使与参考行的对角得分之和最大。"""
+    n_parts = len(parts)
+    n_groups = len(references)
+    if not references or n_parts < n_groups:
+        return None
+
+    spans = [
+        (start, end, _smart_join_lines(parts[start:end]))
+        for start in range(n_parts)
+        for end in range(start + 1, n_parts + 1)
+    ]
+    embeddings = np.asarray(encode_fn(references + [text for _, _, text in spans]))
+    if embeddings.ndim != 2 or len(embeddings) != len(references) + len(spans):
+        return None
+    embeddings = embeddings / np.maximum(
+        np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12
+    )
+    reference_embeddings = embeddings[:n_groups]
+    span_embeddings = embeddings[n_groups:]
+    span_index = {
+        (start, end): index for index, (start, end, _text) in enumerate(spans)
+    }
+
+    # dp[(g, end)] = 前 end 个 parts 组成 g 组时的最佳累积分。
+    dp = {(0, 0): 0.0}
+    previous = {}
+    for group in range(1, n_groups + 1):
+        min_end = group
+        max_end = n_parts - (n_groups - group)
+        for end in range(min_end, max_end + 1):
+            best = None
+            for start in range(group - 1, end):
+                prefix = dp.get((group - 1, start))
+                if prefix is None:
+                    continue
+                score = float(
+                    reference_embeddings[group - 1]
+                    @ span_embeddings[span_index[(start, end)]]
+                )
+                candidate = prefix + score
+                if best is None or candidate > best[0]:
+                    best = (candidate, start, score)
+            if best is not None:
+                dp[(group, end)] = best[0]
+                previous[(group, end)] = (best[1], best[2])
+
+    if (n_groups, n_parts) not in dp:
+        return None
+    grouped = []
+    scores = []
+    end = n_parts
+    for group in range(n_groups, 0, -1):
+        start, score = previous[(group, end)]
+        grouped.append(_smart_join_lines(parts[start:end]))
+        scores.append(score)
+        end = start
+    grouped.reverse()
+    scores.reverse()
+    return grouped, scores
 
 
 def _apply_info_free(state: ChapterState, snap_i: int, marker: str) -> ChapterState:
@@ -86,14 +153,38 @@ def _apply_info_free(state: ChapterState, snap_i: int, marker: str) -> ChapterSt
             )
         return state.replace_snap(snap_i, g.with_marker(marker))
 
-    # [OK] / [F] 是元标记（不含 [AI] 前缀时）：叠加到现有操作标记上
-    # [AI][OK] / [AI][F] 是 AI 操作的完整标记，直接设置
-    if (is_approved(marker) or is_flagged(marker)) and AI_PREFIX not in marker:
+    # [OK] / [F] 是元标记：叠加到现有操作标记上，保留修复信息与来源前缀。
+    # 例如 [M] + [AI][OK] → "[M] [AI][OK]"（AI 认可了合并，而非覆盖它）。
+    # 无先前操作时保持完整标记（[OK] / [AI][OK]）原样设置。
+    if is_approved(marker) or is_flagged(marker):
         existing = g.rows[0].marker if g.rows else ""
-        new = combine(existing, marker)
-        return state.replace_snap(snap_i, g.with_marker(new))
+        if existing:
+            new = _combine_meta(existing, marker)
+            return state.replace_snap(snap_i, g.with_marker(new))
+        return state.replace_snap(snap_i, g.with_marker(marker))
 
     return state.replace_snap(snap_i, g.with_marker(marker))
+
+
+def _combine_meta(existing: str, new_tag: str) -> str:
+    """叠加 ok/flag 元标记（支持 [AI] 前缀），保留已有的修复操作标记。
+
+    与 marker.combine 的语义一致（[OK] 与 [F] 互斥、同类去重），
+    区别是保留 [AI] 来源前缀，供"AI 认可已有修复"场景使用。
+    """
+    base = "[OK]" if is_approved(new_tag) else "[F]"
+    ai_prefix = AI_PREFIX if is_from_ai(new_tag) else ""
+    tags_to_remove = {base}
+    if base == "[OK]":
+        tags_to_remove.add("[F]")
+    elif base == "[F]":
+        tags_to_remove.add("[OK]")
+    parts = [
+        p for p in existing.split(" ") if p and not any(t in p for t in tags_to_remove)
+    ]
+    clean = " ".join(parts).strip()
+    new = f"{clean} {ai_prefix}{base}" if clean else f"{ai_prefix}{base}"
+    return new
 
 
 def _apply_info_full(
@@ -384,6 +475,9 @@ class RepairState:
     _snapshot: AlignmentSnapshot
     _repair_log: List[RepairAction] = field(default_factory=list)
     _ai_proposal_store: AiProposalStore = field(default_factory=AiProposalStore)
+    _current_cache: Optional[ChapterState] = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     # ── 属性 ──
 
@@ -413,8 +507,10 @@ class RepairState:
 
     @property
     def current(self) -> ChapterState:
-        """通过 replay() 每次重新计算当前状态。"""
-        return replay(self._snapshot, self._repair_log)
+        """返回当前章节状态；RepairState 不可变，因此可安全复用 replay 结果。"""
+        if self._current_cache is None:
+            self._current_cache = replay(self._snapshot, self._repair_log)
+        return self._current_cache
 
     @property
     def ai_proposal_store(self) -> AiProposalStore:
@@ -481,6 +577,25 @@ class RepairState:
             if a.op_index == op_index:
                 return a
         return None
+
+    def flag_for_op(self, op_index: int) -> Optional[RepairAction]:
+        """返回指定文本对当前的标记动作。"""
+        for action in reversed(self._repair_log):
+            if action.op_index == op_index:
+                return action if action.kind == "flag" else None
+        return None
+
+    def without_flag(self, op_index: int) -> RepairState:
+        """删除指定文本对的标记，保留正文修复和 AI 建议。"""
+        return RepairState(
+            self._snapshot,
+            [
+                action
+                for action in self._repair_log
+                if not (action.op_index == op_index and action.kind == "flag")
+            ],
+            self._ai_proposal_store,
+        )
 
     # ── 构造器 ──
 
@@ -579,6 +694,18 @@ class TableViewModel:
 
     rows: List[TableRow]
     spans: Dict[Tuple[int, int], Tuple[int, int]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SplitAttempt:
+    """拆分尝试的结构化结果。"""
+
+    state: RepairState
+    failure_reason: str = ""
+
+    @property
+    def succeeded(self) -> bool:
+        return not self.failure_reason
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -761,25 +888,21 @@ class RepairService:
 
         返回: (src_out_lines, tgt_out_lines, scores) — 长度相等，全 1:1。
         """
-        src_emb = np.array(model.encode(src_lines, normalize_embeddings=True))
-        tgt_emb = np.array(model.encode(tgt_lines, normalize_embeddings=True))
-
-        # 缓存本次编码的嵌入
         if cache_dir:
-            try:
-                from dualign.services.embedding_cache import EmbeddingCache
-                from dualign.services.cached_encoder import CachedEncoder
+            from dualign.services.embedding_cache import EmbeddingCache
+            from dualign.services.cached_encoder import CachedEncoder
 
-                ec = EmbeddingCache(os.path.join(cache_dir, "vecs.db"))
-                try:
-                    cenc = CachedEncoder(model, ec)
-                    # 始终通过 CachedEncoder 查缓存，有则复用，无则编码
-                    src_emb = cenc.encode(src_lines)
-                    tgt_emb = cenc.encode(tgt_lines)
-                finally:
-                    ec.close()
-            except Exception:
-                pass
+            with EmbeddingCache(os.path.join(cache_dir, "vecs.db")) as cache:
+                encoder = CachedEncoder(model, cache)
+                combined = encoder.encode(src_lines + tgt_lines)
+                src_emb = combined[: len(src_lines)]
+                tgt_emb = combined[len(src_lines) :]
+        else:
+            combined = np.array(
+                model.encode(src_lines + tgt_lines, normalize_embeddings=True)
+            )
+            src_emb = combined[: len(src_lines)]
+            tgt_emb = combined[len(src_lines) :]
         result = align(
             src_lines,
             tgt_lines,
@@ -821,6 +944,7 @@ class RepairService:
         anchor_ratio: float = 1.0,
         max_anchor_gap: int = 0,
         cache: Optional[EmbeddingCache] = None,
+        unresolved_only: bool = False,
     ) -> RepairState:
         """遍历所有非 1:1 的 snap，按策略一键修复。
 
@@ -841,7 +965,7 @@ class RepairService:
           | 1:0    | placeholder [P]  | delete     [D]   | delete    [D]|
           | 0:1    | delete     [D]   | placeholder [P]  | delete    [D]|
 
-        拆分需要 model。无 model 时回退到同类型 minimal 的合并操作。
+        拆分需要 model。无 model 时保留原生关系，不得静默换成相反动作。
         """
         # 门控：锚点覆盖率不足 或 大段无引导 → 拒绝
         if anchor_ratio < 0.20 or max_anchor_gap > 50:
@@ -849,50 +973,52 @@ class RepairService:
         result = state
         snap = result.snapshot
 
+        protected: set[int] = set()
+        flags_by_snap: Dict[int, List[RepairAction]] = {}
+        if unresolved_only:
+            for action in state.repair_log:
+                affected = {action.op_index}
+                for raw_index in action.data.get("orig_snaps", []):
+                    try:
+                        affected.add(int(raw_index))
+                    except (TypeError, ValueError):
+                        continue
+                if action.kind == "flag":
+                    for affected_index in affected:
+                        flags_by_snap.setdefault(affected_index, []).append(action)
+                else:
+                    # ok 是明确的人工接受；正文修复则已经解决了该关系。
+                    protected.update(affected)
+
         for snap_i in range(len(snap.original_ops)):
+            if snap_i in protected:
+                continue
             s_idx, t_idx, _sc = snap.original_ops[snap_i]
             ls, lt = len(s_idx), len(t_idx)
 
-            if ls == 1 and lt == 1:
+            plan = choose_auto_repair(ls, lt, strategy)
+            if plan is None:
                 continue
 
-            if ls > 1 and lt == 1:
-                if strategy == "src" and model is not None:
-                    result = RepairService.apply_split(
-                        result, snap_i, "tgt", model, cache=cache
-                    )
-                else:
-                    result = RepairService.repair_merge(result, snap_i)
+            if plan.requires_model and model is None:
+                continue
+            if plan.kind == "split":
+                result = RepairService.apply_split(
+                    result, snap_i, plan.side, model, cache=cache
+                )
+            elif plan.kind == "merge":
+                result = RepairService.repair_merge(result, snap_i)
+            elif plan.kind == "delete":
+                result = RepairService.repair_delete(result, snap_i)
+            elif plan.kind == "placeholder_src":
+                result = RepairService.repair_placeholder(result, snap_i, "src")
+            elif plan.kind == "placeholder_tgt":
+                result = RepairService.repair_placeholder(result, snap_i, "tgt")
 
-            elif ls == 1 and lt > 1:
-                if strategy == "tgt" and model is not None:
-                    result = RepairService.apply_split(
-                        result, snap_i, "src", model, cache=cache
-                    )
-                else:
-                    result = RepairService.repair_merge(result, snap_i)
-
-            elif ls > 0 and lt == 0:
-                # 1:0 或 N:0（连续无匹配区间的容器）
-                if strategy == "src":
-                    result = RepairService.repair_placeholder(result, snap_i, "tgt")
-                else:
-                    result = RepairService.repair_delete(result, snap_i)
-
-            elif ls == 0 and lt > 0:
-                # 0:1 或 0:M（连续无匹配区间的容器）
-                if strategy == "tgt":
-                    result = RepairService.repair_placeholder(result, snap_i, "src")
-                else:
-                    result = RepairService.repair_delete(result, snap_i)
-
-            else:
-                # N:M（ls>1 and lt>1）→ 特殊区域，可直接标记占位符
-                # 备择策略：留待人工或 AI 判断
-                if strategy in ("src", "tgt"):
-                    result = RepairService.repair_placeholder(result, snap_i, "tgt")
-                else:
-                    result = RepairService.repair_delete(result, snap_i)
+            # flag 表示仍待关注，而不是阻止机器提出结构修复。自动修复会先
+            # 替换同 snap 的操作，因此在其后重新附加原标记，保留审阅意图。
+            for flag in flags_by_snap.get(snap_i, []):
+                result = result.apply(flag)
 
         return result
 
@@ -931,6 +1057,17 @@ class RepairService:
         model=None,
         cache: Optional[EmbeddingCache] = None,
     ) -> RepairState:
+        """拆分文本对；失败时保持原状态。"""
+        return RepairService.try_split(state, snap_i, side, model, cache).state
+
+    @staticmethod
+    def try_split(
+        state: RepairState,
+        snap_i: int,
+        side: str,
+        model=None,
+        cache: Optional[EmbeddingCache] = None,
+    ) -> SplitAttempt:
         """拆分操作：硬分割少行侧 → 重对齐（仅 1:1 + N:1/1:M，无 1:0/0:1）→ 存为 split。
 
         side: 要拆分的一侧 ("src" 或 "tgt")。通常是少行侧。
@@ -951,35 +1088,63 @@ class RepairService:
         if side == "src":
             parts: List[str] = []
             for line in raw_src:
-                sub = UniversalSplitter.hard_split(line)
+                sub = UniversalSplitter.alignment_split(line)
                 parts.extend(sub if sub else [line])
             if len(parts) <= len(raw_src):
-                return state
+                return SplitAttempt(state, SPLIT_FAILURE_UNSPLITTABLE)
         else:
             parts: List[str] = []
             for line in raw_tgt:
-                sub = UniversalSplitter.hard_split(line)
+                sub = UniversalSplitter.alignment_split(line)
                 parts.extend(sub if sub else [line])
             if len(parts) <= len(raw_tgt):
-                return state
+                return SplitAttempt(state, SPLIT_FAILURE_UNSPLITTABLE)
 
         if model is None:
-            return state
+            return SplitAttempt(state, SPLIT_FAILURE_REALIGN)
 
-        # 2. 重对齐：禁止 1:0/0:1，仅允许 1:1 + N:1/1:M
-        src_in = parts if side == "src" else raw_src
-        tgt_in = raw_tgt if side == "src" else parts
-
-        # 始终通过 CachedEncoder 查缓存（如果 cache 可用），否则盲编码
+        # 始终通过 CachedEncoder 查缓存（如果 cache 可用），否则盲编码。
         if cache is not None and model is not None:
             from dualign.services.cached_encoder import CachedEncoder
 
             cenc = CachedEncoder(model, cache)
-            src_emb = cenc.encode(src_in)
-            tgt_emb = cenc.encode(tgt_in)
+            encode_fn = cenc.encode
         else:
-            src_emb = np.array(model.encode(src_in, normalize_embeddings=True))
-            tgt_emb = np.array(model.encode(tgt_in, normalize_embeddings=True))
+            encode_fn = model.encode
+
+        # 2. 优先按已知的另一侧行数做局部单调分区。
+        # 这比重新跑通用对齐更符合“拆分少行侧以追平结构”的意图，
+        # 也避免某个正确子句因未先成为全局锚点而让整条路径失效。
+        references = raw_tgt if side == "src" else raw_src
+        partition = _best_monotonic_partition(parts, references, encode_fn)
+        if partition is not None:
+            grouped, scores = partition
+            new_src = grouped if side == "src" else raw_src
+            new_tgt = raw_tgt if side == "src" else grouped
+            action = RepairAction.make_split(
+                snap_i,
+                new_src_lines=new_src,
+                new_tgt_lines=new_tgt,
+                split_scores=scores,
+                side=side,
+                source="auto",
+            )
+            return SplitAttempt(state.apply(action))
+
+        # 3. 无法直接组成目标行数时，回退通用重对齐。
+        # 禁止 1:0/0:1，仅允许 1:1 + N:1/1:M。
+        src_in = parts if side == "src" else raw_src
+        tgt_in = raw_tgt if side == "src" else parts
+        if cache is not None and model is not None:
+            combined = encode_fn(src_in + tgt_in)
+            src_emb = combined[: len(src_in)]
+            tgt_emb = combined[len(src_in) :]
+        else:
+            combined = np.array(
+                model.encode(src_in + tgt_in, normalize_embeddings=True)
+            )
+            src_emb = combined[: len(src_in)]
+            tgt_emb = combined[len(src_in) :]
         split_cfg = AlignConfig(
             allow_deletions=False,
             allow_insertions=False,
@@ -991,9 +1156,13 @@ class RepairService:
             src_emb,
             tgt_emb,
             config=split_cfg,
-            encode_fn=model.encode,
+            encode_fn=encode_fn,
             silent=True,
         )
+        used_src = {index for op in result.all_ops for index in op[0]}
+        used_tgt = {index for op in result.all_ops for index in op[1]}
+        if used_src != set(range(len(src_in))) or used_tgt != set(range(len(tgt_in))):
+            return SplitAttempt(state, SPLIT_FAILURE_REALIGN)
         snap_split = AlignmentSnapshot.from_alignment(result.all_ops, src_in, tgt_in)
 
         # auto-repair：仅合并，不引入 [D]/[P]
@@ -1044,7 +1213,7 @@ class RepairService:
                     scores.append(r.score)
 
         if not new_src or not new_tgt:
-            return state
+            return SplitAttempt(state, SPLIT_FAILURE_REALIGN)
 
         # 3. 存为 info-full split action
         action = RepairAction.make_split(
@@ -1055,7 +1224,7 @@ class RepairService:
             side=side,
             source="auto",
         )
-        return state.apply(action)
+        return SplitAttempt(state.apply(action))
 
     # ── 跨 snap 操作 ──
 

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QGroupBox,
     QComboBox,
+    QCheckBox,
     QSizePolicy,
 )
 from PySide6.QtGui import QDesktopServices
@@ -30,6 +31,29 @@ from dualign.models.action import AiProposalStore
 from dualign.gui.preview_table import AiSuggestionItem
 from dualign.gui.preview_table import SuggestionPreviewTable
 from dualign.gui.filter import FilterPanel
+
+REVIEW_SHORTCUTS = {
+    "merge": "M",
+    "split": "S",
+    "edit": "E",
+    "ok": "O",
+    "flag": "F",
+    "delete": "Delete",
+    "placeholder": "P",
+    "reset": "Ctrl+R",
+}
+
+
+def _next_suggestion_snap(
+    items: list[AiSuggestionItem], current_snap: int | None, step: int
+) -> int | None:
+    """Return the adjacent visible suggestion snap, wrapping at either end."""
+    snaps = list(dict.fromkeys(item.snap_index for item in items))
+    if not snaps:
+        return None
+    if current_snap not in snaps:
+        return snaps[0] if step > 0 else snaps[-1]
+    return snaps[(snaps.index(current_snap) + step) % len(snaps)]
 
 
 def _disabled_fg() -> str:
@@ -58,7 +82,7 @@ if TYPE_CHECKING:
 class AgentRunThread(QThread):
     """后台运行 AiRepairAgent，通过 Qt 信号报告每步事件。
 
-    内部自动执行预修复（auto_repair），确保工作线程内 w._repair_state
+    内部自动构造拟修复（auto_repair），确保工作线程内 w._repair_state
     与 AI 看到的文本一致，不阻塞主线程。
     """
 
@@ -100,27 +124,23 @@ class AgentRunThread(QThread):
             import time as _time
 
             _start = _time.time()
-            # ── 预修复（异步线程内执行，不阻塞主线程）──
+            # ── 拟修复（异步线程内构造，不阻塞主线程）──
             ctx = self._ctx
             if self._repair_state is not None:
-                from dualign.services.repair import RepairService
-
-                repaired = RepairService.auto_repair(
-                    self._repair_state, strategy=self._strategy, model=self._model
+                from dualign.services.ai_repair_agent import (
+                    build_agent_review_session,
                 )
-                if repaired is not self._repair_state:
-                    self._repair_state = repaired
-                    from dualign.services.ai_repair_agent import build_chapter_context
 
-                    ctx = build_chapter_context(
-                        repaired,
-                        strategy=self._strategy,
-                        model=self._model,
-                        skip_auto_repair=True,
-                    )
-                    ctx.reviewable_ids = [
-                        i for i in ctx.reviewable_ids if i in self._ctx.reviewable_ids
-                    ]
+                session = build_agent_review_session(
+                    self._repair_state,
+                    strategy=self._strategy,
+                    model=self._model,
+                )
+                self._repair_state = session.proposed_state
+                ctx = session.context
+                ctx.reviewable_ids = [
+                    i for i in ctx.reviewable_ids if i in self._ctx.reviewable_ids
+                ]
 
             agent = AiRepairAgent(
                 backend=self._backend,
@@ -186,8 +206,9 @@ class ReviewController(QWidget):
     doc_realign_requested = Signal()
     doc_ai_chapter_requested = Signal()
     doc_remove_requested = Signal()
-    doc_promote_requested = Signal()
+    doc_overwrite_requested = Signal()
     strategy_changed = Signal(int)
+    auto_next_chapter_changed = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -267,8 +288,6 @@ class ReviewController(QWidget):
             "delete",
             "placeholder",
             "reset",
-            "undo",
-            "redo",
         ):
             btn = self._btn_refs.get(key)
             if btn:
@@ -307,15 +326,15 @@ class ReviewController(QWidget):
         items = getattr(self._preview_table, "_items", [])
         if row < len(items):
             it = items[row]
-            self._set_focused_action(it.action)
-            # 刷新表格，使 force_show_snaps 生效（展开被筛选掉的 snap）
-            w = self._window
-            if w and hasattr(w, "_refresh"):
-                w._refresh()
-            # 延迟一帧执行定位，确保表格重建 + 信号链全部完成后才滚动
-            from PySide6.QtCore import QTimer as _QT2
+            self._focus_suggestion(it.action, it.snap_index)
 
-            _QT2.singleShot(0, lambda si=it.snap_index: self.go_to_row.emit(si))
+    def _focus_suggestion(self, action: RepairAction, snap_i: int):
+        """展开并定位一条建议；供点击和建议导航共同使用。"""
+        self._set_focused_action(action)
+        w = self._window
+        if w and hasattr(w, "_refresh"):
+            w._refresh()
+        QTimer.singleShot(0, lambda: self.go_to_row.emit(snap_i))
 
     # ── 文档摘要 ──
 
@@ -326,14 +345,14 @@ class ReviewController(QWidget):
             self._summary_chapter.setVisible(bool(chapter))
 
     def set_summary_paths(self, src_path: str, tgt_path: str):
-        """设置摘要原文/译文路径（完整文件名 + 超链接）。"""
+        """设置文档 A/B 路径摘要（完整文件名 + 超链接）。"""
         import os.path as _osp
 
         src_name = _osp.basename(src_path) if src_path else "—"
         tgt_name = _osp.basename(tgt_path) if tgt_path else "—"
         if hasattr(self, "_summary_src"):
             self._summary_src.setText(
-                '<span style="color:palette(text);">原文：</span>'
+                '<span style="color:palette(text);">文档 A：</span>'
                 f'<a href="file:///{src_path}" style="color:palette(link);'
                 f'text-decoration:none;">{src_name}</a>'
             )
@@ -341,7 +360,7 @@ class ReviewController(QWidget):
             self._summary_src._path = src_path
         if hasattr(self, "_summary_tgt"):
             self._summary_tgt.setText(
-                '<span style="color:palette(text);">译文：</span>'
+                '<span style="color:palette(text);">文档 B：</span>'
                 f'<a href="file:///{tgt_path}" style="color:palette(link);'
                 f'text-decoration:none;">{tgt_name}</a>'
             )
@@ -392,9 +411,9 @@ class ReviewController(QWidget):
     def _build_summary(self, layout: QVBoxLayout):
         """文档摘要（4 行 × 3 列等距网格）。
 
-        row0: 原文：fullname（超链接，跨 3 列）
-        row1: 译文：fullname（超链接，跨 3 列）
-        row2: 原文行数 | 译文行数 | Snap均分
+        row0: 文档 A：fullname（超链接，跨 3 列）
+        row1: 文档 B：fullname（超链接，跨 3 列）
+        row2: 文档 A 块数 | 文档 B 块数 | 关系均分
         row3: 真锚点率 | 间隙行率 | 合并触顶
         末尾：章节进度
         """
@@ -476,34 +495,42 @@ class ReviewController(QWidget):
         for ci, (key, lb, sig) in enumerate(
             [
                 ("realign", "重新对齐", self.doc_realign_requested),
-                ("auto_repair", "自动修复", self.doc_auto_repair_requested),
-                ("reset_repair", "重置修复", self.doc_reset_repair_requested),
-                ("promote", "固化修复", self.doc_promote_requested),
+                ("auto_repair", "自动校订", self.doc_auto_repair_requested),
+                ("reset_repair", "重置校订", self.doc_reset_repair_requested),
+                ("overwrite", "固化修改…", self.doc_overwrite_requested),
             ]
         ):
             b = QPushButton(lb)
             b.clicked.connect(self._mk_emit(sig))
             dg.addWidget(b, 0, ci)
             self._doc_btns[key] = b
-        # row 1: 策略combo + 撤销/恢复
-        dg.addWidget(QLabel("自动修复策略:"), 1, 0)
+        # 策略选择只占一列；剩余两列用于章节级工作流选项。
+        dg.addWidget(QLabel("对齐策略："), 1, 0)
         self._strategy_combo = QComboBox()
-        self._strategy_combo.addItems(["最小信息量", "原文为准", "译文为准"])
+        self._strategy_combo.addItems(["最小信息量", "文档A为准", "文档B为准"])
         self._strategy_combo.setCurrentIndex(1)
         self._strategy_combo.currentIndexChanged.connect(self.strategy_changed.emit)
+        self._strategy_combo.setMinimumContentsLength(6)
+        self._strategy_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
         dg.addWidget(self._strategy_combo, 1, 1)
+        self._auto_next_chapter_cb = QCheckBox("校订完成后跳转下一章")
+        self._auto_next_chapter_cb.setChecked(False)
+        self._auto_next_chapter_cb.toggled.connect(self.auto_next_chapter_changed.emit)
+        dg.addWidget(self._auto_next_chapter_cb, 1, 2, 1, 2)
         for ci, (key, lb, handler) in enumerate(
             [
                 ("undo", "撤销", self._on_undo),
                 ("redo", "恢复", self._on_redo),
             ],
-            start=2,
+            start=0,
         ):
             b = QPushButton(lb)
             b.clicked.connect(handler)
-            dg.addWidget(b, 1, ci)
+            b.setEnabled(False)
+            dg.addWidget(b, 2, ci * 2, 1, 2)
             self._doc_btns[key] = b
-            self._btn_refs[key] = b
         for _ci in range(4):
             dg.setColumnStretch(_ci, 1)
         cl.addLayout(dg)
@@ -565,6 +592,7 @@ class ReviewController(QWidget):
             btn.setStyleSheet(
                 f"QPushButton{{color:{color};}}QPushButton:disabled{{color:{_disabled_fg()};}}"
             )
+            btn.setToolTip(f"{label}（快捷键：{REVIEW_SHORTCUTS[key]}）")
             rg.addWidget(btn, 0, ci)
             self._btn_refs[key] = btn
         for ci, (key, label, handler) in enumerate(
@@ -578,6 +606,7 @@ class ReviewController(QWidget):
             if key == "reset":
                 btn = QPushButton(label)
                 btn.clicked.connect(handler)
+                btn.setToolTip(f"{label}（快捷键：{REVIEW_SHORTCUTS[key]}）")
                 rg.addWidget(btn, 1, ci)
                 self._btn_refs[key] = btn
             else:
@@ -587,6 +616,7 @@ class ReviewController(QWidget):
                 btn.setStyleSheet(
                     f"QPushButton{{color:{color};}}QPushButton:disabled{{color:{_disabled_fg()};}}"
                 )
+                btn.setToolTip(f"{label}（快捷键：{REVIEW_SHORTCUTS[key]}）")
                 rg.addWidget(btn, 1, ci)
                 self._btn_refs[key] = btn
         for _ci in range(4):
@@ -675,9 +705,7 @@ class ReviewController(QWidget):
             "auto_repair": can_edit,
             "reset_repair": can_edit,
             "realign": can_align and data_loaded,
-            "promote": can_edit,
-            "undo": can_edit,
-            "redo": can_edit,
+            "overwrite": can_edit,
         }
         for key, enabled in gating.items():
             btn = self._doc_btns.get(key)
@@ -692,6 +720,26 @@ class ReviewController(QWidget):
         if self._strategy_combo is not None:
             return self._strategy_combo.currentIndex()
         return 1
+
+    def set_auto_next_chapter(self, enabled: bool):
+        self._auto_next_chapter_cb.setChecked(enabled)
+
+    def auto_next_chapter(self) -> bool:
+        return self._auto_next_chapter_cb.isChecked()
+
+    def set_history_enabled(self, can_undo: bool, can_redo: bool):
+        """历史按钮只由主窗口的撤销/恢复栈控制。"""
+        self._doc_btns["undo"].setEnabled(can_undo)
+        self._doc_btns["redo"].setEnabled(can_redo)
+
+    def _sync_menu_actions(self):
+        sync = (
+            getattr(self._window, "_sync_review_menu_actions", None)
+            if self._window is not None
+            else None
+        )
+        if sync is not None:
+            sync()
 
     # ── 预览模式 ──
 
@@ -748,6 +796,7 @@ class ReviewController(QWidget):
                 fp._filter_group.setEnabled(enabled)
             if hasattr(fp, "_display_group"):
                 fp._display_group.setEnabled(enabled)
+        self._sync_menu_actions()
 
     # ═══════════════════════════════════════════════════════════
     def set_anomalies(self, anomalies: List[dict], preserve_position: bool = True):
@@ -813,7 +862,7 @@ class ReviewController(QWidget):
 
         ops = RepairService.valid_operations(w._repair_state, snap_i)
 
-        predicted = self._predict_auto_action(ls, lt)
+        predicted = self._predict_auto_action(ls, lt, getattr(w, "_strategy", "src"))
 
         for key, btn in self._btn_refs.items():
             if key == "merge":
@@ -851,6 +900,7 @@ class ReviewController(QWidget):
                 enabled = False
 
             btn.setEnabled(enabled)
+        self._sync_menu_actions()
 
     def go(self, idx: int, scroll_to: bool = True):
         if 0 <= idx < len(self._anomalies):
@@ -1187,17 +1237,19 @@ class ReviewController(QWidget):
     _BTN_STYLE_AMBER = ""
 
     @staticmethod
-    def _predict_auto_action(ls: int, lt: int) -> Optional[str]:
+    def _predict_auto_action(ls: int, lt: int, strategy: str) -> Optional[str]:
         """预测自动修复会执行的操作 key。匹配 _btn_refs 的 key。"""
-        if ls > 1 and lt == 1:
-            return "split"  # N:1 → 拆分译文
-        if ls == 1 and lt > 1:
-            return "merge"  # 1:M → 合并译文
-        if ls > 0 and lt == 0:
-            return "placeholder"  # 1:0 → 占位
-        if ls == 0 and lt > 0:
-            return "placeholder"  # 0:1 → 占位
-        return None  # 1:1 或异常 → 无自动操作
+        from dualign.services.repair_policy import (
+            choose_auto_repair,
+            strategy_for_ai_review,
+        )
+
+        plan = choose_auto_repair(ls, lt, strategy_for_ai_review(strategy))
+        if plan is None:
+            return None
+        if plan.kind.startswith("placeholder_"):
+            return "placeholder"
+        return plan.kind
 
     def _update_button_states(self):
         """动态启用/禁用按钮。文字色由创建时一次性设定，不被覆盖。"""
@@ -1225,10 +1277,12 @@ class ReviewController(QWidget):
             else:
                 enabled = ops.get(key, False)
             btn.setEnabled(enabled)
+        self._sync_menu_actions()
 
     def _disable_all_buttons(self):
         for btn in self._btn_refs.values():
             btn.setEnabled(False)
+        self._sync_menu_actions()
 
     def _all_handled(self) -> bool:
         """所有异常都已被处理（approval 不再是 unreviewed）。"""
@@ -1248,8 +1302,8 @@ class ReviewController(QWidget):
         if self._current_idx < len(self._anomalies) - 1:
             self.go(self._current_idx + 1)
         elif self._anomalies:
-            # 末尾循环：先尝试自动切换文档
-            if self._all_handled():
+            # 处理完末项时，仅在用户显式开启后切换章节。
+            if self._all_handled() and self.auto_next_chapter():
                 self.next_chapter_requested.emit()
             else:
                 self.go(0)
@@ -1315,7 +1369,7 @@ class ReviewController(QWidget):
     def _on_flag(self):
         sel = self._sel_snaps()
         if len(sel) > 1 and self._window:
-            self._do_and_advance(lambda: [self._window.do_flag(si) for si in sel])
+            self._do_and_advance(lambda: self._window.do_flag_selected(sel))
             return
         snap_i = self._snap_or_sel()
         if snap_i is not None and self._window:
@@ -1487,7 +1541,7 @@ class ReviewController(QWidget):
         """应用当前聚焦的建议，并自动打上 [OK] 标签。
 
         统一方案：ToolExecutor 源头已将 ok 解析为正确 kind，
-        不再区分是否预修复，全部走 _apply_ai_action 流程。
+        不再区分是否存在拟修复，全部走 _apply_ai_action 流程。
         """
         action = self._focused_action
         if action is None:
@@ -1581,7 +1635,7 @@ class ReviewController(QWidget):
     def analyze_snaps(self, snap_indices: List[int]):
         """使用 AiRepairAgent 分析选中的文本对。
 
-        预修复在 AgentRunThread 的异步线程内自动执行。
+        拟修复在 AgentRunThread 的异步线程内自动构造。
         此处 skip_auto_repair=True 避免主线程阻塞。
         """
         ctx = self._build_chapter_context(skip_auto_repair=True)
@@ -1600,7 +1654,7 @@ class ReviewController(QWidget):
     def analyze_chapter_batch(self):
         """使用 AiRepairAgent 校订全章异常。
 
-        预修复在 AgentRunThread 的异步线程内自动执行。
+        拟修复在 AgentRunThread 的异步线程内自动构造。
         此处 skip_auto_repair=True 避免主线程阻塞。
         """
         ctx = self._build_chapter_context(skip_auto_repair=True)
@@ -1668,7 +1722,7 @@ class ReviewController(QWidget):
         无论其是否已被处理过。
 
         Args:
-            skip_auto_repair: 为 True 时跳过内部 auto_repair（调用方已预修复）。
+            skip_auto_repair: 为 True 时跳过内部 auto_repair（调用方已构造拟修复）。
         """
         w = self._window
         if w is None or w._repair_state is None:
@@ -1732,7 +1786,7 @@ class ReviewController(QWidget):
         except Exception:
             pass
 
-        # 确保 model 可供线程内预修复使用
+        # 确保 model 可供线程内构造拟修复时使用
         if model is None:
             try:
                 from dualign.services.embedding import _try_lazy_load_model
@@ -1797,71 +1851,30 @@ class ReviewController(QWidget):
             self.actions_updated.emit()
 
     # ═══════════════════════════════════════════════════════════
-    # 建议导航 — 复用异常列表，扫描有建议的 snap
+    # 建议导航 — 直接遍历当前 AI 建议表，不受异常筛选约束
     # ═══════════════════════════════════════════════════════════
 
-    def _anomaly_has_suggestions(self, anomaly_idx: int) -> bool:
-        """检查异常列表中第 i 项的 snap 是否有 AI 建议。
-
-        受 _inc_handled_cb 控制：
-          - 不勾选（默认）：仅返回待处理建议
-          - 勾选：返回任意状态的建议（含已应用/已拒绝）
-        """
-        if not (0 <= anomaly_idx < len(self._anomalies)):
-            return False
-        a = self._anomalies[anomaly_idx]
-        snaps = a.get("snap_indices", [a.get("snap_index")])
-        if not snaps:
-            return False
-        snap_i = snaps[0]
-        only_pending = (
-            not self._window._inc_handled_cb.isChecked()
-            if self._window and hasattr(self._window, "_inc_handled_cb")
-            else False
-        )
-        # 从 ai_proposal_store 检查
-        w = self._window
-        if w and w._repair_state:
-            store = w._repair_state.ai_proposal_store
-            for p in store.get(snap_i):
-                if only_pending and p.status != "pending":
-                    continue
-                return True
-        return False
-
     def _on_prev_suggestion(self):
-        """在异常列表中向后搜索有 AI 建议的 snap。"""
-        current = self._current_idx
-        if current < 0:
-            current = len(self._anomalies)
-        for i in range(current - 1, -1, -1):
-            if self._anomaly_has_suggestions(i):
-                self.go(i)
-                return
-        # 循环搜索下方
-        for i in range(len(self._anomalies) - 1, -1, -1):
-            if self._anomaly_has_suggestions(i) and i != current:
-                self.go(i)
-                return
+        """定位上一条当前可见的 AI 建议。"""
+        self._navigate_suggestion(-1)
 
     def _on_next_suggestion(self):
-        """在异常列表中向前搜索有 AI 建议的 snap。"""
-        current = self._current_idx
-        for i in range(current + 1, len(self._anomalies)):
-            if self._anomaly_has_suggestions(i):
-                self.go(i)
-                return
-        # 循环搜索上方
-        for i in range(0, current):
-            if self._anomaly_has_suggestions(i):
-                self.go(i)
-                return
+        """定位下一条当前可见的 AI 建议。"""
+        self._navigate_suggestion(1)
+
+    def _navigate_suggestion(self, step: int):
+        current = self._focused_action.op_index if self._focused_action else None
+        snap_i = _next_suggestion_snap(self._all_suggestions, current, step)
+        if snap_i is None:
+            return
+        item = next(it for it in self._all_suggestions if it.snap_index == snap_i)
+        self._focus_suggestion(item.action, snap_i)
 
     def _on_agent_finished(self, actions: List[RepairAction]):
         """Agent 完成 → 处理 actions。
 
-        预修复在 AgentRunThread 中已完成，w._repair_state 已包含 auto-repair 操作。
-        对预修复的 snap，AI 的 "ok" 应转换为等效操作（如 split/merge）显示在建议表中。
+        拟修复在 AgentRunThread 中已构造，w._repair_state 已包含 auto-repair 操作。
+        对存在拟修复的 snap，AI 的 "ok" 应转换为等效操作（如 split/merge）显示在建议表中。
         """
         self._disable_ai_buttons(False)
 

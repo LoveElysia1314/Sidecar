@@ -1,7 +1,7 @@
 [
   {
     "name": "ok",
-    "description": "Confirm the current snap is semantically parallel and needs no changes. Finalizes ONE snap as a correct 1:1 pair. Do not use on snaps containing ⟢MISSING⟣ (use edit instead).",
+    "description": "Approve the current review candidate for ONE snap. If a proposed repair exists, ok accepts that exact merge/split/edit/delete/placeholder proposal; otherwise it confirms the original alignment relation without inventing a repair action. Do not use on snaps containing ⟢MISSING⟣ (use edit instead).",
     "parameters": {
       "type": "object",
       "properties": {

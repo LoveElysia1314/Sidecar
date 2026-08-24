@@ -55,6 +55,20 @@ class TestSplitPointDetection:
         assert UniversalSplitter.find_hard_split_points("") == []
         assert UniversalSplitter.find_soft_split_points("") == []
 
+    def test_ellipsis_is_a_hard_boundary_with_or_without_following_space(self):
+        text = (
+            "Going by what I'd seen then...Ayase with her bright, shortish hair, "
+            "wearing something with sharp shoulders... yes, something like that. "
+            "I pictured her in that black jacket."
+        )
+
+        assert UniversalSplitter.hard_split(text) == [
+            "Going by what I'd seen then...",
+            "Ayase with her bright, shortish hair, wearing something with sharp shoulders...",
+            "yes, something like that.",
+            "I pictured her in that black jacket.",
+        ]
+
 
 class TestShouldSkipForSplitting:
     def test_apostrophe(self):

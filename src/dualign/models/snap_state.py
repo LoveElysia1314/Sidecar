@@ -18,22 +18,27 @@ from dualign.models.marker import is_merge
 from dualign.core import detect_language_mix, _smart_join_lines
 
 # ── approval 四态管线 ──
-# none → auto → agent → user（递进，flag 不推进管线）
+# none → proposed → agent → user（递进，flag 不推进管线）
+#
+# 持久化值仍保留为 "auto"，以兼容旧 report 和筛选设置；它的审批
+# 语义是“机器已提出拟修复，尚未审核”，不是“已自动批准”。
 APPROVAL_NONE = "none"
-APPROVAL_AUTO = "auto"
+APPROVAL_PROPOSED = "auto"
+# 兼容旧 API 名称；新代码应使用 APPROVAL_PROPOSED。
+APPROVAL_AUTO = APPROVAL_PROPOSED
 APPROVAL_AGENT = "agent"
 APPROVAL_USER = "user"
 
 ALL_APPROVAL_STATES = [
     APPROVAL_NONE,
-    APPROVAL_AUTO,
+    APPROVAL_PROPOSED,
     APPROVAL_AGENT,
     APPROVAL_USER,
 ]
 
 APPROVAL_LABELS = {
     APPROVAL_NONE: "未处理",
-    APPROVAL_AUTO: "自动修复",
+    APPROVAL_PROPOSED: "拟修复",
     APPROVAL_AGENT: "AI 审校",
     APPROVAL_USER: "用户审校",
 }
@@ -329,8 +334,8 @@ class SnapState:
     def signals(self) -> List[str]:
         """自然语言状态信号（供 AI 和 GUI 展示）。"""
         signals = []
-        if self.approval == APPROVAL_AUTO:
-            signals.append("已自动修复")
+        if self.approval == APPROVAL_PROPOSED:
+            signals.append("存在拟修复方案")
         if self.has_missing:
             signals.append("缺失待补")
         if self.has_language_mix:
@@ -369,6 +374,7 @@ class SnapInfo:
     has_language_mix: bool = False
     is_low_score: bool = False
     approval: str = ""
+    proposal_kind: str = ""
 
     @property
     def signals(self) -> List[str]:
@@ -414,6 +420,9 @@ class SnapInfo:
             d["signals"] = sigs
         # 始终标注初始类型，AI 零推理成本获知初始行数关系
         d["orig"] = f"{self.initial_n_src}:{self.initial_n_tgt}"
+        if self.approval == APPROVAL_PROPOSED:
+            # 显式告诉 Agent 它正在审批什么，避免将 ok 理解为空泛的“语义正确”。
+            d["proposal"] = self.proposal_kind or "pending"
         if self.src_text:
             d["src"] = [ln for ln in self.src_text.split("\n") if ln]
         else:
@@ -446,7 +455,8 @@ def _calc_low_score(scores: List[float], score: float, k: float = 3.0) -> bool:
 def _derive_approval(action: Optional[RepairAction]) -> str:
     """从 RepairAction 推导四态管线 approval。
 
-    none → auto → agent → user（递进）。
+    none → proposed → agent → user（递进）。
+    RepairAction.source="auto" 表示机器拟定的方案，并非审批完成。
     flag 不推进管线：返回 NONE（调用方需向上游查找有效状态）。
     """
     if action is None:
@@ -455,14 +465,14 @@ def _derive_approval(action: Optional[RepairAction]) -> str:
         return APPROVAL_NONE  # flag 不推进管线（无论来源）
     s = action.source
     if s == "auto":
-        return APPROVAL_AUTO
+        return APPROVAL_PROPOSED
     if s == "ai":
         return APPROVAL_AGENT
     if s == "user":
         return APPROVAL_USER
     # 兼容旧 source=""（视为 auto）
     if not s:
-        return APPROVAL_AUTO
+        return APPROVAL_PROPOSED
     return APPROVAL_NONE
 
 
@@ -636,5 +646,8 @@ def snap_state_to_info(
         has_language_mix=state.has_language_mix,
         is_low_score=state.is_low_score,
         approval=state.approval,
+        proposal_kind=(
+            state.last_operation if state.approval == APPROVAL_PROPOSED else ""
+        ),
         # initial_* 由调用方填充
     )

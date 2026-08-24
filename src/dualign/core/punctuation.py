@@ -105,14 +105,14 @@ class UniversalSplitter:
     语言无关的最小句子分割器，支持中英文混合。
 
     两种分割类型:
-      - 硬分割: 句子结束标点 ( . ! ? 。！？ )
-      - 软分割: 从句标点 ( , : ，： ) + 省略号 (...)
+      - 硬分割: 句子结束标点 ( . ! ? 。！？ ) + 省略号
+      - 软分割: 从句标点 ( , : ，： )
 
     特性:
       - 引号感知：引号内的标点不作为分割点
       - ASCII 单词内标点忽略 (don't → 不分割)
       - 小数点忽略 (3.14 → 不分割)
-      - 省略号处理 ("..." → 作为软分割)
+      - 省略号处理 ("..." / "…" → 作为硬分割)
       - 引号对分析：前句结束 + 引号闭合 → 硬分割
     """
 
@@ -218,6 +218,18 @@ class UniversalSplitter:
                 if 0 < pos < len(text):
                     points.append(pos)
 
+        # 轻小说文本中的省略号常同时承担意群分界；无论后续
+        # 是否有空格、大小写如何，均作为硬候选边界。局部拆分
+        # 若产生过多片段，会在后续单调分区中按语义得分重新组合。
+        for match in re.finditer(r"(?:\.{3,}|…+)", text):
+            if in_quoted[match.start()]:
+                continue
+            pos = match.end()
+            while pos < len(text) and text[pos] in cls.CLOSERS:
+                pos += 1
+            if 0 < pos < len(text):
+                points.append(pos)
+
         for start, close in quote_pairs:
             allow, split_type = cls._analyze_quote_pair_split_point(text, close, start)
             if allow and split_type == "hard":
@@ -227,11 +239,11 @@ class UniversalSplitter:
                 if 0 < pos <= len(text) and pos not in points:
                     points.append(pos)
 
-        return sorted(points)
+        return sorted(set(points))
 
     @classmethod
     def find_soft_split_points(cls, text: str) -> List[int]:
-        """找到软分割点（逗号、冒号、省略号）。"""
+        """找到软分割点（逗号、冒号）。"""
         if not text:
             return []
         in_quoted = cls._build_quote_context(text)
@@ -256,29 +268,28 @@ class UniversalSplitter:
             if 0 < pos < len(text):
                 points.append(pos)
 
-        # 省略号作为软分割
-        i = 0
-        while i < len(text):
-            if text[i] == ".":
-                end = i
-                while end < len(text) and text[end] == ".":
-                    end += 1
-                if end - i >= 3:
-                    pts = end
-                    while pts < len(text) and text[pts] in cls.CLOSERS:
-                        pts += 1
-                    if pts not in points and pts < len(text):
-                        points.append(pts)
-                    i = end
-                    continue
-            i += 1
-
         return sorted(points)
 
     @classmethod
     def hard_split(cls, text: str) -> List[str]:
         """按硬分割点拆分文本。"""
-        points = cls.find_hard_split_points(text)
+        return cls._split_at_points(text, cls.find_hard_split_points(text))
+
+    @classmethod
+    def alignment_split(cls, text: str) -> List[str]:
+        """为局部对齐生成硬/软边界候选片段。
+
+        软边界只是可选的对齐切点，不改变其“句内停顿”语义；
+        后续由嵌入得分选择最佳分区。
+        """
+        points = sorted(
+            set(cls.find_hard_split_points(text))
+            | set(cls.find_soft_split_points(text))
+        )
+        return cls._split_at_points(text, points)
+
+    @staticmethod
+    def _split_at_points(text: str, points: List[int]) -> List[str]:
         if not points:
             return [text] if text.strip() else []
         parts = []

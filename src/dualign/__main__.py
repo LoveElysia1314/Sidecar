@@ -3,24 +3,52 @@ Dualign — CLI 入口
 
 用法:
   python -m dualign [-h]
-  python -m dualign gui [--src A.md --tgt B.md]
-  python -m dualign align --src A.md --tgt B.md [--out DIR] [--strategy src|tgt|minimal]
-  python -m dualign auto --src A.md --tgt B.md --out DIR [--strategy src|tgt|minimal]
-  python -m dualign refresh --report A.report.json [-k 2.5] [-o B.report.json]
-
-alias 快捷命令:
-  dualign -s 源.md -t 目标.md               对齐+自动修复+导出
+  python -m dualign gui [--document-a A.md --document-b B.md]
+  python -m dualign align --document-a A.md --document-b B.md [-o pair.report.json]
+  python -m dualign solidify -a A.md -b B.md -r pair.report.json --preset line-aligned
 """
 
 from __future__ import annotations
 
 import sys
 import os
+import json
 import argparse
 from pathlib import Path
 
 
-def main_gui(src_path: str = "", tgt_path: str = ""):
+def _load_gui_entries(entries_file: str):
+    """读取集成方传入的章节清单，并转换为 Dualign 的 FilePair。"""
+    if not entries_file:
+        return None
+    from dualign.common import FilePair
+
+    with open(entries_file, encoding="utf-8") as manifest_file:
+        items = json.load(manifest_file)
+    if not isinstance(items, list):
+        raise ValueError("GUI entries manifest 必须是 JSON 数组")
+    entries = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("GUI entries manifest 中的章节必须是对象")
+        entries.append(
+            FilePair(
+                entry_id=str(item.get("entry_id", "")),
+                label=str(item.get("label", "")),
+                document_a_path=str(item.get("document_a_path", "")),
+                document_b_path=str(item.get("document_b_path", "")),
+                report_path=str(item.get("report_path", "")),
+                document_a_id=str(item.get("document_a_id", "")),
+                document_b_id=str(item.get("document_b_id", "")),
+                language_a=str(item.get("language_a", "")),
+                language_b=str(item.get("language_b", "")),
+                metadata=dict(item.get("metadata") or {}),
+            )
+        )
+    return entries
+
+
+def main_gui(src_path: str = "", tgt_path: str = "", entries_file: str = ""):
     """启动 GUI。"""
     # ── Windows: 标记独立 AppUserModelID，确保任务栏显示自定义图标 ──
     if sys.platform == "win32":
@@ -68,81 +96,102 @@ def main_gui(src_path: str = "", tgt_path: str = ""):
 
     sys.excepthook = _global_exception_hook
 
-    window = DualignWindow()
+    entries = _load_gui_entries(entries_file)
+    window = DualignWindow(file_entries=entries)
 
-    if src_path and tgt_path:
+    if entries is None and src_path and tgt_path:
         window.load_file_pair(src_path, tgt_path, label=os.path.basename(src_path))
 
     window.show()
     sys.exit(app.exec())
 
 
-def main_align(src_path: str, tgt_path: str, out_dir: str = "", strategy: str = "src"):
-    """CLI 对齐 + 自动修复 + 导出。"""
-    if not os.path.isfile(src_path):
-        print(f"错误: 源文件不存在: {src_path}")
+def main_align(document_a: str, document_b: str, output: str = ""):
+    """Create a replayable work report without rewriting either document."""
+    from dualign.services.cli_pipeline import align_documents, default_report_path
+
+    output_path = Path(output) if output else default_report_path(document_a)
+    if output and output_path.suffix.lower() != ".json":
+        output_path = output_path / default_report_path(document_a).name
+    print(f"文档 A: {document_a}")
+    print(f"文档 B: {document_b}")
+    result = align_documents(document_a, document_b, str(output_path))
+    if not result.get("success"):
+        print(f"对齐失败: {result.get('error', '未知错误')}")
         return 1
-    if not os.path.isfile(tgt_path):
-        print(f"错误: 目标文件不存在: {tgt_path}")
-        return 1
+    print("\n[OK] 对齐完成")
+    print(f"   工作报告: {result['report_path']}")
+    print(f"   关系数量: {len(result.get('ops', []))}")
+    print("   两份输入文档未被改写。")
+    return 0
+
+
+def main_solidify(
+    document_a: str,
+    document_b: str,
+    report: str,
+    *,
+    preset: str = "",
+    config: str = "",
+    include=(),
+    exclude=(),
+    apply: bool = False,
+):
+    """Preview or apply selective report solidification."""
+
+    from dualign.services.solidify import (
+        DEFAULT_SOLIDIFY_TYPES,
+        SolidifyPolicy,
+        load_solidify_policy,
+        plan_report_solidification,
+        solidify_report,
+    )
+    from dualign.services.pair_save import PairSaveError
 
     try:
-        from dualign.services.cli_pipeline import align_chapter
-        from dualign.core import AlignConfig
-
-        print(f"源文档: {src_path}")
-        print(f"目标文档: {tgt_path}")
-        print(f"修复策略: {strategy}")
-
-        repaired_dir = out_dir or ""
-        output_dir = out_dir or os.getcwd()
-
-        config = AlignConfig()
-        result = align_chapter(
-            src_path,
-            tgt_path,
-            repaired_dir,
-            config=config,
-            strategy=strategy,
-            output_dir=output_dir,
+        if config:
+            policy = load_solidify_policy(config)
+        elif preset:
+            policy = SolidifyPolicy.from_preset(preset)
+        else:
+            policy = SolidifyPolicy(DEFAULT_SOLIDIFY_TYPES)
+        enabled = set(policy.enabled)
+        enabled.update(include or ())
+        enabled.difference_update(exclude or ())
+        policy = SolidifyPolicy(frozenset(enabled))
+        plan, _report = plan_report_solidification(
+            document_a, document_b, report, policy
         )
-
-        if not result.get("success"):
-            print(f"对齐失败: {result.get('error', '未知错误')}")
-            return 1
-
-        n_ops = len(result["ops"])
-    except RuntimeError as e:
-        print(f"\n{'='*50}")
-        print(str(e))
-        print(f"{'='*50}\n")
-        return 1
-    except Exception as e:
-        print(f"\n❌ 对齐过程中发生错误: {e}")
-        import traceback
-
-        traceback.print_exc()
+    except (OSError, ValueError) as exc:
+        print(f"固化计划失败: {exc}")
         return 1
 
-    # 直接在输出语句中使用 align_chapter 的返回路径
-    src_out = result.get("src_path", "")
-    tgt_out = result.get("tgt_path", "")
-    report = result.get("report_path", "")
-
-    print("\n✅ 对齐完成")
-    if src_out:
-        # 统计输出行数
-        try:
-            n_src = len(open(src_out, encoding="utf-8").read().strip().splitlines())
-            n_tgt = len(open(tgt_out, encoding="utf-8").read().strip().splitlines())
-        except Exception:
-            n_src = n_tgt = 0
-        print(f"   输出源文: {src_out} ({n_src} 行)")
-        print(f"   输出译文: {tgt_out} ({n_tgt} 行)")
-    if report:
-        print(f"   报告: {report}")
-    print(f"   自动修复 ({strategy}): 已处理 {n_ops} 个文本对")
-
+    print("固化范围: " + (", ".join(sorted(policy.enabled)) or "（无）"))
+    print(f"将写入的修复: {len(plan.applied)}")
+    print(f"保留在报告中的操作: {len(plan.remaining_actions)}")
+    for diff in (plan.document_a_diff(), plan.document_b_diff()):
+        if diff:
+            print("\n" + diff.rstrip())
+    if not plan.has_changes:
+        print("\n没有符合当前配置的待固化修改。")
+        return 0
+    if not apply:
+        print("\n以上仅为预览；确认后追加 --apply 才会改写文件。")
+        return 0
+    try:
+        _plan, result = solidify_report(
+            document_a,
+            document_b,
+            report,
+            policy,
+        )
+    except (OSError, ValueError, PairSaveError) as exc:
+        print(f"固化失败: {exc}")
+        return 1
+    if result is None:
+        print("没有写入任何文件。")
+    else:
+        print("\n[OK] 两份文档和重建后的工作报告已完成事务写入。")
     return 0
 
 
@@ -156,7 +205,8 @@ def main():
         epilog="示例:\n"
         "  dualign check                   环境健康检查\n"
         "  dualign models                  列出可用模型\n"
-        "  dualign align -s src.md -t tgt.md  对齐+修复+导出\n"
+        "  dualign align -a a.md -b b.md     生成可恢复的 JSON 报告\n"
+        "  dualign solidify -a a.md -b b.md -r a.report.json  预览固化\n"
         "  dualign gui                     启动图形界面",
     )
     parser.add_argument(
@@ -167,58 +217,84 @@ def main():
 
     # ── gui ──
     p_gui = sub.add_parser("gui", help="启动图形界面")
-    p_gui.add_argument("--src", default="", help="原文路径")
-    p_gui.add_argument("--tgt", default="", help="译文路径")
+    p_gui.add_argument("--document-a", dest="src", default="", help="文档 A 路径")
+    p_gui.add_argument("--document-b", dest="tgt", default="", help="文档 B 路径")
+    p_gui.add_argument(
+        "--entries-file",
+        default="",
+        help="由集成方提供的章节清单 JSON（支持多章及独立报告目录）",
+    )
 
     # ── align ──
-    p_align = sub.add_parser("align", help="对齐 + 自动修复 + 导出")
-    p_align.add_argument("-s", "--src", required=True, help="原文路径")
+    p_align = sub.add_parser("align", help="生成对齐与校订工作报告")
     p_align.add_argument(
-        "-t", "--tgt", "--tar", dest="tgt", required=True, help="译文路径"
+        "-a",
+        "--document-a",
+        dest="document_a",
+        required=True,
+        help="文档 A 路径",
     )
-    p_align.add_argument("-o", "--out", default="", help="输出目录")
     p_align.add_argument(
-        "--strategy",
-        default="src",
-        choices=["src", "tgt", "minimal"],
-        help="自动修复策略 (默认: src)",
+        "-b",
+        "--document-b",
+        dest="document_b",
+        required=True,
+        help="文档 B 路径",
+    )
+    p_align.add_argument(
+        "-o",
+        "--output",
+        "--out",
+        default="",
+        help="*.report.json 路径；传目录时使用默认文件名",
     )
 
-    # ── promote ──
-    p_promote = sub.add_parser(
-        "promote",
-        help="用修复后的文件置换源文档对（等效确认修复结果）",
-    )
-    p_promote.add_argument(
-        "-s",
-        "--src",
-        required=True,
-        help="原始原文文件路径 (将被覆盖)",
-    )
-    p_promote.add_argument(
-        "-t",
-        "--tgt",
-        "--tar",
-        dest="tgt",
-        required=True,
-        help="原始译文文件路径 (将被覆盖)",
-    )
-    p_promote.add_argument(
-        "-r",
-        "--repaired-dir",
+    # ── solidify ──
+    p_solidify = sub.add_parser("solidify", help="按配置将报告中的部分修复固化到文档")
+    p_solidify.add_argument("-a", "--document-a", required=True, help="文档 A 路径")
+    p_solidify.add_argument("-b", "--document-b", required=True, help="文档 B 路径")
+    p_solidify.add_argument("-r", "--report", required=True, help="工作报告路径")
+    p_solidify.add_argument(
+        "--preset",
+        choices=("edits", "line-aligned", "document-a", "document-b", "none"),
         default="",
-        help="repaired 目录路径（默认 {src_parent_dir}/repaired）",
+        help="固化预设；省略时使用出厂默认（仅校订+译文拆分）",
     )
-    p_promote.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="仅模拟，不实际执行替换",
+    p_solidify.add_argument(
+        "--config", default="", help="JSON/TOML 固化配置；可含 preset/include/exclude"
     )
-    p_promote.add_argument(
-        "--strategy",
-        default="",
-        choices=["", "src", "tgt"],
-        help='晋升筛选: ""(无条件) / "src"(仅原文未变) / "tgt"(仅译文未变)',
+    p_solidify.add_argument(
+        "--include",
+        action="append",
+        choices=(
+            "merge_a",
+            "split_a",
+            "edit_a",
+            "merge_b",
+            "split_b",
+            "edit_b",
+            "delete_pair",
+        ),
+        default=[],
+        help="额外启用一种修复类型，可重复指定",
+    )
+    p_solidify.add_argument(
+        "--exclude",
+        action="append",
+        choices=(
+            "merge_a",
+            "split_a",
+            "edit_a",
+            "merge_b",
+            "split_b",
+            "edit_b",
+            "delete_pair",
+        ),
+        default=[],
+        help="排除一种修复类型，可重复指定",
+    )
+    p_solidify.add_argument(
+        "--apply", action="store_true", help="实际写入；省略时仅显示预览"
     )
 
     # ── check ──
@@ -229,17 +305,24 @@ def main():
 
     args = parser.parse_args()
 
-    # 快捷模式: dualign -s A.md -t B.md (无子命令但提供了 -s -t)
-    if not args.command and hasattr(args, "src") and args.src and args.tgt:
-        return main_align(args.src, args.tgt, args.out, args.strategy)
-
     if args.command == "gui":
-        main_gui(src_path=args.src, tgt_path=args.tgt)
+        main_gui(
+            src_path=args.src,
+            tgt_path=args.tgt,
+            entries_file=args.entries_file,
+        )
     elif args.command == "align":
-        return main_align(args.src, args.tgt, args.out, args.strategy)
-    elif args.command == "promote":
-        return _cmd_promote(
-            args.src, args.tgt, args.repaired_dir, args.dry_run, args.strategy
+        return main_align(args.document_a, args.document_b, args.output)
+    elif args.command == "solidify":
+        return main_solidify(
+            args.document_a,
+            args.document_b,
+            args.report,
+            preset=args.preset,
+            config=args.config,
+            include=args.include,
+            exclude=args.exclude,
+            apply=args.apply,
         )
     elif args.command == "check":
         return _cmd_check()
@@ -251,90 +334,6 @@ def main():
     else:
         parser.print_help()
 
-    return 0
-
-
-def _cmd_promote(
-    src_path: str, tgt_path: str, repaired_dir: str, dry_run: bool, strategy: str = ""
-):
-    """用修复后的文件置换源文档对。"""
-    from dualign.common import promote_repaired
-
-    src_path = os.path.normpath(src_path)
-    tgt_path = os.path.normpath(tgt_path)
-
-    if not os.path.isfile(src_path):
-        print(f"错误: 源文件不存在: {src_path}")
-        return 1
-    if not os.path.isfile(tgt_path):
-        print(f"错误: 目标文件不存在: {tgt_path}")
-        return 1
-
-    # ── 推导 entry_id ──
-    src_name = Path(src_path).name
-    entry_id = src_name
-    for suffix in (".source.md", ".target.md"):
-        if src_name.endswith(suffix):
-            entry_id = src_name[: -len(suffix)]
-            break
-    else:
-        entry_id = Path(src_path).stem
-
-    # ── 定位 repaired_dir ──
-    if not repaired_dir:
-        repaired_dir = str(Path(src_path).parent / "repaired")
-
-    result = promote_repaired(
-        entry_id,
-        src_path,
-        tgt_path,
-        repaired_dir,
-        dry_run=dry_run,
-        strategy=strategy,
-    )
-    if not result["success"]:
-        print(f"错误: {result['message']}")
-        return 1
-
-    if dry_run:
-        strategy_desc = {"src": "仅原文未变", "tgt": "仅译文未变", "": "无条件"}.get(
-            strategy, ""
-        )
-        print(f"[模拟]  晋升策略: {strategy_desc}")
-        print(f"[模拟]  源文件: {src_path}")
-        print(
-            f"         → 将被替换为: {os.path.join(repaired_dir, f'{entry_id}.source.md')}"
-        )
-        print(f"        原始文件备份: {result['src_backup']}")
-        print(f"[模拟]  目标文件: {tgt_path}")
-        print(
-            f"         → 将被替换为: {os.path.join(repaired_dir, f'{entry_id}.target.md')}"
-        )
-        print(f"        原始文件备份: {result['tgt_backup']}")
-        for cp in result.get("cache_paths_cleared", []):
-            print(f"[模拟]  将清除缓存: {cp}")
-        report_path = os.path.join(repaired_dir, f"{entry_id}.report.json")
-        print(f"[模拟]  报告文件: {report_path} → 清除 ai_review")
-        print()
-        print("✅ 模拟完成，未执行任何修改。去掉 --dry-run 后实际执行。")
-        return 0
-
-    # ── 实际执行 ──
-    print(f"  ✓ 原始文件已备份: {result['src_backup']} / {result['tgt_backup']}")
-    print(
-        f"  ✓ 源文件已替换: {os.path.join(repaired_dir, f'{entry_id}.source.md')} → {src_path}"
-    )
-    print(
-        f"  ✓ 目标文件已替换: {os.path.join(repaired_dir, f'{entry_id}.target.md')} → {tgt_path}"
-    )
-    for cp in result.get("cache_paths_cleared", []):
-        print(f"  ✓ 缓存已清除: {cp}")
-    if result.get("report_updated"):
-        print("  ✓ report.json 已清除过期元数据")
-    print(f"  替换后文件行数: src={result['src_count']}, tgt={result['tgt_count']}")
-    print()
-    print("✅ 置换完成。编码缓存保持不动（自验证命中）。")
-    print("   下次 `dualign align` 会自动重新编码并创建新缓存。")
     return 0
 
 
@@ -360,7 +359,7 @@ def _cmd_check():
     cfg = ProviderManager.get("ollama")
     if cfg and cfg.base_url:
         ok, detail, models = ProviderManager.health_check(cfg)
-        print(f"  Ollama API:  [{OK if ok else NO}] {detail}")
+        print(f"  Ollama API:  [{OK if ok else NO}] {detail.lstrip('✓ ')}")
     else:
         print("  Ollama API:  [NO] 未配置")
         models = []
@@ -385,7 +384,7 @@ def _cmd_check():
     if models:
         print(f"\n  可用模型 ({len(models)}):")
         for m in sorted(models)[:20]:
-            print(f"    • {m}")
+            print(f"    - {m}")
 
     print()
     return 0
@@ -398,16 +397,16 @@ def _cmd_models():
     ProviderManager.load()
     cfg = ProviderManager.get("ollama")
     if cfg is None or not cfg.base_url:
-        print("❌ Ollama 未配置")
+        print("[NO] Ollama 未配置")
         return 1
 
     ok, detail, models = ProviderManager.health_check(cfg)
     if not ok and "已连接" not in detail:
-        print(f"❌ {detail}")
+        print(f"[NO] {detail.lstrip('✓ ')}")
         return 1
 
     if not models:
-        print("⚠ 未找到任何模型")
+        print("[--] 未找到任何模型")
         return 0
 
     print(f"Ollama 可用模型 ({len(models)}):")

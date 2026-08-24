@@ -1,8 +1,8 @@
 """
-Dualign — AiRepairAgent: Tool-Calling 智能校订代理 (v2)
+Dualign — AiRepairAgent: Tool-Calling 智能校订代理
 
 设计原则:
-  - 两层文本模型：初始文本（对齐器原始）+ 当前文本（待审校）
+  - 两层文本模型：初始文本（对齐器原始）+ 当前拟修复（待审校）
   - AI 只需要判断「当前文本每对 src/tgt 语义对应吗？」
   - 所有工具操作的是初始文本，系统自动 re-repair 更新当前文本
   - 无 auto_note、无 would_*、无策略名暴露给 AI
@@ -10,7 +10,8 @@ Dualign — AiRepairAgent: Tool-Calling 智能校订代理 (v2)
 用法:
   from dualign.services.ai_repair_agent import AiRepairAgent, ChapterContext
   agent = AiRepairAgent(backend="deepseek")
-  actions = agent.run(chapter_context)
+  # initial_state 必须是构造 context 时的同一份拟修复状态。
+  actions = agent.run(chapter_context, initial_state=state)
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from dualign.models.snap_state import (
     build_context_windows,
     _parse_type,
 )
+from dualign.services.repair_policy import choose_auto_repair, strategy_for_ai_review
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,7 @@ class ChapterContext:
     chapter_title: str
     total_pairs: int
     snapshot: AlignmentSnapshot
+    strategy: str = "src"
     snap_states: List[SnapState] = field(default_factory=list)
     snap_infos: List[SnapInfo] = field(default_factory=list)
     reviewable_ids: List[int] = field(default_factory=list)
@@ -117,15 +120,17 @@ class ChapterContext:
     ) -> "ChapterContext":
         """从 RepairState 构造 ChapterContext。
 
-        v2 设计：当前文本始终设置为 auto-repair 后的结果（无论传入的 state 是否已修复）。
+        当前文本始终设置为 auto-repair 后的结果（无论传入的 state 是否已修复）。
         初始文本保持原始对齐输出。AI 只需判断「当前文本正确吗？」。
         auto-repair 是内部状态，不暴露给 AI。
 
         Args:
-            model: 嵌入模型，用于 split 操作。不传时 split 回退为 merge。
-            skip_auto_repair: 为 True 时跳过内部 auto_repair（调用方已预修复）。
+            model: 嵌入模型，用于 split 操作。不传时保留原生关系。
+            skip_auto_repair: 为 True 时跳过内部 auto_repair（调用方已构造拟修复）。
         """
         from dualign.services.repair import RepairService
+
+        strategy = strategy_for_ai_review(strategy)
 
         snap = state.snapshot
         total = len(snap.original_ops)
@@ -134,7 +139,12 @@ class ChapterContext:
             repaired = state
         else:
             # 始终用 auto-repair 后的状态作为「当前文本」
-            repaired = RepairService.auto_repair(state, strategy=strategy, model=model)
+            repaired = RepairService.auto_repair(
+                state,
+                strategy=strategy,
+                model=model,
+                unresolved_only=True,
+            )
         ch = repaired.current
 
         snap_states = build_snap_states(
@@ -178,6 +188,7 @@ class ChapterContext:
             chapter_title=chapter_title,
             total_pairs=total,
             snapshot=snap,
+            strategy=strategy,
             snap_states=snap_states,
             snap_infos=snap_infos,
             reviewable_ids=reviewable_ids,
@@ -193,9 +204,54 @@ class ChapterContext:
         return True
 
 
+@dataclass(frozen=True)
+class AgentReviewSession:
+    """Agent 一次审核所需的不可分割输入。
+
+    ``context`` 是 AI 看到的拟修复文本，``proposed_state`` 是工具执行器
+    用来解释 ``ok`` 的同一份状态。调用方不应分别构造二者。
+    """
+
+    context: ChapterContext
+    proposed_state: object
+
+
 # ═══════════════════════════════════════════════════════════════
 # 公共构造器 — 确保嵌入模型就绪
 # ═══════════════════════════════════════════════════════════════
+
+
+def build_agent_review_session(
+    state,
+    strategy: str = "src",
+    model=None,
+    chapter_id: str = "",
+    chapter_title: str = "",
+) -> AgentReviewSession:
+    """同时构造 Agent 上下文和与之完全一致的拟修复状态。
+
+    该函数不自动加载嵌入模型；调用方可显式传入 model。
+    返回的 ``proposed_state`` 必须原样传给 ``AiRepairAgent.run``。
+    """
+    from dualign.services.repair import RepairService
+
+    strategy = strategy_for_ai_review(strategy)
+
+    proposed_state = RepairService.auto_repair(
+        state,
+        strategy=strategy,
+        model=model,
+        unresolved_only=True,
+    )
+    context = ChapterContext.from_repair_state(
+        proposed_state,
+        chapter_id=chapter_id,
+        chapter_title=chapter_title,
+        strategy=strategy,
+        model=model,
+        skip_auto_repair=True,
+    )
+    return AgentReviewSession(context=context, proposed_state=proposed_state)
 
 
 def build_chapter_context(
@@ -212,26 +268,35 @@ def build_chapter_context(
     场景的 split/merge 行为一致。
 
     当 model 为 None 时自动尝试加载嵌入模型。若加载失败，
-    auto_repair 将回退到 merge（与 model=None 行为一致）。
+    需要 split 的关系保持不变，不得替换成相反的 merge 动作。
 
     Args:
-        skip_auto_repair: 为 True 时跳过内部 auto_repair（调用方已预修复）。
+        skip_auto_repair: 为 True 时跳过内部 auto_repair（调用方已构造拟修复）。
     """
+    strategy = strategy_for_ai_review(strategy)
     if model is None:
         try:
             from dualign.services.embedding import _try_lazy_load_model
 
             model = _try_lazy_load_model()
         except Exception as e:
-            logger.warning("嵌入模型加载失败: %s（auto_repair 将回退到 merge）", e)
-    return ChapterContext.from_repair_state(
+            logger.warning("嵌入模型加载失败: %s（需要 split 的关系将保持不变）", e)
+    if skip_auto_repair:
+        return ChapterContext.from_repair_state(
+            state,
+            chapter_id=chapter_id,
+            chapter_title=chapter_title,
+            strategy=strategy,
+            model=model,
+            skip_auto_repair=True,
+        )
+    return build_agent_review_session(
         state,
-        chapter_id=chapter_id,
-        chapter_title=chapter_title,
         strategy=strategy,
         model=model,
-        skip_auto_repair=skip_auto_repair,
-    )
+        chapter_id=chapter_id,
+        chapter_title=chapter_title,
+    ).context
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -611,19 +676,8 @@ def compute_auto_action_kind(snap_state, strategy: str) -> Optional[str]:
     if snap_state is None:
         return None
     in_s, in_t = _parse_type(snap_state.init_type)
-    if in_s == 1 and in_t == 1:
-        return None
-    if in_s > 1 and in_t == 1:  # N:1
-        return "split" if strategy == "src" else "merge"
-    if in_s == 1 and in_t > 1:  # 1:M
-        return "merge" if strategy == "src" else "split"
-    if in_s > 0 and in_t == 0:  # N:0
-        return "placeholder_tgt" if strategy == "src" else "delete"
-    if in_s == 0 and in_t > 0:  # 0:M
-        return "delete" if strategy == "src" else "placeholder_src"
-    if in_s > 1 and in_t > 1:  # N:M
-        return "placeholder_tgt" if strategy in ("src", "tgt") else "delete"
-    return None
+    plan = choose_auto_repair(in_s, in_t, strategy)
+    return plan.kind if plan else None
 
 
 class ToolExecutor:
@@ -633,7 +687,7 @@ class ToolExecutor:
         self.ctx = ctx
         self._model = model
         self._state = initial_state
-        self._strategy = strategy
+        self._strategy = strategy_for_ai_review(strategy)
         self.reviewed_ids: set[int] = set()
         self.reviewed_actions: Dict[int, RepairAction] = {}
 
@@ -727,13 +781,18 @@ class ToolExecutor:
         if self._state is None:
             return self.ctx.snap_infos
         state = self._replay_reviewed_actions()
-        fresh_ctx = ChapterContext.from_repair_state(state)
+        fresh_ctx = ChapterContext.from_repair_state(
+            state,
+            strategy=self._strategy,
+            model=self._model,
+            skip_auto_repair=True,
+        )
         return fresh_ctx.snap_infos
 
     def _get_current_snap_action(self, snap_id: int) -> Optional[RepairAction]:
         """获取该 snap 当前已有的修复操作（不含 ok/flag 元操作）。
 
-        结合 self._state（含预修复）和 self.reviewed_actions（Agent 已执行操作），
+        结合 self._state（含拟修复）和 self.reviewed_actions（Agent 已执行操作），
         返回该 snap 的最近一次非元操作。若 snap 无修复操作（原始状态），返回 None。
         """
         if self._state is None:
@@ -758,7 +817,7 @@ class ToolExecutor:
         snap_id = snap_list[0]
         anchor = snap_list[0]
 
-        # 统一语义：若 snap 已有修复操作，AI 的 ok 等同于认可该操作
+        # 统一语义：若 snap 已有拟修复，AI 的 ok 等同于审核通过该方案。
         existing = self._get_current_snap_action(snap_id)
         if existing:
             # 复制原操作的数据（split/edit 需要 new_src_lines 等）
@@ -768,12 +827,14 @@ class ToolExecutor:
                 source="ai",
                 data=dict(existing.data),
             )
+            decision = f"通过拟修复 {existing.kind}"
         else:
-            # 无修复操作 → 真正的 ok（认可原始对齐结果）
+            # 无拟修复 → 确认原始对齐关系，不虚构修改。
             ra = RepairAction(op_index=anchor, kind="ok", source="ai")
+            decision = "确认原始对齐关系（无修改）"
 
         self._record_review(snap_list, ra)
-        return f"### ✅ 确认 — snap {snap_list}\n\n{self._progress()}"
+        return f"### ✅ {decision} — snap {snap_id}\n\n{self._progress()}"
 
     def _handle_edit(self, args: dict) -> str:
         tgt = self._get_target(args)
@@ -790,6 +851,23 @@ class ToolExecutor:
             new_src = [new_src]
         if isinstance(new_tgt, str):
             new_tgt = [new_tgt]
+
+        # ── 占位符防线：新文本不得包含 ⟢MISSING⟣ 占位符 ──
+        # 该符号只表示「译文缺失」，不是可固化的文本。若 AI 输出它，
+        # 拒绝并提示补译，避免占位符经 edit 固化进正文。
+        from dualign.models.state import MISSING as _MISSING
+
+        offending = [
+            line
+            for line in (*new_src, *new_tgt)
+            if isinstance(line, str) and line.strip() == _MISSING
+        ]
+        if offending:
+            return (
+                "❌ **edit 拒绝**: 新文本包含 ⟢MISSING⟣ 占位符，这不是可固化的文本。\n\n"
+                "该符号只表示『译文缺失』。请提供真实译文/原文，"
+                "若确实无法翻译请用 flag 标记该 snap 交由人工处理。"
+            )
 
         # ── 范围编辑行数校验：范围含 N 个 snap 时，任一侧行数必须等于 N ──
         if is_range and (new_src or new_tgt):
@@ -992,7 +1070,7 @@ class MaxTurnsExceeded(Exception):
 
 
 class AiRepairAgent:
-    """Tool-Calling AI 校订代理 (v2)。
+    """Tool-Calling AI 校订代理。
 
     工具: ok / edit / merge / delete / flag / view / append / done
     使用 Responses API 后端，支持 DeepSeek 与本地 Ollama 工具调用。
@@ -1015,7 +1093,7 @@ class AiRepairAgent:
         self.max_turns = max_turns
         self.verbose = verbose
         self._model = model
-        self._strategy = strategy
+        self._strategy = strategy_for_ai_review(strategy)
         self._thinking = thinking
         self._llm = DeepSeekNativeBackend(
             temperature=temperature,
@@ -1358,7 +1436,11 @@ def format_action(a, ctx=None) -> str:
 
     if kind == "ok" and ctx is not None:
         ss = ctx.get_snap_state(a.op_index) if hasattr(ctx, "get_snap_state") else None
-        resolved = compute_auto_action_kind(ss, "src") if ss else None
+        resolved = (
+            compute_auto_action_kind(ss, getattr(ctx, "strategy", "src"))
+            if ss
+            else None
+        )
         if resolved:
             resolved_icon = _ACTION_ICON.get(resolved, "❓")
             return f"  {resolved_icon} snap[{a.op_index}]  ok \u2192 {resolved}"

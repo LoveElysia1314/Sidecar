@@ -8,5 +8,6 @@
 | [批处理集成论证与 Demo 设计](batch-integration-design.md) | 消费端批处理调研、三段式 Demo 设计方案                                        | 2026-06-21 分析论证                  |
 | [文档审查报告](doc-review-report.md)                      | 多提供方适配问题 + 全部 10 篇文档质量评分 + 三档优化方案                      | 2026-06-21 发布前审查                |
 | [Instruction 机制审查](instruction-fix-design.md)         | 各编码器 Instruction 实现分析 + 副作用评估 + 缓存影响 + per-provider 改动方案 | 2026-06-21 分析论证                  |
+| [N:1 / 1:M 智能修复决策草案](n-to-one-repair-decision.md) | 对齐关系、结构规范化、候选评分与跨项目职责的实验结论和待决策选项              | 2026-08-20 调研与实验                |
 
 > 笔记不保证与当前代码完全一致，仅供参考。

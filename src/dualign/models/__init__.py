@@ -9,6 +9,17 @@ from dualign.models.state import (
     SnapGroup,
 )
 from dualign.models.action import RepairAction, AiProposal, AiProposalStore
+from dualign.models.alignment_pair import (
+    AlignmentLink,
+    AlignmentPair,
+    AlignmentPairValidationError,
+    DocumentReference,
+)
+from dualign.models.pair_editing import (
+    BlockLink,
+    EditableDocument,
+    PairEditingState,
+)
 from dualign.models.snap_state import (
     SnapState,
     SnapInfo,
@@ -16,6 +27,7 @@ from dualign.models.snap_state import (
     refresh_snap_states,
     snap_state_to_info,
     APPROVAL_NONE,
+    APPROVAL_PROPOSED,
     APPROVAL_AUTO,
     APPROVAL_AGENT,
     APPROVAL_USER,
@@ -33,6 +45,13 @@ __all__ = [
     "RepairAction",
     "AiProposal",
     "AiProposalStore",
+    "AlignmentLink",
+    "AlignmentPair",
+    "AlignmentPairValidationError",
+    "DocumentReference",
+    "BlockLink",
+    "EditableDocument",
+    "PairEditingState",
     "AlignedRow",
     "SnapGroup",
     "ChapterState",
@@ -42,6 +61,7 @@ __all__ = [
     "refresh_snap_states",
     "snap_state_to_info",
     "APPROVAL_NONE",
+    "APPROVAL_PROPOSED",
     "APPROVAL_AUTO",
     "APPROVAL_AGENT",
     "APPROVAL_USER",

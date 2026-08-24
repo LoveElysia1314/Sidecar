@@ -31,7 +31,7 @@ def mixed_snapshot():
     snap 0-4: 1:1 锚点（高分）
     snap 5: 1:2 → MULTI（auto_repair 将 merge）
     snap 6: 1:1 LOW_SCORE（0.30，在 9 个高分锚点中为离群）
-    snap 7: 2:1 → MULTI（auto_repair 将 split）
+    snap 7: 2:1 → MULTI（无拆分能力时保持原生关系）
     snap 8: 1:0 → ORPHAN（auto_repair 将 placeholder_tgt）
     snap 9: 1:1 锚点（正常）
     """
@@ -122,7 +122,7 @@ class TestMultiPersistence:
         assert "NON_1TO1" in raw_states[7].anomaly_types  # 2:1
 
     def test_multi_persists_after_auto_repair(self, repaired_states):
-        """auto_repair 将 1:2 → merge — 逻辑层面已是 1:1，current 不含 NON_1TO1。"""
+        """可执行的 merge 被修复；缺少模型的 split 保持原生关系。"""
         assert (
             "NON_1TO1" in repaired_states[5].initial_anomaly_types
         ), f"1:2 after merge should still be NON_1TO1 (initial): {repaired_states[5].initial_anomaly_types}"
@@ -131,9 +131,9 @@ class TestMultiPersistence:
         ), f"2:1 after split should still be NON_1TO1 (initial): {repaired_states[7].initial_anomaly_types}"
         # merge → 逻辑 1:1
         assert "NON_1TO1" not in repaired_states[5].current_anomaly_types
-        assert "NON_1TO1" not in repaired_states[7].current_anomaly_types
+        assert "NON_1TO1" in repaired_states[7].current_anomaly_types
         assert repaired_states[5].approval == APPROVAL_AUTO
-        assert repaired_states[7].approval == APPROVAL_AUTO
+        assert repaired_states[7].approval == APPROVAL_NONE
 
     def test_multi_after_ai_ok(self, repaired_state, repaired_states, mixed_snapshot):
         """AI ok 解析为 merge — merge 已使逻辑为 1:1，current 不再含 NON_1TO1。"""

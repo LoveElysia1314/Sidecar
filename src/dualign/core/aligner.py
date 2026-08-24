@@ -40,7 +40,7 @@ _IndexTuple = Tuple[int, ...]
 _AlignmentOperation = Tuple[_IndexTuple, _IndexTuple, float]
 _AlignmentPair = Tuple[_IndexTuple, _IndexTuple]
 _EncodeFn = Callable[[List[str]], np.ndarray]
-_Stats = Dict[str, Union[int, float]]
+_Stats = Dict[str, Union[int, float, bool, List[str]]]
 
 logger = logging.getLogger(__name__)
 if not logger.handlers and not logging.getLogger().handlers:
@@ -52,8 +52,10 @@ elif not logger.handlers:
     logger.propagate = False
 
 
-# Backwards-compatible public alias; the package metadata remains authoritative.
+# Public core version follows package metadata.  The cache revision changes
+# independently whenever relations can change without an AlignConfig change.
 ALIGN_CORE_VERSION = __version__
+ALIGN_CACHE_REVISION = "preflight.1"
 
 # ── 双边信任余量锚点参数 ──
 ANCHOR_MARGIN_SLOPE = 0.10
@@ -66,6 +68,12 @@ MERGE_MIN_LENGTH = 2
 
 # ── 容器聚合上限 ──
 MAX_CONTAINER_SIZE = 10
+
+# Cheap preflight before generating and encoding merge candidates.  These are
+# the same safety bounds historically documented by automatic repair, now
+# enforced where they can actually prevent model work.
+MERGE_PREFLIGHT_MIN_ANCHOR_DENSITY = 0.20
+MERGE_PREFLIGHT_MAX_ANCHOR_GAP = 50
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -80,6 +88,14 @@ class AlignConfig:
     allow_deletions: bool = True
     allow_insertions: bool = True
     allow_merge: bool = True
+
+    # ── 双边信任余量锚点参数（默认 = 全局常量，向后兼容）──
+    # 余弦绝对刻度是模型自己的 calibration：0.60 是 harrier-0.6b
+    # 坐标系上的合适阈值。更换嵌入模型时应通过此处（或 provider 级
+    # 配置）覆盖，而不是修改全局常量。
+    anchor_min_score: float = ANCHOR_MIN_SCORE
+    anchor_margin_slope: float = ANCHOR_MARGIN_SLOPE
+    anchor_margin_intercept: float = ANCHOR_MARGIN_INTERCEPT
 
 
 @dataclass
@@ -177,34 +193,42 @@ def pair_score(
 # ═══════════════════════════════════════════════════════════════
 
 
-def bilateral_trust_margin(score: float) -> float:
-    """双边信任余量公式: margin = 0.10 × score - 0.05"""
-    if score < ANCHOR_MIN_SCORE:
+def bilateral_trust_margin(
+    score: float,
+    min_score: float = ANCHOR_MIN_SCORE,
+    slope: float = ANCHOR_MARGIN_SLOPE,
+    intercept: float = ANCHOR_MARGIN_INTERCEPT,
+) -> float:
+    """双边信任余量公式: margin = slope × score - intercept"""
+    if score < min_score:
         return float("inf")
-    return ANCHOR_MARGIN_SLOPE * score - ANCHOR_MARGIN_INTERCEPT
+    return slope * score - intercept
 
 
 def find_bilateral_anchors(
     sim_matrix: np.ndarray,
+    min_score: float = ANCHOR_MIN_SCORE,
+    margin_slope: float = ANCHOR_MARGIN_SLOPE,
+    margin_intercept: float = ANCHOR_MARGIN_INTERCEPT,
 ) -> List[_AlignmentOperation]:
     """双边信任余量锚点搜索（向量化）。"""
     src_top1 = np.max(sim_matrix, axis=1)
     tgt_top1 = np.max(sim_matrix, axis=0)
 
     src_margins = np.where(
-        src_top1 >= ANCHOR_MIN_SCORE,
-        ANCHOR_MARGIN_SLOPE * src_top1 - ANCHOR_MARGIN_INTERCEPT,
+        src_top1 >= min_score,
+        margin_slope * src_top1 - margin_intercept,
         np.inf,
     )
     tgt_margins = np.where(
-        tgt_top1 >= ANCHOR_MIN_SCORE,
-        ANCHOR_MARGIN_SLOPE * tgt_top1 - ANCHOR_MARGIN_INTERCEPT,
+        tgt_top1 >= min_score,
+        margin_slope * tgt_top1 - margin_intercept,
         np.inf,
     )
 
     src_pass = sim_matrix >= (src_top1 - src_margins).reshape(-1, 1)
     tgt_pass = sim_matrix >= (tgt_top1 - tgt_margins).reshape(1, -1)
-    min_pass = sim_matrix >= ANCHOR_MIN_SCORE
+    min_pass = sim_matrix >= min_score
     mask = src_pass & tgt_pass & min_pass
 
     rows, cols = np.where(mask)
@@ -423,6 +447,9 @@ def _recursive_anchor_search(
     m: int,
     depth: int = 0,
     max_depth: int = 100,
+    min_score: float = ANCHOR_MIN_SCORE,
+    margin_slope: float = ANCHOR_MARGIN_SLOPE,
+    margin_intercept: float = ANCHOR_MARGIN_INTERCEPT,
 ) -> List[_AlignmentOperation]:
     """Phase 1: 递归双边信任余量锚点搜索。
 
@@ -432,7 +459,12 @@ def _recursive_anchor_search(
     if depth >= max_depth:
         return []
 
-    raw = find_bilateral_anchors(sim_matrix)
+    raw = find_bilateral_anchors(
+        sim_matrix,
+        min_score=min_score,
+        margin_slope=margin_slope,
+        margin_intercept=margin_intercept,
+    )
     if not raw:
         return []
 
@@ -451,6 +483,9 @@ def _recursive_anchor_search(
                 sub_t_end - sub_t_start,
                 depth + 1,
                 max_depth,
+                min_score,
+                margin_slope,
+                margin_intercept,
             )
             all_anchors.extend(_offset_one_to_one_ops(sub_anchors, sub_s, sub_t_start))
 
@@ -796,8 +831,23 @@ def align(
     t1 = time.perf_counter()
 
     # Phase 1
-    anchors = _recursive_anchor_search(sim_matrix, n, m)
+    anchors = _recursive_anchor_search(
+        sim_matrix,
+        n,
+        m,
+        min_score=config.anchor_min_score,
+        margin_slope=config.anchor_margin_slope,
+        margin_intercept=config.anchor_margin_intercept,
+    )
+    true_anchors = list(anchors)
     n_true_anchors = len(anchors)  # 纯真锚点（Phase 1 结果）
+    true_anchor_density = 2 * n_true_anchors / (n + m)
+    max_anchor_gap = _max_anchor_gap(true_anchors, n, m)
+    merge_skip_reasons = []
+    if true_anchor_density < MERGE_PREFLIGHT_MIN_ANCHOR_DENSITY:
+        merge_skip_reasons.append("low_anchor_density")
+    if max_anchor_gap > MERGE_PREFLIGHT_MAX_ANCHOR_GAP:
+        merge_skip_reasons.append("large_anchor_gap")
     t2 = time.perf_counter()
 
     # Phase 2
@@ -821,7 +871,20 @@ def align(
             ops.append(((), (j,), 0.0))
         ops = _normalize_int_types(ops)
         elapsed = time.perf_counter() - t0
-        stats = _build_stats(n, m, ops, 0, 0, elapsed, t1 - t0, 0, t2 - t1, t3 - t2)
+        stats = _build_stats(
+            n,
+            m,
+            ops,
+            0,
+            0,
+            elapsed,
+            t1 - t0,
+            0,
+            t2 - t1,
+            t3 - t2,
+            max_anchor_gap=max_anchor_gap,
+            merge_skip_reasons=merge_skip_reasons or ["no_anchors"],
+        )
         return AlignmentResult(
             all_ops=ops,
             anchors=[],
@@ -835,7 +898,7 @@ def align(
     tgt_combos: List[_AlignmentPair] = []
     merge_scores: Dict[_AlignmentPair, float] = {}
 
-    if config.allow_merge and build_merge_cache:
+    if config.allow_merge and build_merge_cache and not merge_skip_reasons:
         src_combos, tgt_combos = _enumerate_merge_combos(anchors, n, m)
     # Phase 4
     if src_combos or tgt_combos:
@@ -878,6 +941,8 @@ def align(
         t2 - t1 + (t3 - t2),
         t6 - t5,
         n_overflow_rows=n_overflow,
+        max_anchor_gap=max_anchor_gap,
+        merge_skip_reasons=merge_skip_reasons,
     )
 
     _log(
@@ -915,6 +980,8 @@ def _build_stats(
     t_dp: float,
     n_containers: int = 0,
     n_overflow_rows: int = 0,
+    max_anchor_gap: int = 0,
+    merge_skip_reasons: Optional[List[str]] = None,
 ) -> _Stats:
     """构建对齐统计信息字典。"""
     total_sim = sum(op[2] for op in all_ops)
@@ -947,8 +1014,10 @@ def _build_stats(
         "n_true_anchors": n_anchors,
         "anchor_density": round(anchor_density, 4),
         "n_11_anchored": n_11,
-        "max_anchor_gap": 0,
+        "max_anchor_gap": max_anchor_gap,
         "n_overflow_rows": n_overflow_rows,
+        "merge_scoring_skipped": bool(merge_skip_reasons),
+        "merge_skip_reasons": list(merge_skip_reasons or []),
         "n_containers": n_containers,
         "n_1to1": n_11,
         "n_merge": op_counts["merge"],
@@ -1073,6 +1142,30 @@ def _count_overflow_rows(
         overflow += gap_end_t - theta
 
     return overflow
+
+
+def _max_anchor_gap(
+    anchors: List[_AlignmentOperation],
+    n: int,
+    m: int,
+) -> int:
+    """Return the longest unanchored run on either document side."""
+    if not anchors:
+        return max(n, m)
+
+    longest = 0
+    previous_source = previous_target = -1
+    for source, target, _score in sorted(
+        anchors, key=lambda item: (item[0][0], item[1][0])
+    ):
+        longest = max(
+            longest,
+            source[0] - previous_source - 1,
+            target[0] - previous_target - 1,
+        )
+        previous_source = source[0]
+        previous_target = target[0]
+    return max(longest, n - previous_source - 1, m - previous_target - 1)
 
 
 # ═══════════════════════════════════════════════════════════════

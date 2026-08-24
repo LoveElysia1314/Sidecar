@@ -2,11 +2,18 @@
 Dualign — 修复状态机测试
 """
 
+import numpy as np
 import pytest
 from dualign.models.state import AlignmentSnapshot
 from dualign.models.action import RepairAction
 from dualign.models.state import AlignedRow, SnapGroup, ChapterState
-from dualign.services.repair import RepairState, RepairService
+from dualign.core import AlignmentResult
+from dualign.services.repair import (
+    RepairState,
+    RepairService,
+    SPLIT_FAILURE_REALIGN,
+    SPLIT_FAILURE_UNSPLITTABLE,
+)
 
 
 @pytest.fixture
@@ -28,6 +35,13 @@ class TestRepairStateCreate:
         cs = simple_state.current
         assert cs.group(0) is not None
         assert cs.group(99) is None
+
+    def test_current_reuses_immutable_replay_result(self, simple_state):
+        assert simple_state.current is simple_state.current
+
+        changed = simple_state.apply(RepairAction(kind="ok", op_index=0))
+        assert changed.current is changed.current
+        assert changed.current is not simple_state.current
 
     def test_not_dirty_initially(self, simple_state):
         assert len(simple_state.repair_log) == 0
@@ -75,6 +89,87 @@ class TestApplyUndo:
         sr = s2.reset_op(0)
         assert sr.action_for_op(0) is None
         assert sr.action_for_op(1) is not None
+
+    def test_flag_note_can_be_updated_and_removed_without_losing_edit(
+        self, simple_state
+    ):
+        edited = simple_state.apply(
+            RepairAction.make_edit(
+                0, new_src_lines=["edited"], new_tgt_lines=["translated"]
+            )
+        )
+        flagged = edited.apply(RepairAction.make_flag(0, "需要复查"))
+        updated = flagged.apply(RepairAction.make_flag(0, "拆分失败"))
+
+        assert updated.flag_for_op(0).data["note"] == "拆分失败"
+        assert len([a for a in updated.repair_log if a.kind == "flag"]) == 1
+
+        cleared = updated.without_flag(0)
+        assert cleared.flag_for_op(0) is None
+        assert cleared.action_for_op(0).kind == "edit"
+        assert cleared.current.group(0).rows[0].src_text == "edited"
+
+
+class _PartitionEncoder:
+    def encode(self, texts, **_kwargs):
+        vectors = {
+            "source one": (1.0, 0.0),
+            "source two": (0.0, 1.0),
+            "First.": (1.0, 0.0),
+            "Second. Third.": (0.0, 1.0),
+        }
+        return np.asarray([vectors.get(text, (0.5, 0.5)) for text in texts])
+
+
+class _ZeroEncoder:
+    def encode(self, texts, **_kwargs):
+        return np.zeros((len(texts), 2))
+
+
+class TestSplitAttempt:
+    def test_split_chooses_best_partition_for_the_known_target_row_count(self):
+        state = RepairState.from_ops(
+            [((0, 1), (0,), 0.7)],
+            ["source one", "source two"],
+            ["First. Second. Third."],
+        )
+
+        attempt = RepairService.try_split(state, 0, "tgt", model=_PartitionEncoder())
+
+        assert attempt.succeeded
+        action = attempt.state.repair_log[-1]
+        assert action.data["new_tgt_lines"] == ["First.", "Second. Third."]
+        assert action.data["split_scores"] == pytest.approx([1.0, 1.0])
+
+    def test_split_reports_when_text_has_no_further_boundary(self):
+        state = RepairState.from_ops(
+            [((0, 1), (0,), 0.7)],
+            ["source one", "source two"],
+            ["No further boundary"],
+        )
+
+        attempt = RepairService.try_split(state, 0, "tgt", model=_PartitionEncoder())
+
+        assert not attempt.succeeded
+        assert attempt.failure_reason == SPLIT_FAILURE_UNSPLITTABLE
+        assert attempt.state is state
+
+    def test_split_reports_when_realign_cannot_cover_every_line(self, monkeypatch):
+        state = RepairState.from_ops(
+            [((0, 1, 2), (0,), 0.7)],
+            ["one", "two", "three"],
+            ["First. Second."],
+        )
+        monkeypatch.setattr(
+            "dualign.services.repair.align",
+            lambda *_args, **_kwargs: AlignmentResult([], [], {}, {}),
+        )
+
+        attempt = RepairService.try_split(state, 0, "tgt", model=_ZeroEncoder())
+
+        assert not attempt.succeeded
+        assert attempt.failure_reason == SPLIT_FAILURE_REALIGN
+        assert attempt.state is state
 
 
 class TestChapterState:

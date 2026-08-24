@@ -8,12 +8,14 @@ Dualign — Embedding 编码器容错测试
 from __future__ import annotations
 
 import json as _json
+import threading
 
 import numpy as np
 import pytest
 import requests.exceptions as _req_exc
 
 from dualign.services.embedding import (
+    EncodingCancelled,
     OllamaEncoder,
     OpenAICompatibleEncoder,
     load_model_for_provider,
@@ -83,6 +85,13 @@ class TestOllamaPreChecks:
         enc = OllamaEncoder("test", base_url="http://localhost:11434/")
         assert enc._url == "http://localhost:11434"
 
+    def test_cancelled_encode_does_not_return_partial_vectors(self):
+        stop_event = threading.Event()
+        stop_event.set()
+        enc = OllamaEncoder("test", base_url="http://localhost:11434")
+        with pytest.raises(EncodingCancelled):
+            enc.encode(["hello"], stop_event=stop_event)
+
 
 class TestOpenAIPreChecks:
     def test_empty_url_raises_runtime_error(self):
@@ -107,6 +116,13 @@ class TestOpenAIPreChecks:
     def test_url_trailing_slash_stripped(self):
         enc = OpenAICompatibleEncoder("http://localhost:1234/", "test")
         assert enc._url == "http://localhost:1234"
+
+    def test_cancelled_encode_does_not_return_partial_vectors(self):
+        stop_event = threading.Event()
+        stop_event.set()
+        enc = OpenAICompatibleEncoder("http://localhost:1234", "test")
+        with pytest.raises(EncodingCancelled):
+            enc.encode(["hello"], stop_event=stop_event)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -148,6 +164,42 @@ class TestOllamaRequestErrors:
         with pytest.raises(RuntimeError) as exc:
             enc.encode(["hello"])
         assert "pull" in str(exc.value) or "未找到" in str(exc.value)
+
+    def test_tokenizer_failure_shrinks_batch_and_preserves_order(self):
+        enc = OllamaEncoder(
+            "test-model", base_url="http://localhost:11434", instruction=""
+        )
+        batch_sizes = []
+
+        def post(*args, **kwargs):
+            batch = kwargs["json"]["input"]
+            batch_sizes.append(len(batch))
+            if len(batch) > 2:
+                return MockResponse(
+                    status_code=400,
+                    json_data={"error": "tokenize connection refused"},
+                )
+            embeddings = [[float(text[-1]), 1.0] for text in batch]
+            return MockResponse(json_data={"embeddings": embeddings})
+
+        enc._session = _make_mock_session(post)
+        result = enc.encode(["text1", "text2", "text3", "text4"], batch_size=4)
+
+        assert batch_sizes == [4, 2, 2]
+        assert result.shape == (4, 2)
+        assert result[0, 0] < result[-1, 0]
+
+    def test_http_error_includes_ollama_response_body(self):
+        enc = OllamaEncoder("test-model", base_url="http://localhost:11434")
+        enc._session = _make_mock_session(
+            lambda *args, **kwargs: MockResponse(
+                status_code=400,
+                json_data={"error": "invalid input payload"},
+            )
+        )
+
+        with pytest.raises(RuntimeError, match="invalid input payload"):
+            enc.encode(["hello"])
 
 
 class TestOpenAIRequestErrors:
@@ -274,6 +326,34 @@ class TestLoadModelForProvider:
         m1 = load_model_for_provider(cfg)
         m2 = load_model_for_provider(cfg)
         assert m1 is m2
+
+    def test_cache_separates_endpoint_and_instruction(self):
+        base = ProviderConfig(
+            provider_id="lmstudio",
+            base_url="http://endpoint-a:1234",
+            model_name="same-label",
+            instruction_text="instruction-a",
+        )
+        changed_endpoint = ProviderConfig(
+            provider_id="lmstudio",
+            base_url="http://endpoint-b:1234",
+            model_name="same-label",
+            instruction_text="instruction-a",
+        )
+        changed_instruction = ProviderConfig(
+            provider_id="lmstudio",
+            base_url="http://endpoint-a:1234",
+            model_name="same-label",
+            instruction_text="instruction-b",
+        )
+
+        assert load_model_for_provider(base) is load_model_for_provider(base)
+        assert load_model_for_provider(base) is not load_model_for_provider(
+            changed_endpoint
+        )
+        assert load_model_for_provider(base) is not load_model_for_provider(
+            changed_instruction
+        )
 
     def test_fallback_to_default(self):
         """无配置时回退到默认提供方（不崩溃即可）。"""

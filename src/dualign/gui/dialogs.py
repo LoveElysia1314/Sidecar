@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLineEdit,
     QComboBox,
+    QTabWidget,
 )
 
 _DEFAULT_EMBEDDING_INSTRUCTION = (
@@ -745,8 +746,70 @@ class CodeEditor(QPlainTextEdit):
 
 
 # ═══════════════════════════════════════════════════════════════
-# BlockEditDialog — 手动校订
+# FlagEditDialog — 标记注释
 # ═══════════════════════════════════════════════════════════════
+
+
+class FlagEditDialog(QDialog):
+    """创建、编辑或删除人工标记。"""
+
+    def __init__(
+        self,
+        note: str = "",
+        parent=None,
+        *,
+        can_delete: bool = False,
+        selection_count: int = 1,
+    ):
+        super().__init__(parent)
+        self._delete_requested = False
+        self.setWindowTitle("编辑标记" if can_delete else "添加标记")
+        self.setMinimumWidth(460)
+
+        layout = QVBoxLayout(self)
+        target = (
+            f"将对 {selection_count} 个文本对设置同一条标记注释。"
+            if selection_count > 1
+            else "请记录该文本对需要后续处理的原因。"
+        )
+        layout.addWidget(QLabel(target))
+
+        self._note_edit = QPlainTextEdit(note)
+        self._note_edit.setPlaceholderText("例如：拆分失败：文本重对齐失败")
+        self._note_edit.setMinimumHeight(100)
+        layout.addWidget(self._note_edit)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存标记")
+        self._delete_button = QPushButton("删除标记")
+        self._delete_button.setEnabled(can_delete)
+        buttons.addButton(
+            self._delete_button, QDialogButtonBox.ButtonRole.DestructiveRole
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        self._delete_button.clicked.connect(self._delete_flag)
+        layout.addWidget(buttons)
+
+    @property
+    def note(self) -> str:
+        return self._note_edit.toPlainText().strip()
+
+    @property
+    def delete_requested(self) -> bool:
+        return self._delete_requested
+
+    def _delete_flag(self):
+        self._delete_requested = True
+        self.accept()
+
+
+# ═══════════════════════════════
+# BlockEditDialog — 手动校订
+# ═══════════════════════════════
 
 
 class BlockEditDialog(QDialog):
@@ -809,7 +872,7 @@ class BlockEditDialog(QDialog):
         edit_row = QHBoxLayout()
         edit_row.setSpacing(8)
 
-        src_group = QGroupBox("原文校订")
+        src_group = QGroupBox("文档 A 校订")
         src_layout = QVBoxLayout(src_group)
         src_layout.setContentsMargins(4, 4, 4, 4)
         self._src_edit = CodeEditor("\n".join(self._src_lines))
@@ -818,7 +881,7 @@ class BlockEditDialog(QDialog):
         src_layout.addWidget(self._src_edit)
         edit_row.addWidget(src_group)
 
-        tgt_group = QGroupBox("译文校订")
+        tgt_group = QGroupBox("文档 B 校订")
         tgt_layout = QVBoxLayout(tgt_group)
         tgt_layout.setContentsMargins(4, 4, 4, 4)
         self._tgt_edit = CodeEditor("\n".join(self._tgt_lines), partner=self._src_edit)
@@ -836,8 +899,8 @@ class BlockEditDialog(QDialog):
             init_row = QHBoxLayout()
             init_row.setSpacing(8)
             for title, lines in [
-                ("初始原文（只读）", self._init_src),
-                ("初始译文（只读）", self._init_tgt),
+                ("文档 A 初始内容（只读）", self._init_src),
+                ("文档 B 初始内容（只读）", self._init_tgt),
             ]:
                 g = QGroupBox(title)
                 gl = QVBoxLayout(g)
@@ -894,22 +957,18 @@ class BlockEditDialog(QDialog):
         ls, lt = len(sl), len(tl)
 
         row_match = ls == lt
-        if row_match:
-            status = "✓ 行数一致"
-            color = "#4CAF50"
-        else:
-            status = f"⚠ 行数不一致 (差 {abs(ls - lt)} 行)"
-            color = "#FF9800"
+        status = "✓ 1:1" if row_match else f"✓ {ls}:{lt} 多块关系"
+        color = "#4CAF50"
 
         self._stats_lbl.setText(
             f"<span style='color:{color};'>"
-            f"原文 {ls} 行 / 译文 {lt} 行 → {status}"
+            f"文档 A {ls} 行 / 文档 B {lt} 行 → {status}"
             f"</span>"
             f"  ({len(src_text)} 字符 / {len(tgt_text)} 字符)"
         )
 
-        # OK 按钮仅在行数一致且各侧均有内容时可用
-        ok_enabled = row_match and ls > 0 and lt > 0
+        # 双文档关系允许 N:M 以及一侧为空；仅禁止两侧同时为空。
+        ok_enabled = ls > 0 or lt > 0
         if self._ok_btn:
             self._ok_btn.setEnabled(ok_enabled)
 
@@ -922,6 +981,186 @@ class BlockEditDialog(QDialog):
         self._result_src = self._strip_blank_lines(raw_src)
         self._result_tgt = self._strip_blank_lines(raw_tgt)
         self.accept()
+
+
+class ChangeReviewDialog(QDialog):
+    """Preview document/relation diffs before applying canonical changes."""
+
+    def __init__(self, changes, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("审查并应用已确认更改")
+        self.resize(980, 680)
+
+        layout = QVBoxLayout(self)
+        summary = (
+            f"正文变更 {changes.content_action_count} 项，关系操作 "
+            f"{changes.relation_action_count} 项。"
+        )
+        label = QLabel(summary)
+        label.setWordWrap(True)
+        label.setStyleSheet("font-weight:600;color:#2E7D32;")
+        layout.addWidget(label)
+
+        tabs = QTabWidget()
+        for title, content in (
+            ("文档 A", changes.document_a_diff()),
+            ("文档 B", changes.document_b_diff()),
+            ("对齐关系", changes.relation_diff()),
+        ):
+            editor = QPlainTextEdit(content or "（无变化）")
+            editor.setReadOnly(True)
+            editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            tabs.addTab(editor, title)
+        layout.addWidget(tabs, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        apply_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        apply_button.setText("应用已确认更改")
+        apply_button.setEnabled(changes.can_apply)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class SolidifyPolicyDialog(QDialog):
+    """Shared solidification policy editor for Dualign and integrating apps."""
+
+    def __init__(self, policy=None, parent=None):
+        super().__init__(parent)
+        from dualign.services.solidify import (
+            DEFAULT_SOLIDIFY_TYPES,
+            SOLIDIFY_PRESETS,
+            SOLIDIFY_TYPE_LABELS,
+            SolidifyPolicy,
+        )
+
+        self.setWindowTitle("固化修改设置")
+        self.setMinimumWidth(420)
+        self._preset_values = [
+            ("自定义", ""),
+            ("仅校订文本", "edits"),
+            ("行级兼容（全部）", "line-aligned"),
+            ("仅文档 A", "document-a"),
+            ("仅文档 B", "document-b"),
+            ("全部关闭", "none"),
+        ]
+        self._checks = {}
+        current = policy or SolidifyPolicy(DEFAULT_SOLIDIFY_TYPES)
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "选中的修复会写入正文并从当前工作记录中移除；未选中的修复会重锚后继续保留。"
+            "双侧结构操作须同时启用 A/B 对应类型；审核标记不会丢失。"
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        preset_combo = QComboBox()
+        for label, name in self._preset_values:
+            preset_combo.addItem(label, name)
+        preset_combo.currentIndexChanged.connect(self._apply_preset)
+        layout.addWidget(preset_combo)
+
+        for key, label in SOLIDIFY_TYPE_LABELS.items():
+            check = QCheckBox(label)
+            check.setChecked(key in current.enabled)
+            check.toggled.connect(self._mark_custom)
+            layout.addWidget(check)
+            self._checks[key] = check
+
+        matching = next(
+            (
+                index
+                for index, (_label, name) in enumerate(self._preset_values)
+                if name and SOLIDIFY_PRESETS[name] == current.enabled
+            ),
+            0,
+        )
+        preset_combo.blockSignals(True)
+        preset_combo.setCurrentIndex(matching)
+        preset_combo.blockSignals(False)
+        self._preset_combo = preset_combo
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @property
+    def policy(self):
+        from dualign.services.solidify import SolidifyPolicy
+
+        return SolidifyPolicy(
+            frozenset(key for key, check in self._checks.items() if check.isChecked())
+        )
+
+    def _apply_preset(self, index):
+        from dualign.services.solidify import SolidifyPolicy
+
+        name = self._preset_combo.itemData(index)
+        if not name:
+            return
+        enabled = SolidifyPolicy.from_preset(name).enabled
+        for key, check in self._checks.items():
+            check.blockSignals(True)
+            check.setChecked(key in enabled)
+            check.blockSignals(False)
+
+    def _mark_custom(self, _checked):
+        self._preset_combo.blockSignals(True)
+        self._preset_combo.setCurrentIndex(0)
+        self._preset_combo.blockSignals(False)
+
+
+class SolidifyReviewDialog(QDialog):
+    """Preview selected effects and the report operations that will remain."""
+
+    def __init__(self, plan, parent=None):
+        super().__init__(parent)
+        from dualign.services.solidify import SOLIDIFY_TYPE_LABELS
+
+        self.setWindowTitle("审查固化修改")
+        self.resize(980, 680)
+        layout = QVBoxLayout(self)
+        enabled = [
+            SOLIDIFY_TYPE_LABELS[key]
+            for key in SOLIDIFY_TYPE_LABELS
+            if key in plan.policy.enabled
+        ]
+        summary = (
+            f"固化范围：{'、'.join(enabled) or '无'}；"
+            f"写入 {len(plan.applied)} 条，保留 {len(plan.remaining_actions)} 条。"
+        )
+        label = QLabel(summary)
+        label.setWordWrap(True)
+        label.setStyleSheet("font-weight:600;color:#2E7D32;")
+        layout.addWidget(label)
+
+        tabs = QTabWidget()
+        for title, content in (
+            ("文档 A", plan.document_a_diff()),
+            ("文档 B", plan.document_b_diff()),
+        ):
+            editor = QPlainTextEdit(content or "（无变化）")
+            editor.setReadOnly(True)
+            editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            tabs.addTab(editor, title)
+        layout.addWidget(tabs, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        apply_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        apply_button.setText("固化所选修改")
+        apply_button.setEnabled(plan.has_changes)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1140,7 +1379,7 @@ class AboutDialog(QDialog):
         detail = QLabel(
             "<h3>关于 Dualign Studio</h3>"
             "<p>Dualign Studio 是一款面向翻译工作者的双语对齐校验桌面工具，"
-            "专注于将原文与译文精确对齐到行级别。它自动识别并修复结构性错位"
+            "专注于建立两个平行文档之间的块级对应关系。它自动识别结构性错位"
             "（如合并、拆分、遗漏），同时接入大语言模型提供语义层面的审校建议，"
             "显著降低人工校对成本。</p>"
             "<hr>"

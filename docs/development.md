@@ -29,6 +29,14 @@ ollama serve
 ollama pull leoipulsar/harrier-0.6b
 ```
 
+如果升级前已生成 `emb/{entry_id}/vecs.db`，执行：
+
+```bash
+uv run python scripts/migrate_embedding_cache.py --remove-legacy
+```
+
+脚本会先合并并逐库校验所有哈希，只在校验通过后删除旧缓存。
+
 ### 依赖分组
 
 | 分组 | 命令                      | 包含                                  |
@@ -47,7 +55,7 @@ dualign/
 │   ├── __init__.py              # 公共 API
 │   ├── version.py               # 从包元数据读取版本
 │   ├── __main__.py              # CLI 入口 (gui/align/check/models)
-│   ├── common.py                # 工具函数 (hash/I/O/晋升)
+│   ├── common.py                # 通用工具与兼容入口
 │   ├── config.py                # 配置常量 + 缓存路径
 │   ├── providers.py             # ProviderManager (Ollama/LM Studio/自定义)
 │   │
