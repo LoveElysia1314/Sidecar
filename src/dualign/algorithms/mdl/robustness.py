@@ -30,8 +30,7 @@ def symmetric_nearest_score(scores: np.ndarray) -> float:
     if matrix.ndim != 2 or not matrix.shape[0] or not matrix.shape[1]:
         raise ValueError("文档存在性统计需要非空二维分数矩阵")
     return 0.5 * (
-        float(np.mean(np.max(matrix, axis=1)))
-        + float(np.mean(np.max(matrix, axis=0)))
+        float(np.mean(np.max(matrix, axis=1))) + float(np.mean(np.max(matrix, axis=0)))
     )
 
 
@@ -97,7 +96,9 @@ def beta_binomial_upper_p(
         for value in range(failures, total + 1)
     ]
     maximum = max(logs)
-    return float(min(1.0, math.exp(maximum) * math.fsum(math.exp(v - maximum) for v in logs)))
+    return float(
+        min(1.0, math.exp(maximum) * math.fsum(math.exp(v - maximum) for v in logs))
+    )
 
 
 def mutual_best_pairs(scores: np.ndarray) -> list[tuple[int, int]]:
@@ -119,7 +120,9 @@ def _weighted_increasing_chain_indices(
 ) -> tuple[float, int, list[int]]:
     if not target_indices.size:
         return 0.0, 0, []
-    ordered_values = {value: rank + 1 for rank, value in enumerate(sorted(target_indices))}
+    ordered_values = {
+        value: rank + 1 for rank, value in enumerate(sorted(target_indices))
+    }
     size = len(ordered_values)
     tree = [(0.0, 0, -1)] * (size + 1)
     predecessors = np.full(target_indices.size, -1, dtype=np.int32)
@@ -190,8 +193,7 @@ def mutual_monotone_chain(
     )
     _weight, _length, selected = _weighted_increasing_chain_indices(targets, weights)
     return [
-        (pairs[index][0], pairs[index][1], float(weights[index]))
-        for index in selected
+        (pairs[index][0], pairs[index][1], float(weights[index])) for index in selected
     ]
 
 

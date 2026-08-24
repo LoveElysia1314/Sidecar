@@ -30,7 +30,7 @@ class _Harness(WindowActionsMixin):
         tgt_path,
         label="",
         *,
-        alignment_path="",
+        report_path="",
         document_a_id="",
         document_b_id="",
         language_a="",
@@ -41,7 +41,7 @@ class _Harness(WindowActionsMixin):
                 "src": src_path,
                 "tgt": tgt_path,
                 "label": label,
-                "alignment_path": alignment_path,
+                "report_path": report_path,
                 "document_a_id": document_a_id,
                 "document_b_id": document_b_id,
                 "language_a": language_a,
@@ -59,7 +59,7 @@ def _make_queue_item(entry: FilePair) -> FileQueueItem:
     )
 
 
-def test_workspace_selection_keeps_entry_alignment_path():
+def test_workspace_selection_keeps_entry_report_path():
     entry = FilePair(
         entry_id="one",
         label="One",
@@ -79,7 +79,7 @@ def test_workspace_selection_keeps_entry_alignment_path():
     assert call["src"] == "a.md"
     assert call["tgt"] == "b.md"
     # 关键断言：报告路径必须保留，不得回退到 raw/ 默认路径
-    assert call["alignment_path"] == "alignment/one.report.json"
+    assert call["report_path"] == "alignment/one.report.json"
     assert call["language_a"] == "zh-Hans"
     assert call["language_b"] == "en"
 
@@ -91,10 +91,10 @@ def test_workspace_selection_without_entry_uses_plain_paths():
     h._on_workspace_pair_selected(item)
 
     assert len(h.loaded) == 1
-    assert h.loaded[0]["alignment_path"] == ""
+    assert h.loaded[0]["report_path"] == ""
 
 
-def test_workspace_align_checked_keeps_entry_alignment_path():
+def test_workspace_align_checked_keeps_entry_report_path():
     entry = FilePair(
         entry_id="one",
         label="One",
@@ -107,4 +107,4 @@ def test_workspace_align_checked_keeps_entry_alignment_path():
     h._on_workspace_align_checked()
 
     assert len(h.loaded) == 1
-    assert h.loaded[0]["alignment_path"] == "alignment/one.report.json"
+    assert h.loaded[0]["report_path"] == "alignment/one.report.json"

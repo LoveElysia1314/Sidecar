@@ -198,9 +198,8 @@ def align_mdl_pipeline(
     started = time.perf_counter()
     source_vectors = normalize_embeddings(embeddings_a)
     target_vectors = normalize_embeddings(embeddings_b)
-    if (
-        source_vectors.shape[0] != len(lines_a)
-        or target_vectors.shape[0] != len(lines_b)
+    if source_vectors.shape[0] != len(lines_a) or target_vectors.shape[0] != len(
+        lines_b
     ):
         raise ValueError("文本行数与嵌入行数不一致")
     if not lines_a or not lines_b:
@@ -292,9 +291,7 @@ def align_mdl_pipeline(
             "gate_seconds": round(gate_seconds, 6),
             "centered_seconds": round(centered_seconds, 6),
             "composition_seconds": round(composition_seconds, 6),
-            "composition_proposals_before_pruning": len(
-                centered.semantic_candidates
-            ),
+            "composition_proposals_before_pruning": len(centered.semantic_candidates),
             "composition_proposals_after_pruning": len(composition_candidates),
             "composition_models": (
                 "counterfactual_dld",

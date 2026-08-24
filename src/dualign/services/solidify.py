@@ -10,13 +10,13 @@ from __future__ import annotations
 import json
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Mapping
 
 from dualign.common import file_bytes_sha256
 from dualign.core import _smart_join_lines
-from dualign.models.action import RepairAction
+from dualign.models.action import RepairAction, project_action_to_relation_order
 from dualign.models.pair_editing import PairEditingState
 from dualign.services._text_diff import unified_text_diff
 from dualign.services.alignment_io import create_alignment_pair
@@ -30,6 +30,7 @@ from dualign.services.report_io import (
     ReportError,
     load_report,
     operations_from_report,
+    relation_ids_from_report,
     report_matches_documents,
 )
 
@@ -122,30 +123,26 @@ def load_solidify_policy(path: str | Path) -> SolidifyPolicy:
 def _action_copy(
     action: RepairAction,
     *,
-    op_index: int,
+    ordinal: int,
     data: Mapping[str, object] | None = None,
+    operation_indices: tuple[int, ...] | None = None,
+    relation_ids: tuple[str, ...] | None = None,
 ) -> RepairAction:
     return RepairAction(
-        op_index=op_index,
         kind=action.kind,
         sub_count=action.sub_count,
         source=action.source,
         data=dict(action.data if data is None else data),
         timestamp=action.timestamp,
+        relation_ids=action.relation_ids if relation_ids is None else relation_ids,
+        operation_indices=(
+            (ordinal,) if operation_indices is None else operation_indices
+        ),
     )
 
 
 def _action_operations(action: RepairAction) -> tuple[int, ...]:
-    raw = action.data.get("orig_snaps") or [action.op_index]
-    result: list[int] = []
-    for value in raw:
-        try:
-            index = int(value)
-        except (TypeError, ValueError):
-            continue
-        if index not in result:
-            result.append(index)
-    return tuple(result or [action.op_index])
+    return action.operation_indices
 
 
 def _ordered_block_ids(state: PairEditingState, link_ids: Iterable[str], side: str):
@@ -188,8 +185,7 @@ class SolidificationPlan:
     original_actions: tuple[RepairAction, ...]
     remaining_actions: tuple[RepairAction, ...]
     applied: tuple[dict, ...]
-    operation_map: tuple[int | None, ...]
-    changed_operations: frozenset[int]
+    changed_relation_ids: frozenset[str]
 
     @property
     def document_a_changed(self) -> bool:
@@ -319,7 +315,13 @@ def build_solidification_plan(
     """Apply selected effects and re-anchor everything that remains."""
 
     state = baseline
-    actions = tuple(normalize_repair_log(repair_log))
+
+    def bind_action(action: RepairAction) -> RepairAction:
+        return project_action_to_relation_order(
+            action, tuple(link.id for link in baseline.links)
+        )
+
+    actions = tuple(normalize_repair_log(bind_action(action) for action in repair_log))
     old_to_link = {index: link.id for index, link in enumerate(state.links)}
     pending: list[_PendingAction] = []
     applied: list[dict] = []
@@ -389,7 +391,7 @@ def build_solidification_plan(
             )
             remaining_sides = set(effects) - selected
             if remaining_sides:
-                residual = _action_copy(action, op_index=0, data={})
+                residual = _action_copy(action, ordinal=0, data={})
                 pending.append(_PendingAction(residual, (anchor,)))
             continue
 
@@ -463,14 +465,14 @@ def build_solidification_plan(
                 data = {
                     key: value
                     for key, value in action.data.items()
-                    if key not in {"orig_snaps", "new_src_lines", "new_tgt_lines"}
+                    if key not in {"new_src_lines", "new_tgt_lines"}
                 }
                 for side in remaining_sides:
                     key = candidates[side][1]
                     data[key] = action.data[key]
                 pending.append(
                     _PendingAction(
-                        _action_copy(action, op_index=0, data=data), (anchor,)
+                        _action_copy(action, ordinal=0, data=data), (anchor,)
                     )
                 )
             continue
@@ -496,21 +498,22 @@ def build_solidification_plan(
                 positions.append(position)
         if not positions:
             continue
-        data = dict(item.action.data)
-        if len(positions) > 1:
-            data["orig_snaps"] = positions
-        else:
-            data.pop("orig_snaps", None)
-        remaining.append(_action_copy(item.action, op_index=positions[0], data=data))
+        surviving_ids = tuple(
+            link_id for link_id in item.link_ids if link_id in final_positions
+        )
+        remaining.append(
+            _action_copy(
+                item.action,
+                ordinal=positions[0],
+                operation_indices=tuple(positions),
+                relation_ids=surviving_ids,
+            )
+        )
 
-    operation_map = tuple(
-        final_positions.get(old_to_link[old_index])
-        for old_index in range(len(baseline.links))
-    )
-    changed_operations = frozenset(
-        operation
+    changed_relation_ids = frozenset(
+        relation_id
         for item in applied
-        for operation in _action_operations(RepairAction.from_dict(item["action"]))
+        for relation_id in RepairAction.from_dict(item["action"]).relation_ids
     )
 
     return SolidificationPlan(
@@ -520,8 +523,7 @@ def build_solidification_plan(
         original_actions=actions,
         remaining_actions=tuple(remaining),
         applied=tuple(applied),
-        operation_map=operation_map,
-        changed_operations=changed_operations,
+        changed_relation_ids=changed_relation_ids,
     )
 
 
@@ -543,8 +545,9 @@ def plan_report_solidification(
         pair_id=str(report.get("chapter_id") or path_a.stem),
         document_a_path=path_a,
         document_b_path=path_b,
-        alignment_path=report_target,
+        report_path=report_target,
         operations=operations_from_report(report),
+        relation_ids=relation_ids_from_report(report),
         provenance=dict(report.get("provenance") or {}),
     )
     baseline = PairEditingState.from_alignment_pair(
@@ -582,8 +585,7 @@ def solidify_report(
         remaining_repair_log=plan.remaining_actions,
         solidification_policy=policy.to_dict(),
         applied_repairs=plan.applied,
-        operation_map=plan.operation_map,
-        changed_operations=plan.changed_operations,
+        changed_relation_ids=plan.changed_relation_ids,
     )
     return plan, result
 
@@ -656,8 +658,7 @@ def apply_batch_solidification(
                 remaining_repair_log=plan.remaining_actions,
                 solidification_policy=batch.policy.to_dict(),
                 applied_repairs=plan.applied,
-                operation_map=plan.operation_map,
-                changed_operations=plan.changed_operations,
+                changed_relation_ids=plan.changed_relation_ids,
             )
             succeeded.append(target)
         except (OSError, ValueError, PairSaveError) as exc:

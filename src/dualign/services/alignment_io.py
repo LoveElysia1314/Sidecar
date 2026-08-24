@@ -115,8 +115,9 @@ def create_alignment_pair(
     pair_id: str,
     document_a_path: str | Path,
     document_b_path: str | Path,
-    alignment_path: str | Path,
+    report_path: str | Path,
     operations: Iterable[tuple[Iterable[int], Iterable[int], float]],
+    relation_ids: Iterable[str] = (),
     document_a_id: str = "",
     document_b_id: str = "",
     language_a: str = "",
@@ -129,7 +130,7 @@ def create_alignment_pair(
 
     path_a = Path(document_a_path)
     path_b = Path(document_b_path)
-    report = Path(alignment_path)
+    report = Path(report_path)
     default_a, default_b = _default_document_ids(path_a, path_b)
     ref_a = DocumentReference(
         id=document_a_id or default_a,
@@ -148,6 +149,7 @@ def create_alignment_pair(
         document_a=ref_a,
         document_b=ref_b,
         operations=operations,
+        relation_ids=relation_ids,
         provenance={
             **build_alignment_provenance(tool_version=tool_version),
             **dict(provenance or {}),

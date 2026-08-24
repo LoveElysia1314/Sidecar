@@ -103,10 +103,10 @@ class TestAiOkDoesNotEraseRepairMarker:
             _snapshot(),
             [
                 RepairAction.make_merge(1, sub_count=2),
-                RepairAction(op_index=1, kind="ok", source="ai"),
+                RepairAction(kind="ok", source="ai", operation_indices=(1,)),
             ],
         )
-        markers = {row.marker for row in state.current.rows if row.snap_index == 1}
+        markers = {row.marker for row in state.current.rows if row.ordinal == 1}
         assert markers == {"[M] [AI][OK]"}, markers
 
     def test_ai_flag_preserves_repair_marker(self):
@@ -114,17 +114,18 @@ class TestAiOkDoesNotEraseRepairMarker:
             _snapshot(),
             [
                 RepairAction.make_merge(1, sub_count=2),
-                RepairAction(op_index=1, kind="flag", source="ai"),
+                RepairAction(kind="flag", source="ai", operation_indices=(1,)),
             ],
         )
-        markers = {row.marker for row in state.current.rows if row.snap_index == 1}
+        markers = {row.marker for row in state.current.rows if row.ordinal == 1}
         assert markers == {"[M] [AI][F]"}, markers
 
     def test_ai_ok_without_prior_repair_keeps_full_marker(self):
         state = RepairState(
-            _snapshot(), [RepairAction(op_index=1, kind="ok", source="ai")]
+            _snapshot(),
+            [RepairAction(kind="ok", source="ai", operation_indices=(1,))],
         )
-        markers = {row.marker for row in state.current.rows if row.snap_index == 1}
+        markers = {row.marker for row in state.current.rows if row.ordinal == 1}
         assert markers == {"[AI][OK]"}, markers
 
     def test_manual_ok_still_combines(self):
@@ -133,7 +134,7 @@ class TestAiOkDoesNotEraseRepairMarker:
             _snapshot(),
             [RepairAction.make_merge(1, sub_count=2), RepairAction.make_ok(1)],
         )
-        markers = {row.marker for row in state.current.rows if row.snap_index == 1}
+        markers = {row.marker for row in state.current.rows if row.ordinal == 1}
         assert markers == {"[M] [OK]"}, markers
 
     def test_ok_f_mutual_exclusion_with_ai_prefix(self):
@@ -141,11 +142,11 @@ class TestAiOkDoesNotEraseRepairMarker:
         state = RepairState(
             _snapshot(),
             [
-                RepairAction(op_index=1, kind="ok", source="ai"),
-                RepairAction(op_index=1, kind="flag", source="ai"),
+                RepairAction(kind="ok", source="ai", operation_indices=(1,)),
+                RepairAction(kind="flag", source="ai", operation_indices=(1,)),
             ],
         )
-        markers = {row.marker for row in state.current.rows if row.snap_index == 1}
+        markers = {row.marker for row in state.current.rows if row.ordinal == 1}
         assert markers == {"[AI][F]"}, markers
 
 
@@ -172,7 +173,7 @@ def test_agent_run_with_initial_state_passes_ok_through():
     agent = AiRepairAgent(backend="deepseek", verbose=False, strategy="src")
     agent._llm = _ScriptedBackend([t1])
     actions = agent.run(ctx, initial_state=_repaired_state())
-    by_op = {a.op_index: a for a in actions}
+    by_op = {a.ordinal: a for a in actions}
     assert by_op[1].kind == "merge"  # AI ok 认可已有 merge
     assert by_op[2].kind == "ok"  # snap 2 无修复 → 真正的通过
 
@@ -185,7 +186,7 @@ def test_review_session_keeps_context_and_proposed_state_together():
     proposed = [
         action
         for action in session.proposed_state.repair_log
-        if action.op_index == 1 and action.kind not in {"ok", "flag"}
+        if action.ordinal == 1 and action.kind not in {"ok", "flag"}
     ]
     assert proposed
     assert proposed[-1].kind == "merge"
@@ -218,8 +219,9 @@ def test_review_session_does_not_overwrite_existing_user_repair():
 
     session = build_agent_review_session(state, strategy="tgt", model=None)
 
-    assert session.proposed_state.action_for_op(1).kind == "edit"
-    assert session.proposed_state.action_for_op(1).source == "user"
+    relation_id = session.proposed_state.snapshot.relation_id(1)
+    assert session.proposed_state.action_for_relation(relation_id).kind == "edit"
+    assert session.proposed_state.action_for_relation(relation_id).source == "user"
 
 
 def test_review_session_preserves_explicitly_selected_normal_pairs():
@@ -233,7 +235,7 @@ def test_review_session_preserves_explicitly_selected_normal_pairs():
     )
 
     assert session.context.reviewable_ids == [0, 3]
-    assert [info.snap_id for info in session.context.reviewable_infos] == [0, 3]
+    assert [info.ordinal for info in session.context.reviewable_infos] == [0, 3]
     assert not session.context.get_snap_info(0).is_reviewable
     assert not session.context.get_snap_info(3).is_reviewable
 

@@ -111,13 +111,6 @@ def test_load_gui_entries_uses_neutral_documents_and_one_report(tmp_path):
     assert entry.document_a_path == "a.md"
     assert entry.document_b_path == "b.md"
     assert entry.report_path == "alignment/one.report.json"
-    assert entry.alignment_path == entry.report_path
-
-
-def test_file_pair_exposes_read_only_source_target_aliases():
-    entry = FilePair("one", "One", "a.md", "b.md", "one.report.json")
-    assert entry.source_path == "a.md"
-    assert entry.target_path == "b.md"
 
 
 def test_encode_thread_restores_report_before_loading_model(tmp_path, monkeypatch):
@@ -125,7 +118,7 @@ def test_encode_thread_restores_report_before_loading_model(tmp_path, monkeypatc
     worker = EncodeThread(
         str(source),
         str(target),
-        alignment_path=str(report),
+        report_path=str(report),
         expected_provenance=load_report(report)["provenance"],
     )
     hits = []
@@ -144,7 +137,7 @@ def test_encode_thread_restores_report_before_loading_model(tmp_path, monkeypatc
 def test_encode_thread_rejects_report_after_source_change(tmp_path):
     source, target, report = _report_pair(tmp_path)
     source.write_text("changed\n", encoding="utf-8")
-    worker = EncodeThread(str(source), str(target), alignment_path=str(report))
+    worker = EncodeThread(str(source), str(target), report_path=str(report))
 
     assert worker._load_cached_alignment("ignored", "ignored") is None
     assert "变化" in worker.formal_alignment_error
@@ -158,7 +151,7 @@ def test_encode_thread_rejects_report_after_alignment_config_change(tmp_path):
     worker = EncodeThread(
         str(source),
         str(target),
-        alignment_path=str(report),
+        report_path=str(report),
         expected_provenance=changed,
     )
 
@@ -217,10 +210,12 @@ def test_cancel_releases_a_worker_that_stops_during_the_grace_period():
     assert not harness._retired_load_threads
 
 
-def test_report_can_store_snap_anchored_action_without_materialized_files(tmp_path):
+def test_report_can_store_identity_anchored_action_without_materialized_files(tmp_path):
     source, target, report = _report_pair(tmp_path)
     data = json.loads(report.read_text(encoding="utf-8"))
-    action = RepairAction.make_ok(0)
+    relation_id = "manual-relation"
+    data["ops"] = [{"id": relation_id, "s": [0], "t": [0], "sc": 0.8}]
+    action = RepairAction.make_ok(0, relation_ids=[relation_id])
     action.source = "user"
     data["repair_log"] = [action.to_dict()]
     from dualign.services.report_io import save_report
@@ -229,6 +224,7 @@ def test_report_can_store_snap_anchored_action_without_materialized_files(tmp_pa
 
     assert report.is_file()
     assert not (report.parent / "one.source.md").exists()
-    assert (
-        json.loads(report.read_text(encoding="utf-8"))["repair_log"][0]["op_index"] == 0
-    )
+    saved_action = json.loads(report.read_text(encoding="utf-8"))["repair_log"][0]
+    assert saved_action["relation_ids"] == [relation_id]
+    assert "op_index" not in saved_action
+    assert "operation_indices" not in saved_action

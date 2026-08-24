@@ -11,10 +11,16 @@ from pathlib import Path
 
 from dualign.common import file_bytes_sha256, file_identity_changed
 from dualign.config import get_cache_root
+from dualign.models.action import canonicalize_action_payload
 from dualign.models.pair_editing import PairEditingState
+from dualign.models.relation_identity import rebase_relation_ids
+from dualign.models.score_cache import RelationScoreCache
 from dualign.models.state import MISSING
 from dualign.services.alignment_io import document_sha256, document_sha256_from_text
-from dualign.services.report_io import build_report
+from dualign.services.report_io import (
+    build_report,
+    relation_ids_from_report,
+)
 from dualign.services.realignment import RebuiltAlignment, rebuild_alignment
 
 
@@ -142,62 +148,33 @@ def recover_pending_pair_saves(transaction_dir: str | Path | None = None) -> lis
     return messages
 
 
-def _mapped_operation(
-    operation: object, operation_map: tuple[int | None, ...]
-) -> int | None:
-    try:
-        index = int(operation)
-    except (TypeError, ValueError):
-        return None
-    if index < 0 or index >= len(operation_map):
-        return None
-    return operation_map[index]
-
-
-def _action_operations(action: dict, fallback: object) -> set[int]:
-    data = action.get("data") if isinstance(action.get("data"), dict) else {}
-    raw = data.get("orig_snaps") or [action.get("op_index", fallback)]
-    result: set[int] = set()
-    for value in raw:
-        try:
-            result.add(int(value))
-        except (TypeError, ValueError):
-            continue
-    return result
-
-
 def _reanchor_proposal_action(
     raw_action: object,
-    operation_map: tuple[int | None, ...],
-    changed_operations: frozenset[int],
+    source_relation_ids: tuple[str, ...],
+    final_relation_ids: tuple[str, ...],
+    changed_relation_ids: frozenset[str],
 ) -> dict | None:
     if not isinstance(raw_action, dict):
         return None
-    operations = _action_operations(raw_action, raw_action.get("op_index"))
-    if not operations or operations & changed_operations:
+    try:
+        action = canonicalize_action_payload(raw_action, source_relation_ids)
+    except ValueError:
         return None
-    mapped = []
-    for operation in sorted(operations):
-        new_operation = _mapped_operation(operation, operation_map)
-        if new_operation is None:
+    target_ids = tuple(action["relation_ids"])
+    if not target_ids or set(target_ids) & changed_relation_ids:
+        return None
+    final_ids = set(final_relation_ids)
+    for relation_id in target_ids:
+        if relation_id not in final_ids:
             return None
-        if new_operation not in mapped:
-            mapped.append(new_operation)
-    action = dict(raw_action)
-    action["op_index"] = mapped[0]
-    data = dict(action.get("data") or {})
-    if len(mapped) > 1:
-        data["orig_snaps"] = mapped
-    else:
-        data.pop("orig_snaps", None)
-    action["data"] = data
     return action
 
 
 def _rebase_pending_ai_proposals(
     raw_store: object,
-    operation_map: tuple[int | None, ...],
-    changed_operations: frozenset[int],
+    source_relation_ids: tuple[str, ...],
+    final_relation_ids: tuple[str, ...],
+    changed_relation_ids: frozenset[str],
 ) -> dict:
     """Keep only still-actionable pending proposals after solidification."""
 
@@ -214,40 +191,18 @@ def _rebase_pending_ai_proposals(
             ):
                 continue
             action = _reanchor_proposal_action(
-                raw_proposal.get("action"), operation_map, changed_operations
+                raw_proposal.get("action"),
+                source_relation_ids,
+                final_relation_ids,
+                changed_relation_ids,
             )
             if action is None:
                 continue
             proposal = dict(raw_proposal)
             proposal["action"] = action
-            rebased.setdefault(str(action["op_index"]), []).append(proposal)
-    return rebased
-
-
-def _rebase_score_cache(
-    raw_scores: object,
-    operation_map: tuple[int | None, ...],
-    changed_operations: frozenset[int],
-) -> dict:
-    """Re-anchor scores for unchanged text and invalidate changed relations."""
-
-    if not isinstance(raw_scores, dict):
-        return {}
-    rebased = {}
-    for key, score in raw_scores.items():
-        snap, separator, sub = str(key).partition("_")
-        if not separator:
-            continue
-        try:
-            old_operation = int(snap)
-            int(sub)
-        except ValueError:
-            continue
-        if old_operation in changed_operations:
-            continue
-        new_operation = _mapped_operation(old_operation, operation_map)
-        if new_operation is not None:
-            rebased[f"{new_operation}_{sub}"] = score
+            target_ids = action.get("relation_ids") or ()
+            key = str(target_ids[0])
+            rebased.setdefault(key, []).append(proposal)
     return rebased
 
 
@@ -281,20 +236,16 @@ def _exact_relation_map(old_operations, new_operations, lines_a, lines_b):
     return tuple(result)
 
 
-def _compose_operation_maps(first, second):
-    if first is None:
-        return second
-    return tuple(
-        second[index] if index is not None and index < len(second) else None
-        for index in first
-    )
-
-
-def _rebase_repair_log(raw_actions, operation_map):
+def _rebase_repair_log(raw_actions, source_relation_ids, final_relation_ids):
     result = []
     for raw_action in raw_actions:
         action = raw_action.to_dict() if hasattr(raw_action, "to_dict") else raw_action
-        rebased = _reanchor_proposal_action(action, operation_map, frozenset())
+        rebased = _reanchor_proposal_action(
+            action,
+            source_relation_ids,
+            final_relation_ids,
+            frozenset(),
+        )
         if rebased is not None:
             result.append(rebased)
     return result
@@ -313,8 +264,7 @@ def save_pair_transaction(
     remaining_repair_log=(),
     solidification_policy: dict | None = None,
     applied_repairs=(),
-    operation_map: tuple[int | None, ...] | None = None,
-    changed_operations=(),
+    changed_relation_ids=(),
     alignment_runner=None,
 ) -> PairSaveResult:
     """Save two documents and their rebased report as one transaction.
@@ -356,7 +306,7 @@ def save_pair_transaction(
     _guard_no_missing_placeholder(text_a, text_b)
     hash_a = document_sha256_from_text(text_a)
     hash_b = document_sha256_from_text(text_b)
-    changed = frozenset(int(index) for index in changed_operations)
+    changed = frozenset(str(value) for value in changed_relation_ids)
     pair = state.to_alignment_pair()
     intermediate_operations = [
         (
@@ -367,6 +317,9 @@ def save_pair_transaction(
         for link in pair.links
         if link.state != "rejected"
     ]
+    intermediate_relation_ids = tuple(
+        link.id for link in pair.links if link.state != "rejected"
+    )
     relation_map: tuple[int | None, ...] | None = None
     rebuilt: RebuiltAlignment | None = None
     if solidification_policy is not None:
@@ -382,10 +335,14 @@ def save_pair_transaction(
                 state.document_a.blocks,
                 state.document_b.blocks,
             )
+            relation_ids = rebase_relation_ids(
+                intermediate_relation_ids, relation_map, len(operations)
+            )
         except Exception as exc:
             raise PairSaveError(f"固化后的文本重新对齐失败: {exc}") from exc
     else:
         operations = intermediate_operations
+        relation_ids = intermediate_relation_ids
     from datetime import datetime
 
     previous = dict(report)
@@ -409,14 +366,23 @@ def save_pair_transaction(
     # views to the rebuilt operation list; invalidate everything derived from a
     # relation that was actually solidified.
     if solidification_policy is not None and relation_map is not None:
-        original_to_rebuilt = _compose_operation_maps(operation_map, relation_map)
+        original_relation_ids = relation_ids_from_report(previous)
         previous["ai_proposals"] = _rebase_pending_ai_proposals(
-            previous.get("ai_proposals"), original_to_rebuilt, changed
+            previous.get("ai_proposals"),
+            original_relation_ids,
+            relation_ids,
+            changed,
         )
-        previous["scores"] = _rebase_score_cache(
-            previous.get("scores"), original_to_rebuilt, changed
+        previous["scores"] = (
+            RelationScoreCache.from_dict(previous.get("scores"), original_relation_ids)
+            .retain(set(relation_ids), excluding=changed)
+            .to_dict()
         )
-        remaining_repair_log = _rebase_repair_log(remaining_repair_log, relation_map)
+        remaining_repair_log = _rebase_repair_log(
+            remaining_repair_log,
+            intermediate_relation_ids,
+            relation_ids,
+        )
     else:
         previous["ai_proposals"] = {}
         previous["scores"] = {}
@@ -449,6 +415,7 @@ def save_pair_transaction(
         document_a_path=path_a,
         document_b_path=path_b,
         operations=operations,
+        relation_ids=relation_ids,
         stats=stats,
         quality=(
             dict(rebuilt.quality)

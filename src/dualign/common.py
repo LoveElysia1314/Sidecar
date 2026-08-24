@@ -70,20 +70,6 @@ class FilePair:
     language_b: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    @property
-    def source_path(self) -> str:
-        return self.document_a_path
-
-    @property
-    def target_path(self) -> str:
-        return self.document_b_path
-
-    @property
-    def alignment_path(self) -> str:
-        """Internal GUI alias for the sole report path."""
-
-        return self.report_path
-
 
 class FileListProvider:
     def list_entries(self) -> List[FilePair]:
@@ -91,7 +77,7 @@ class FileListProvider:
 
 
 def load_text_lines(path: str) -> list[str]:
-    """Load non-empty content lines, matching the current Snap segmentation."""
+    """Load non-empty content lines, matching content-line segmentation."""
 
     try:
         with open(path, "r", encoding="utf-8-sig") as stream:

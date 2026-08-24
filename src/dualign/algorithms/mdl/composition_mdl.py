@@ -355,9 +355,7 @@ def align_counterfactual_composition_mdl(
                     bits[np.array(source[:-1]), :].sum(axis=0),
                     bits[np.array(source[1:]), :].sum(axis=0),
                 )
-                dld_semantic = float(
-                    direct_atomic[selected] + necessity_bits[selected]
-                )
+                dld_semantic = float(direct_atomic[selected] + necessity_bits[selected])
                 semantic = dld_semantic
             else:
                 necessity_ranks = correction.ranks
@@ -406,9 +404,7 @@ def align_counterfactual_composition_mdl(
                     bits[:, np.array(target[:-1])].sum(axis=1),
                     bits[:, np.array(target[1:])].sum(axis=1),
                 )
-                dld_semantic = float(
-                    direct_atomic[selected] + necessity_bits[selected]
-                )
+                dld_semantic = float(direct_atomic[selected] + necessity_bits[selected])
                 semantic = dld_semantic
             else:
                 necessity_ranks = correction.ranks
@@ -509,9 +505,7 @@ def align_explicit_evidence_mdl(
     edge_count = len(edges)
     edge_states: list[dict[int, float]] = [{} for _edge in edges]
     predecessors: dict[tuple[int, int], int] = {}
-    tree: list[dict[int, tuple[float, int]]] = [
-        {} for _target in range(m + 2)
-    ]
+    tree: list[dict[int, tuple[float, int]]] = [{} for _target in range(m + 2)]
 
     def prune_frontier(frontier: dict[int, tuple[float, int]]) -> None:
         strongest = float("-inf")

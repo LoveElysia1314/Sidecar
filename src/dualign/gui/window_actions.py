@@ -58,13 +58,11 @@ class WindowActionsMixin:
         snaps = {int(snap_i) for snap_i in snap_indices}
         score_manager = getattr(self, "_score_mgr", None)
         if score_manager is not None:
-            score_manager.invalidate_snaps(sorted(snaps))
+            score_manager.invalidate_ordinals(sorted(snaps))
         score_cache = getattr(self, "_score_cache", None)
-        if score_cache is not None:
-            prefixes = tuple(f"{snap_i}_" for snap_i in snaps)
-            for key in list(score_cache):
-                if key.startswith(prefixes):
-                    score_cache.pop(key, None)
+        if score_cache is not None and self._repair_state is not None:
+            for snap_i in snaps:
+                score_cache.discard(self._repair_state.snapshot.relation_id(snap_i))
 
     def _set_known_snap_scores(self, snap_i: int, scores) -> None:
         """Seed scores already computed by split instead of scheduling them again."""
@@ -76,7 +74,9 @@ class WindowActionsMixin:
             if score_manager is not None:
                 score_manager.set_ready_score(snap_i, sub, score)
             if score_cache is not None:
-                score_cache[f"{snap_i}_{sub}"] = score
+                score_cache.set(
+                    self._repair_state.snapshot.relation_id(snap_i), sub, score
+                )
 
     def _on_open_demo(self):
         """打开 Demo 示例文件对的全新临时副本。
@@ -145,7 +145,8 @@ class WindowActionsMixin:
             self._safe_status("请先在审校面板中选中一个文本对")
             return
         self._undo_stack.append(self._repair_state)
-        self._repair_state = self._repair_state.reset_op(snap_i)
+        relation_id = self._repair_state.snapshot.relation_id(snap_i)
+        self._repair_state = self._repair_state.reset_relation(relation_id)
         self._invalidate_snap_scores([snap_i])
         self._reset_accepted_proposals([snap_i])
         self._refresh()
@@ -158,7 +159,7 @@ class WindowActionsMixin:
         tgt_path: str,
         label: str = "",
         *,
-        alignment_path: str = "",
+        report_path: str = "",
         document_a_id: str = "",
         document_b_id: str = "",
         language_a: str = "",
@@ -199,9 +200,9 @@ class WindowActionsMixin:
         self._tgt_path = tgt_path
         from dualign.services.cli_pipeline import default_report_path
 
-        self._alignment_path = alignment_path or str(default_report_path(src_path))
-        self._alignment_file_hash = file_bytes_sha256(self._alignment_path)
-        self._alignment_file_present = os.path.isfile(self._alignment_path)
+        self._report_path = report_path or str(default_report_path(src_path))
+        self._report_file_hash = file_bytes_sha256(self._report_path)
+        self._report_file_present = os.path.isfile(self._report_path)
         self._pair_base_state = None
         self._document_a_id = document_a_id
         self._document_b_id = document_b_id
@@ -247,7 +248,7 @@ class WindowActionsMixin:
             src_path,
             tgt_path,
             entry_id=_entry_id,
-            alignment_path=self._alignment_path,
+            report_path=self._report_path,
             expected_provenance=_provenance(None, self._align_config),
         )
         self._connect_encode_thread(self._enc_thread, self._load_op_id)
@@ -326,7 +327,7 @@ class WindowActionsMixin:
                 src_path,
                 tgt_path,
                 label,
-                alignment_path=getattr(entry, "alignment_path", ""),
+                report_path=getattr(entry, "report_path", ""),
                 document_a_id=getattr(entry, "document_a_id", ""),
                 document_b_id=getattr(entry, "document_b_id", ""),
                 language_a=getattr(entry, "language_a", ""),
@@ -518,9 +519,7 @@ class WindowActionsMixin:
                     model,
                     calibration_id=getattr(self._align_config, "calibration_id", ""),
                 )
-                calibration_id = (
-                    resolved.calibration_id if resolved is not None else ""
-                )
+                calibration_id = resolved.calibration_id if resolved is not None else ""
                 self._repair_state = None
                 self._alignment_snapshot = None
                 self._align_stats = result.stats
@@ -542,16 +541,12 @@ class WindowActionsMixin:
                         "rejections": [],
                         "indicators": {"alignment_status": "rejected"},
                     },
-                    alignment=alignment_payload(
-                        result, calibration_id=calibration_id
-                    ),
-                    provenance=_provenance(
-                        model, self._align_config, calibration_id
-                    ),
+                    alignment=alignment_payload(result, calibration_id=calibration_id),
+                    provenance=_provenance(model, self._align_config, calibration_id),
                 )
                 save_report(report, report_path)
-                self._alignment_file_hash = file_bytes_sha256(report_path)
-                self._alignment_file_present = True
+                self._report_file_hash = file_bytes_sha256(report_path)
+                self._report_file_present = True
                 reason_labels = {
                     "no_correspondence": "未检测到足够的双语对应关系",
                     "order_incompatible": "对应内容的顺序与单调对齐不兼容",
@@ -574,6 +569,9 @@ class WindowActionsMixin:
             # 保持 _sim_matrix（.npy 恢复优先），仅新鲜对齐时覆盖
             if getattr(result, "sim_matrix", None) is not None:
                 self._sim_matrix = result.sim_matrix
+
+            if hasattr(self, "_score_cache"):
+                self._score_cache.clear()
 
             # ── 尝试加载已有的修复会话 ──
             loaded = self._load_session()
@@ -598,7 +596,7 @@ class WindowActionsMixin:
                 )
 
                 flagged_ops = {
-                    action.op_index
+                    action.ordinal
                     for action in self._repair_state.repair_log
                     if action.kind == "flag"
                 }
@@ -607,7 +605,7 @@ class WindowActionsMixin:
                     result.uncertain_regions,
                     alternative_operations=result.alternative_ops,
                 ):
-                    if action.op_index not in flagged_ops:
+                    if action.ordinal not in flagged_ops:
                         self._repair_state = self._repair_state.apply(action)
 
             self._initialize_pair_editing_state(result)
@@ -658,9 +656,7 @@ class WindowActionsMixin:
                     model,
                     calibration_id=getattr(self._align_config, "calibration_id", ""),
                 )
-                calibration_id = (
-                    resolved.calibration_id if resolved is not None else ""
-                )
+                calibration_id = resolved.calibration_id if resolved is not None else ""
 
                 _report = build_report(
                     chapter_id=self._current_entry_id,
@@ -673,17 +669,13 @@ class WindowActionsMixin:
                         "rejections": rejections,
                         "indicators": indicators,
                     },
-                    alignment=alignment_payload(
-                        result, calibration_id=calibration_id
-                    ),
-                    provenance=_provenance(
-                        model, self._align_config, calibration_id
-                    ),
+                    alignment=alignment_payload(result, calibration_id=calibration_id),
+                    provenance=_provenance(model, self._align_config, calibration_id),
                     repair_log=self._repair_state.repair_log,
                 )
                 save_report(_report, _report_path)
-            self._alignment_file_hash = file_bytes_sha256(_report_path)
-            self._alignment_file_present = os.path.isfile(_report_path)
+            self._report_file_hash = file_bytes_sha256(_report_path)
+            self._report_file_present = os.path.isfile(_report_path)
 
             # ── 将初始分数载入 ScoreManager 缓存 ──
             if hasattr(self, "_score_mgr"):
@@ -692,11 +684,6 @@ class WindowActionsMixin:
                 # 对齐完成后注入 scorer（已由 load_file_pair 创建）
                 if hasattr(self, "_scorer") and self._scorer is not None:
                     self._score_mgr.set_scorer(self._scorer)
-
-            # ── 为新对齐创建全新的 score_cache（加载 session 后清除旧值）──
-            # 放在 _load_initial_scores 之后，因为后者已从 _score_cache 读取完毕
-            if hasattr(self, "_score_cache"):
-                self._score_cache.clear()
 
             # ── 退出预览模式，恢复到标准 7 列表格 ──
             if self._preview_active:
@@ -773,45 +760,46 @@ class WindowActionsMixin:
         # ── 统一合法性校验 ──
         from dualign.services.repair import RepairService
 
-        ops = RepairService.valid_operations(self._repair_state, action.op_index)
+        ops = RepairService.valid_operations(self._repair_state, action.ordinal)
         kind = action.kind
         if kind == "merge":
             if not ops.get("merge", False):
-                self._status(f"⚠ 跳过: snap[{action.op_index}] 当前不可合并", "warning")
+                self._status(f"⚠ 跳过: snap[{action.ordinal}] 当前不可合并", "warning")
                 return
         elif kind in ("split",):
             if not ops.get("split_tgt", False) and not ops.get("split_src", False):
-                self._status(f"⚠ 跳过: snap[{action.op_index}] 当前不可拆分", "warning")
+                self._status(f"⚠ 跳过: snap[{action.ordinal}] 当前不可拆分", "warning")
                 return
         elif kind in ("edit", "edit_tgt", "edit_src"):
             if not ops.get("edit", False):
-                self._status(f"⚠ 跳过: snap[{action.op_index}] 当前不可校订", "warning")
+                self._status(f"⚠ 跳过: snap[{action.ordinal}] 当前不可校订", "warning")
                 return
         elif kind == "delete":
             if not ops.get("delete", False):
-                self._status(f"⚠ 跳过: snap[{action.op_index}] 当前不可删除", "warning")
+                self._status(f"⚠ 跳过: snap[{action.ordinal}] 当前不可删除", "warning")
                 return
         elif kind in ("placeholder_src", "placeholder_tgt"):
             if not ops.get("placeholder", False):
                 self._status(
-                    f"⚠ 跳过: snap[{action.op_index}] 当前不可插占位符", "warning"
+                    f"⚠ 跳过: snap[{action.ordinal}] 当前不可插占位符", "warning"
                 )
                 return
         elif kind in ("ok", "flag"):
             if not ops.get(kind, False):
                 self._status(
-                    f"⚠ 跳过: snap[{action.op_index}] 操作 {kind} 不可用", "warning"
+                    f"⚠ 跳过: snap[{action.ordinal}] 操作 {kind} 不可用", "warning"
                 )
                 return
 
         action.data["approvals"] = {"auto"} if auto else {"manual"}
         if not auto and action.source == "auto":
             action.source = "user"
+        action = self._repair_state.bind_action(action)
         self._undo_stack.append(self._repair_state)
         self._redo_stack.clear()
         self._repair_state = self._repair_state.apply(action)
         # 标记受影响 snap 失效，等待 poll_now 捡起重算
-        _affected = action.data.get("orig_snaps", [action.op_index])
+        _affected = action.operation_indices
         self._invalidate_snap_scores(_affected)
         # 文本变更类操作 → 重置该 snap 已采纳的 AI 建议为 pending
         _text_changing_kinds = {
@@ -827,7 +815,7 @@ class WindowActionsMixin:
         if action.kind in _text_changing_kinds:
             _store = self._repair_state.ai_proposal_store
             for _si in _affected:
-                _store.reset(_si)
+                _store.reset(self._repair_state.snapshot.relation_id(_si))
             if hasattr(self, "_review"):
                 self._review._rebuild_ai_suggestions()
 
@@ -846,7 +834,7 @@ class WindowActionsMixin:
             "placeholder_tgt": "已插占位符",
         }
         lbl = _action_labels.get(kind, f"已{kind}")
-        self._set_temp_status(f"{lbl} snap[{action.op_index}]", "success")
+        self._set_temp_status(f"{lbl} snap[{action.ordinal}]", "success")
 
         # 撤销栈溢出提醒
         if len(self._undo_stack) == self._undo_stack.maxlen:
@@ -1002,7 +990,12 @@ class WindowActionsMixin:
         if self._repair_state is None:
             return
         snaps = sorted(set(snap_indices))
-        flags = [self._repair_state.flag_for_op(si) for si in snaps]
+        flags = [
+            self._repair_state.flag_for_relation(
+                self._repair_state.snapshot.relation_id(si)
+            )
+            for si in snaps
+        ]
         notes = [flag.data.get("note", "") for flag in flags if flag is not None]
         initial_note = (
             notes[0]
@@ -1049,7 +1042,8 @@ class WindowActionsMixin:
         snaps = sorted(set(snap_indices))
         state = self._repair_state
         for snap_i in snaps:
-            state = state.without_flag(snap_i)
+            relation_id = state.snapshot.relation_id(snap_i)
+            state = state.without_relation_flag(relation_id)
         if state.repair_log == self._repair_state.repair_log:
             return
         self._undo_stack.append(self._repair_state)
@@ -1196,28 +1190,29 @@ class WindowActionsMixin:
         store = self._repair_state.ai_proposal_store
         changed = False
         for si in snap_indices:
-            for p in store.get(si):
+            relation_id = self._repair_state.snapshot.relation_id(si)
+            for p in store.get(relation_id):
                 if p.status == "accepted":
                     p.reset()
                     changed = True
         if changed and hasattr(self, "_review"):
             self._review._rebuild_ai_suggestions()
 
-    def do_bundle_snaps(self, snaps: List[int]):
+    def do_bundle_relations(self, ordinals: List[int]):
         """跨 snap 合并：将多个 snap 捆绑为一个文本对。原文和译文均合并。"""
-        if self._repair_state is None or len(snaps) < 2:
+        if self._repair_state is None or len(ordinals) < 2:
             return
         self._undo_stack.append(self._repair_state)
         self._redo_stack.clear()
-        self._repair_state = RepairService.repair_bundle_snaps(
-            self._repair_state, sorted(snaps)
+        self._repair_state = RepairService.repair_bundle_relations(
+            self._repair_state, sorted(ordinals)
         )
-        self._invalidate_snap_scores([snaps[0]])
-        self._reset_accepted_proposals([snaps[0]])
+        self._invalidate_snap_scores([ordinals[0]])
+        self._reset_accepted_proposals([ordinals[0]])
         self._save_session()
         self._refresh()
         self._set_temp_status(
-            f"已合并 {len(snaps)} 个文本对 → snap[{snaps[0]}]", "success"
+            f"已合并 {len(ordinals)} 个文本对 → 关系[{ordinals[0]}]", "success"
         )
 
     def do_reset(self, snap_i: int):
@@ -1226,7 +1221,8 @@ class WindowActionsMixin:
             return
         self._undo_stack.append(self._repair_state)
         self._redo_stack.clear()
-        self._repair_state = self._repair_state.reset_op(snap_i)
+        relation_id = self._repair_state.snapshot.relation_id(snap_i)
+        self._repair_state = self._repair_state.reset_relation(relation_id)
         self._invalidate_snap_scores([snap_i])
         self._save_session()
         self._refresh()
@@ -1240,7 +1236,7 @@ class WindowActionsMixin:
         """
         self._apply_action(action, auto=False)
         self._set_temp_status(
-            f"AI 修复已应用: snap[{action.op_index}] {action.kind}", "success"
+            f"AI 修复已应用: snap[{action.ordinal}] {action.kind}", "success"
         )
 
     def _on_ai_repair_chapter(self):
@@ -1352,7 +1348,7 @@ class WindowActionsMixin:
         QApplication.processEvents()
         self._undo_stack.append(self._repair_state)
         self._repair_state = self._repair_state.reset()
-        _all_snaps = [g.snap_i for g in self._repair_state.current.groups]
+        _all_snaps = [g.ordinal for g in self._repair_state.current.groups]
         self._invalidate_snap_scores(_all_snaps)
         self._reset_accepted_proposals(_all_snaps)
         self._refresh()
@@ -1419,7 +1415,7 @@ class WindowActionsMixin:
     def _on_auto_repair_done(self, result):
         """一键修复完成 → 更新状态并刷新 UI。"""
         self._repair_state = result
-        _all_snaps = [g.snap_i for g in self._repair_state.current.groups]
+        _all_snaps = [g.ordinal for g in self._repair_state.current.groups]
         self._invalidate_snap_scores(_all_snaps)
         self._save_session()
         self._refresh()
@@ -1464,13 +1460,14 @@ class WindowActionsMixin:
 
         stats = getattr(result, "stats", {}) if result is not None else {}
         confirmed = set(stats.get("formal_confirmed_ops", ()))
-        pair_id = self._current_entry_id or Path(self._alignment_path).stem
+        pair_id = self._current_entry_id or Path(self._report_path).stem
         return create_alignment_pair(
             pair_id=pair_id,
             document_a_path=self._src_path,
             document_b_path=self._tgt_path,
-            alignment_path=self._alignment_path,
+            report_path=self._report_path,
             operations=self._repair_state.snapshot.original_ops,
+            relation_ids=self._repair_state.snapshot.relation_ids,
             document_a_id=getattr(self, "_document_a_id", ""),
             document_b_id=getattr(self, "_document_b_id", ""),
             language_a=getattr(self, "_language_a", ""),
@@ -1497,7 +1494,7 @@ class WindowActionsMixin:
             self._src_path,
             self._tgt_path,
             label,
-            alignment_path=self._alignment_path,
+            report_path=self._report_path,
             document_a_id=getattr(self, "_document_a_id", ""),
             document_b_id=getattr(self, "_document_b_id", ""),
             language_a=getattr(self, "_language_a", ""),
@@ -1509,7 +1506,7 @@ class WindowActionsMixin:
         try:
             if not self._save_session(raise_on_error=True):
                 raise ValueError("工作报告不存在，请先完成对齐")
-            saved = self._alignment_path
+            saved = self._report_path
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "保存工作报告失败", str(exc))
             return False
@@ -1556,15 +1553,14 @@ class WindowActionsMixin:
                 plan.solidified,
                 document_a_path=self._src_path,
                 document_b_path=self._tgt_path,
-                report_path=self._alignment_path,
-                report=load_report(self._alignment_path),
-                expected_report_sha256=self._alignment_file_hash,
-                expected_report_exists=self._alignment_file_present,
+                report_path=self._report_path,
+                report=load_report(self._report_path),
+                expected_report_sha256=self._report_file_hash,
+                expected_report_exists=self._report_file_present,
                 remaining_repair_log=plan.remaining_actions,
                 solidification_policy=plan.policy.to_dict(),
                 applied_repairs=plan.applied,
-                operation_map=plan.operation_map,
-                changed_operations=plan.changed_operations,
+                changed_relation_ids=plan.changed_relation_ids,
                 alignment_runner=lambda document_a, document_b: rebuild_alignment(
                     document_a,
                     document_b,
@@ -1575,8 +1571,8 @@ class WindowActionsMixin:
             QMessageBox.critical(self, "固化修改失败", str(exc))
             return
 
-        self._alignment_file_hash = result.report_sha256
-        self._alignment_file_present = True
+        self._report_file_hash = result.report_sha256
+        self._report_file_present = True
         # ── 固化成功后立即同步内存修复状态与磁盘事务结果 ──
         # _reload_current_pair() 是异步加载，窗口期内任何 _save_session()
         # 都会用旧的 repair_log / ai_proposals 覆盖已清空的报告，导致
@@ -1627,8 +1623,7 @@ class WindowActionsMixin:
                     getattr(entry, "label", ""),
                     getattr(entry, "document_a_path", ""),
                     getattr(entry, "document_b_path", ""),
-                    getattr(entry, "report_path", "")
-                    or getattr(entry, "alignment_path", ""),
+                    getattr(entry, "report_path", ""),
                 )
                 for entry in entries
             ]
@@ -1719,7 +1714,7 @@ class WindowActionsMixin:
             os.path.normcase(str(Path(target.report_path).resolve()))
             for target in result.succeeded
         }
-        current_report = os.path.normcase(str(Path(self._alignment_path).resolve()))
+        current_report = os.path.normcase(str(Path(self._report_path).resolve()))
         if current_report in succeeded_reports:
             self._repair_state = None
             self._score_cache.clear()
@@ -1759,9 +1754,8 @@ class WindowActionsMixin:
             saved = self._undo_snap_save
             self._undo_snap_save = None
             if saved is not None:
-                for i, a in enumerate(self._anomalies):
-                    snaps = a.get("snap_indices", [a.get("snap_index")])
-                    if saved in snaps:
+                for i, anomaly in enumerate(self._anomalies):
+                    if saved in anomaly.ordinals:
                         self._review.go(i, scroll_to=True)
                         break
             if undone_snaps:
@@ -1782,8 +1776,8 @@ class WindowActionsMixin:
         old_log = old_state._repair_log
         new_log = new_state._repair_log
         # 找出 old 中有但 new 中没有的 action
-        old_set = {(a.op_index, a.kind, a.timestamp) for a in old_log}
-        new_set = {(a.op_index, a.kind, a.timestamp) for a in new_log}
+        old_set = {(a.ordinal, a.kind, a.timestamp) for a in old_log}
+        new_set = {(a.ordinal, a.kind, a.timestamp) for a in new_log}
         undone = old_set - new_set
         for op_i, kind, _ts in undone:
             if kind in (
@@ -1801,7 +1795,7 @@ class WindowActionsMixin:
                 "placeholder_tgt",
             ):
                 store = new_state.ai_proposal_store
-                store.reset(op_i)
+                store.reset(new_state.snapshot.relation_id(op_i))
                 undone_snaps.add(op_i)
         return list(undone_snaps)
 
@@ -1810,7 +1804,7 @@ class WindowActionsMixin:
         if self._redo_stack:
             self._undo_stack.append(self._repair_state)
             self._repair_state = self._redo_stack.pop()
-            _all_snaps = [g.snap_i for g in self._repair_state.current.groups]
+            _all_snaps = [g.ordinal for g in self._repair_state.current.groups]
             self._invalidate_snap_scores(_all_snaps)
             self._refresh()
             self._set_temp_status(
@@ -1855,7 +1849,7 @@ class WindowActionsMixin:
 
     def _session_path(self) -> str:
         """Return the sole JSON work-report path."""
-        return getattr(self, "_alignment_path", "")
+        return getattr(self, "_report_path", "")
 
     def _invalidate_align_cache(self):
         """Remove the complete stale report before an explicit realignment."""
@@ -1867,8 +1861,8 @@ class WindowActionsMixin:
                 import traceback as _tb
 
                 _tb.print_exc()
-        self._alignment_file_hash = ""
-        self._alignment_file_present = False
+        self._report_file_hash = ""
+        self._report_file_present = False
         npy_path = path.replace(".report.json", ".sim.npy")
         if os.path.isfile(npy_path):
             try:
@@ -1884,8 +1878,8 @@ class WindowActionsMixin:
         if not path:
             return False
         present = os.path.isfile(path)
-        expected_present = getattr(self, "_alignment_file_present", False)
-        expected_hash = getattr(self, "_alignment_file_hash", "")
+        expected_present = getattr(self, "_report_file_present", False)
+        expected_hash = getattr(self, "_report_file_hash", "")
         if file_identity_changed(
             path,
             expected_exists=expected_present,
@@ -1895,8 +1889,8 @@ class WindowActionsMixin:
         if not present:
             return False
         writer(path)
-        self._alignment_file_hash = file_bytes_sha256(path)
-        self._alignment_file_present = True
+        self._report_file_hash = file_bytes_sha256(path)
+        self._report_file_present = True
         return True
 
     def _save_session(self, *, raise_on_error: bool = False) -> bool:
@@ -1910,7 +1904,7 @@ class WindowActionsMixin:
                 action.to_dict() for action in self._repair_state.repair_log
             ]
             report["ai_proposals"] = self._repair_state.ai_proposal_store.to_dict()
-            report["scores"] = dict(getattr(self, "_score_cache", {}))
+            report["scores"] = self._score_cache.to_dict()
 
         try:
             return self._write_report(lambda path: update_report(path, mutate))
@@ -1929,6 +1923,7 @@ class WindowActionsMixin:
         from dualign.services.report_io import (
             ReportError,
             load_report,
+            relation_ids_from_report,
             report_matches_documents,
         )
 
@@ -1938,18 +1933,24 @@ class WindowActionsMixin:
             return None
         if not report_matches_documents(data, self._src_path, self._tgt_path):
             return None
+        try:
+            self._alignment_snapshot = AlignmentSnapshot.from_alignment(
+                self._alignment_snapshot.ops_list,
+                self._alignment_snapshot.src_list,
+                self._alignment_snapshot.tgt_list,
+                relation_ids_from_report(data),
+            )
+        except (ReportError, ValueError):
+            return None
         log = [RepairAction.from_dict(item) for item in data.get("repair_log", [])]
         store = AiProposalStore.from_dict(data.get("ai_proposals", {}))
 
         if hasattr(self, "_score_cache"):
-            raw = data.get("scores")
-            if isinstance(raw, dict):
-                self._score_cache.clear()
-                for k, v in raw.items():
-                    try:
-                        self._score_cache[str(k)] = float(v)
-                    except (ValueError, TypeError):
-                        pass
+            from dualign.models.score_cache import RelationScoreCache
+
+            self._score_cache = RelationScoreCache.from_dict(
+                data.get("scores"), self._alignment_snapshot.relation_ids
+            )
 
         return RepairState(self._alignment_snapshot, log, store)
 
@@ -2056,4 +2057,4 @@ class WindowActionsMixin:
 
     def _on_view_alignment(self):
         """打开当前工作报告。"""
-        self._view_file_safe(getattr(self, "_alignment_path", ""), "工作报告")
+        self._view_file_safe(getattr(self, "_report_path", ""), "工作报告")

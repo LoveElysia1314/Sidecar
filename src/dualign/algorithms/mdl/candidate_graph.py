@@ -64,8 +64,7 @@ def _centered_windows(
     if len(points) <= 2:
         return [((0, 0), (n, m))]
     return [
-        (points[index - 1], points[index + 1])
-        for index in range(1, len(points) - 1)
+        (points[index - 1], points[index + 1]) for index in range(1, len(points) - 1)
     ]
 
 

@@ -103,10 +103,7 @@ class DualignConfig:
             self._data = {}
         legacy = self._data.pop("quality_gate", None)
         migrated = legacy is not None
-        if (
-            isinstance(legacy, dict)
-            and KEY_ANOMALY_DETECTION not in self._data
-        ):
+        if isinstance(legacy, dict) and KEY_ANOMALY_DETECTION not in self._data:
             self._data[KEY_ANOMALY_DETECTION] = {
                 "zscore_k": legacy.get("zscore_k", 3.0),
                 "zscore_min_score": legacy.get("zscore_min_score", 0.6),

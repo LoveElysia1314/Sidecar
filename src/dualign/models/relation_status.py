@@ -1,5 +1,5 @@
 """
-Dualign — SnapState: 三层化文本对状态
+Dualign — RelationStatus: 对齐关系的派生审阅状态
 
 Layer 1: 原始对齐事实 — 写入后只读
 Layer 2: 当前文本状态 — 随修复更新
@@ -9,7 +9,7 @@ Layer 3: 处理历史 — 随操作追加
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from dualign.models.state import AlignmentSnapshot, MISSING
@@ -24,8 +24,6 @@ from dualign.core import detect_language_mix, _smart_join_lines
 # 语义是“机器已提出拟修复，尚未审核”，不是“已自动批准”。
 APPROVAL_NONE = "none"
 APPROVAL_PROPOSED = "auto"
-# 兼容旧 API 名称；新代码应使用 APPROVAL_PROPOSED。
-APPROVAL_AUTO = APPROVAL_PROPOSED
 APPROVAL_AGENT = "agent"
 APPROVAL_USER = "user"
 
@@ -63,7 +61,7 @@ def auto_repair_note(n_src: int, n_tgt: int, strategy: str, approval: str = "") 
     strategy_name = {"minimal": "minimal", "src": "src-first", "tgt": "tgt-first"}.get(
         strategy, "src-first"
     )
-    is_repaired = approval == APPROVAL_AUTO
+    is_repaired = approval == APPROVAL_PROPOSED
 
     if n_src == 1 and n_tgt == 1:
         return ""
@@ -149,17 +147,17 @@ def is_would_action(action: str) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════
-# compute_snap_preview — 为非 1:1 snap 计算合并/修复预览
+# compute_relation_preview — 为非 1:1 关系计算合并/修复预览
 # ═══════════════════════════════════════════════════════════════
 
 
-def compute_snap_preview(snapshot: AlignmentSnapshot, snap_i: int) -> str:
-    """为非 1:1 snap 计算将全部行连接为 1:1 后的文本预览。
+def compute_relation_preview(snapshot: AlignmentSnapshot, ordinal: int) -> str:
+    """为非 1:1 关系计算将全部行连接为 1:1 后的文本预览。
 
     展示所有 src 行和所有 tgt 行分别拼接的结果。
     不修改任何实际状态。
     """
-    s_idx, t_idx, _sc = snapshot.original_ops[snap_i]
+    s_idx, t_idx, _sc = snapshot.original_ops[ordinal]
     ls, lt = len(s_idx), len(t_idx)
 
     if ls == 0 and lt > 0:
@@ -230,7 +228,7 @@ def build_context_windows(
 
 
 # ═══════════════════════════════════════════════════════════════
-# SnapState
+# RelationStatus
 # ═══════════════════════════════════════════════════════════════
 
 
@@ -246,7 +244,7 @@ def _parse_type(pt: str) -> Tuple[int, int]:
 
 
 @dataclass
-class SnapState:
+class RelationStatus:
     """单个文本对的三层状态。
 
     Layer 1 — 对齐完成后一次性写入，永不变化。
@@ -317,11 +315,6 @@ class SnapState:
         return labels
 
     @property
-    def anomaly_types(self) -> List[str]:
-        """向后兼容别名，指向 initial_anomaly_types。"""
-        return self.initial_anomaly_types
-
-    @property
     def is_reviewable(self) -> bool:
         """用户已审校或已删除 → 不再需审校。GUI 和 AI 共用。"""
         if self.approval == APPROVAL_USER:
@@ -346,19 +339,19 @@ class SnapState:
 
 
 # ═══════════════════════════════════════════════════════════════
-# SnapInfo — AI 视图（只含 Layer 2 + Layer 3 部分）
+# RelationReviewInfo — AI 视图（只含 Layer 2 + Layer 3 部分）
 # ═══════════════════════════════════════════════════════════════
 
 
 @dataclass
-class SnapInfo:
+class RelationReviewInfo:
     """AI 看到的 snap——不包含任何原始对齐事实。
 
-    从 SnapState 的 Layer 2 + Layer 3 构建，供 AI Agent 使用。
+    从 RelationStatus 的 Layer 2 + Layer 3 构建，供 AI Agent 使用。
     用 n_src_rows/n_tgt_rows 替代旧 cur_type 字符串。
     """
 
-    snap_id: int
+    ordinal: int
     # 当前文本（待审校状态）
     n_src_rows: int
     n_tgt_rows: int
@@ -389,7 +382,7 @@ class SnapInfo:
 
     @property
     def is_reviewable(self) -> bool:
-        """委托给 SnapState 的逻辑 —— approval != user + 有异常。NON_1TO1 基于原始对齐事实判定。"""
+        """基于当前审批与原始/当前异常判断是否需要审阅。"""
         if self.approval == APPROVAL_USER:
             return False
         if self.initial_n_src == 0 and self.initial_n_tgt == 0:
@@ -414,7 +407,7 @@ class SnapInfo:
         initial_src/initial_tgt 始终展示（当存在时），使 AI 在 edit 决策时
         能直接参考初始文本——edit 操作的是初始文本，不是当前文本。
         """
-        d = {"id": self.snap_id}
+        d = {"id": self.ordinal}
         sigs = self.signals
         if sigs:
             d["signals"] = sigs
@@ -438,6 +431,29 @@ class SnapInfo:
         if self.initial_tgt_text and self.initial_tgt_text != self.tgt_text:
             d["initial_tgt"] = [ln for ln in self.initial_tgt_text.split("\n") if ln]
         return json.dumps(d, ensure_ascii=False)
+
+
+@dataclass(frozen=True)
+class RelationAnomaly:
+    """Typed GUI projection for one reviewable current relation."""
+
+    relation_ids: tuple[str, ...] = ()
+    ordinals: tuple[int, ...] = ()
+    src_text: str = ""
+    tgt_text: str = ""
+    init_type: str = ""
+    cur_type: str = ""
+    score: float = 0.0
+    marker: str = ""
+    resolution: str = ""
+    note: str = ""
+    approval: str = APPROVAL_NONE
+    signals: tuple[str, ...] = ()
+    anomaly_types: tuple[str, ...] = ()
+
+    @property
+    def ordinal(self) -> int | None:
+        return self.ordinals[0] if self.ordinals else None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -489,155 +505,97 @@ def _action_summary(
     )
 
 
-def build_snap_states(
-    snapshot: AlignmentSnapshot,
-    src_lines: List[str],
-    tgt_lines: List[str],
-    repair_log: Optional[List[RepairAction]] = None,
-    mu: float = None,
-    sigma: float = None,
-    k: float = 3.0,
-) -> List[SnapState]:
-    """统一的 SnapState 构建入口。
+def project_relation_statuses(repair_state, k: float = 3.0) -> List[RelationStatus]:
+    """Project the sole repair state into immutable review statuses once."""
 
-    从 AlignmentSnapshot 写入 Layer 1，从原始文本写入 Layer 2 初值，
-    从 repair_log 写入 Layer 3。
-
-    CLI 和 GUI 共用此函数。
-    """
-    log = repair_log or []
-    total = len(snapshot.original_ops)
-
-    # 1:1 对的评分列表（用于 Z-score 检测）
+    snapshot = repair_state.snapshot
+    chapter = repair_state.current
+    repair_log = repair_state.repair_log
     scores_1to1 = [
-        sc for s, t, sc in snapshot.original_ops if len(s) == 1 and len(t) == 1
+        score
+        for source, target, score in snapshot.original_ops
+        if len(source) == 1 and len(target) == 1
     ]
+    actions_by_ordinal: dict[int, list[RepairAction]] = {}
+    for action in repair_log:
+        for ordinal in action.operation_indices:
+            actions_by_ordinal.setdefault(ordinal, []).append(action)
 
-    states: List[SnapState] = []
-
-    for si in range(total):
-        s_idx, t_idx, sc = snapshot.original_ops[si]
-        ls, lt = len(s_idx), len(t_idx)
-        init_type = f"{ls}:{lt}"
-
-        # Layer 1
-        is_low = (
-            _calc_low_score(scores_1to1, float(sc)) if ls == 1 and lt == 1 else False
+    statuses: list[RelationStatus] = []
+    for ordinal, (source, target, score) in enumerate(snapshot.original_ops):
+        initial_source_count = len(source)
+        initial_target_count = len(target)
+        initial_target_text = "\n".join(snapshot.tgt_text(index) for index in target)
+        initial_has_mix = (
+            detect_language_mix(initial_target_text)
+            if initial_target_text.strip()
+            else False
         )
-
-        # Layer 2 初值
-        src_raw = "\n".join(snapshot.src_text(i) for i in s_idx) if s_idx else ""
-        tgt_raw = "\n".join(snapshot.tgt_text(j) for j in t_idx) if t_idx else ""
-        has_missing = MISSING in src_raw or MISSING in tgt_raw
-        has_mix = any(
-            j < len(tgt_lines) and detect_language_mix(tgt_lines[j]) for j in t_idx
+        group = chapter.group(ordinal)
+        current_source_text = (
+            "\n".join(row.src_text for row in group.rows if row.src_text)
+            if group is not None
+            else ""
         )
+        current_target_text = (
+            "\n".join(row.tgt_text for row in group.rows if row.tgt_text)
+            if group is not None
+            else ""
+        )
+        if group is None:
+            current_source_count = 0
+            current_target_count = 0
+        elif group.rows and is_merge(group.rows[0].marker):
+            current_source_count = current_target_count = 1
+        else:
+            current_source_count = sum(bool(row.src_text.strip()) for row in group.rows)
+            current_target_count = sum(bool(row.tgt_text.strip()) for row in group.rows)
+            if current_source_count == 0 and current_target_count == 0:
+                current_source_count = group.rows[0].n_src if group.rows else 1
+                current_target_count = group.rows[0].n_tgt if group.rows else 1
 
-        # Layer 3: flag 仅当是最新操作时才携带 FLAGGED 异常
-        # 任何后续非 flag 操作（ok/edit/merge/delete 等）自动清除标记待查
-        my_actions = [a for a in log if a.op_index == si]
-        last_act, repair_count, is_flagged = _action_summary(my_actions)
-
-        states.append(
-            SnapState(
-                # Layer 1
-                init_type=init_type,
-                init_score=float(sc),
-                is_low_score=is_low,
-                init_has_language_mix=has_mix,
-                # Layer 2
-                n_src=ls,
-                n_tgt=lt,
-                has_missing=has_missing,
-                has_language_mix=has_mix,
-                is_deleted=last_act is not None and last_act.kind == "delete",
-                # Layer 3
-                approval=_derive_approval(last_act),
+        last_action, repair_count, is_flagged = _action_summary(
+            actions_by_ordinal.get(ordinal, [])
+        )
+        statuses.append(
+            RelationStatus(
+                init_type=f"{initial_source_count}:{initial_target_count}",
+                init_score=float(score),
+                is_low_score=(
+                    _calc_low_score(scores_1to1, float(score), k=k)
+                    if initial_source_count == initial_target_count == 1
+                    else False
+                ),
+                init_has_language_mix=initial_has_mix,
+                n_src=current_source_count,
+                n_tgt=current_target_count,
+                has_missing=(
+                    MISSING in current_source_text or MISSING in current_target_text
+                ),
+                has_language_mix=(
+                    detect_language_mix(current_target_text)
+                    if current_target_text.strip()
+                    else False
+                ),
+                is_deleted=group is None
+                or (last_action is not None and last_action.kind == "delete"),
+                approval=_derive_approval(last_action),
                 repair_count=repair_count,
-                last_source=last_act.source if last_act else "",
-                last_operation=last_act.kind if last_act else "",
+                last_source=last_action.source if last_action else "",
+                last_operation=last_action.kind if last_action else "",
                 is_flagged=is_flagged,
             )
         )
-
-    return states
-
-
-def refresh_snap_states(
-    states: List[SnapState],
-    snapshot: AlignmentSnapshot,
-    ch_state,
-    repair_log: List[RepairAction],
-) -> List[SnapState]:
-    """从 RepairState 更新 Layer 2 + Layer 3。
-
-    保留 Layer 1 字段（init_type/init_score/is_low_score/init_has_language_mix），
-    不随当前文本状态变化。NON_1TO1 / LOW_SCORE 均为基于原始状态的不可变异常。
-    MIX（initial_anomaly_types）使用 init_has_language_mix（Layer 1 不可变），
-    MIX（current_anomaly_types）使用 has_language_mix（Layer 2 可变——随编辑重新检测）。
-    仅 FLAGGED 基于当前 flag 操作（Layer 3）。
-
-    在 auto_repair 或 AI 审校后调用，保持 states 与最新修复状态同步。
-    ch_state 是 ChapterState (repair_state.current)。
-    """
-    total = min(len(states), len(snapshot.original_ops))
-    new_states = list(states)
-
-    for si in range(total):
-        g = ch_state.group(si)
-        if g is None:
-            new_states[si] = replace(states[si], is_deleted=True)
-            continue
-
-        src = "\n".join(r.src_text for r in g.rows if r.src_text)
-        tgt = "\n".join(r.tgt_text for r in g.rows if r.tgt_text)
-        has_missing = MISSING in src or MISSING in tgt
-        # 当前文本内容 → 重新检测语言杂糅（Layer 2 可变，随编辑更新）
-        has_mix = detect_language_mix(tgt) if tgt.strip() else False
-
-        # 基于当前文本内容计算 n_src/n_tgt，而非过时的对齐元数据
-        if g.rows and is_merge(g.rows[0].marker):
-            # 合并在逻辑层面已将文本对变为 1:1
-            n_src = 1
-            n_tgt = 1
-        else:
-            n_src = sum(1 for r in g.rows if r.src_text.strip())
-            n_tgt = sum(1 for r in g.rows if r.tgt_text.strip())
-        # 保护：至少 1 除非确实两边都空
-        if n_src == 0 and n_tgt == 0:
-            n_src = g.rows[0].n_src if g.rows else 1
-            n_tgt = g.rows[0].n_tgt if g.rows else 1
-
-        # Layer 3: flag 仅当是最新操作时才携带 FLAGGED
-        my_actions = [a for a in repair_log if a.op_index == si]
-        last_act, repair_count, is_flagged = _action_summary(my_actions)
-
-        new_states[si] = SnapState(
-            init_type=states[si].init_type,
-            init_score=states[si].init_score,
-            is_low_score=states[si].is_low_score,
-            init_has_language_mix=states[si].init_has_language_mix,
-            n_src=n_src,
-            n_tgt=n_tgt,
-            has_missing=has_missing,
-            has_language_mix=has_mix,
-            is_deleted=last_act is not None and last_act.kind == "delete",
-            approval=_derive_approval(last_act),
-            repair_count=repair_count,
-            last_source=last_act.source if last_act else states[si].last_source,
-            last_operation=last_act.kind if last_act else states[si].last_operation,
-            is_flagged=is_flagged,
-        )
-
-    return new_states
+    return statuses
 
 
-def snap_state_to_info(
-    state: SnapState, snap_id: int, src_text: str, tgt_text: str
-) -> SnapInfo:
-    """将 SnapState 转换为 AI 视图 SnapInfo（只含 Layer 2 + Layer 3）。"""
-    return SnapInfo(
-        snap_id=snap_id,
+def relation_status_to_info(
+    state: RelationStatus, ordinal: int, src_text: str, tgt_text: str
+) -> RelationReviewInfo:
+    """Convert a projected relation status into the compact AI view."""
+
+    return RelationReviewInfo(
+        ordinal=ordinal,
         n_src_rows=state.n_src,
         n_tgt_rows=state.n_tgt,
         src_text=src_text,

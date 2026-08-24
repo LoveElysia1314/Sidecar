@@ -114,7 +114,9 @@ def align(
     if algorithm == ALGORITHM_LEGACY_ANCHOR_V1:
         from dualign.core.legacy_anchor_aligner import align as legacy_align
 
-        legacy_cfg = cfg if isinstance(cfg, LegacyAnchorConfig) else LegacyAnchorConfig()
+        legacy_cfg = (
+            cfg if isinstance(cfg, LegacyAnchorConfig) else LegacyAnchorConfig()
+        )
         return _adapt_legacy(
             legacy_align(
                 lines_a,

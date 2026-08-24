@@ -30,14 +30,6 @@ from dualign.services.pair_save import (
     save_pair_transaction,
 )
 from dualign.services.realignment import RebuiltAlignment, rebuild_alignment
-from dualign.services.change_set import (
-    PairChangeSet,
-    build_pair_change_set,
-)
-from dualign.services.pair_editing_adapter import (
-    apply_repair_log_to_pair_state,
-    link_id_for_operation,
-)
 from dualign.services.quality_gate import (
     assess_alignment_quality,
     automatic_repair_blockers,
@@ -99,14 +91,9 @@ __all__ = [
     "PairSaveError",
     "PairSaveResult",
     "recover_pending_pair_saves",
-    "PairChangeSet",
-    "build_pair_change_set",
     "save_pair_transaction",
     "RebuiltAlignment",
     "rebuild_alignment",
-    # editing bridge
-    "apply_repair_log_to_pair_state",
-    "link_id_for_operation",
     # quality_gate
     "assess_alignment_quality",
     "automatic_repair_blockers",

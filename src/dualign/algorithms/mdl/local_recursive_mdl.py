@@ -80,9 +80,7 @@ def select_path_conditioned_composition(
     )
 
 
-def _all_gapless_edges(
-    scores: np.ndarray, evidence: np.ndarray
-) -> list[CandidateEdge]:
+def _all_gapless_edges(scores: np.ndarray, evidence: np.ndarray) -> list[CandidateEdge]:
     """Enumerate every structurally live N:1/1:N edge in the local rectangle."""
 
     matrix = np.asarray(scores, dtype=np.float64)
@@ -185,9 +183,7 @@ def align_gapless_evidence_mdl(
 
     states: dict[tuple[int, int], dict[int, float]] = {(0, 0): {0: 0.0}}
     path_counts: dict[tuple[int, int], dict[int, int]] = {(0, 0): {0: 1}}
-    backtrace: dict[
-        tuple[int, int, int], tuple[int, int, int, int]
-    ] = {}
+    backtrace: dict[tuple[int, int, int], tuple[int, int, int, int]] = {}
     for coordinate_sum in range(n + m + 1):
         for source in range(max(0, coordinate_sum - m), min(n, coordinate_sum) + 1):
             target = coordinate_sum - source
@@ -300,9 +296,7 @@ def _replace_semantics(
     diagnostics: tuple[dict, ...],
 ) -> list[CandidateEdge]:
     compound = {
-        (tuple(item["source"]), tuple(item["target"])): float(
-            item["semantic_bits"]
-        )
+        (tuple(item["source"]), tuple(item["target"])): float(item["semantic_bits"])
         for item in diagnostics
     }
     atomic = {(edge.source, edge.target): edge for edge in atomic_edges}
@@ -494,8 +488,6 @@ def align_local_recursive_mdl(
             "dld_complexity": dld.complexity,
             "posterior_complexity": posterior.complexity,
             "raw_composition_complexity": raw.complexity,
-            "raw_composition_optimal_paths": raw.solver_stats[
-                "optimal_path_ties"
-            ],
+            "raw_composition_optimal_paths": raw.solver_stats["optimal_path_ties"],
         },
     )

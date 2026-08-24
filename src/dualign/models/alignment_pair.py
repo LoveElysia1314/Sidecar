@@ -171,19 +171,24 @@ class AlignmentPair:
         document_a: DocumentReference,
         document_b: DocumentReference,
         operations: Iterable[tuple[Iterable[int], Iterable[int], float]],
+        relation_ids: Iterable[str] = (),
         segmentation: str = CONTENT_LINE_SEGMENTATION,
         provenance: Mapping[str, Any] | None = None,
         state: str = "suggested",
     ) -> "AlignmentPair":
         """Build an editing graph from Dualign's zero-based alignment operations."""
 
+        from dualign.models.relation_identity import normalize_relation_ids
+
+        operation_list = list(operations)
+        normalized_ids = normalize_relation_ids(len(operation_list), relation_ids)
         links = []
-        for index, (side_a, side_b, score) in enumerate(operations, start=1):
+        for relation_id, (side_a, side_b, score) in zip(normalized_ids, operation_list):
             numeric_score = float(score)
             confidence = numeric_score if 0.0 <= numeric_score <= 1.0 else None
             links.append(
                 AlignmentLink(
-                    id=f"L{index:06d}",
+                    id=relation_id,
                     document_a=tuple(value + 1 for value in side_a),
                     document_b=tuple(value + 1 for value in side_b),
                     confidence=confidence,

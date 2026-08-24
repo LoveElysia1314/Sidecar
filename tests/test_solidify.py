@@ -190,15 +190,17 @@ def test_split_solidification_rebuilds_ops_and_removes_applied_action(tmp_path: 
     assert path_b.read_text(encoding="utf-8") == "A\nB\n"
     saved = load_report(report_path)
     assert saved["ops"] == [
-        {"s": [0], "t": [0], "sc": 0.75},
-        {"s": [1], "t": [1], "sc": 0.75},
+        {"id": "L000002", "s": [0], "t": [0], "sc": 0.75},
+        {"id": "L000003", "s": [1], "t": [1], "sc": 0.75},
     ]
     assert saved["repair_log"] == []
     assert saved["history"][-1]["type"] == "selective-solidification"
 
 
 def test_cross_snap_two_sided_merge_is_atomic(tmp_path: Path):
-    action = RepairAction.make_merge(0, sub_count=2, source="user", orig_snaps=[0, 1])
+    action = RepairAction.make_merge(
+        0, sub_count=2, source="user", operation_indices=(0, 1)
+    )
     path_a, path_b, report_path = _report_case(
         tmp_path,
         "甲\n乙\n",
@@ -218,7 +220,7 @@ def test_cross_snap_two_sided_merge_is_atomic(tmp_path: Path):
     assert path_a.read_text(encoding="utf-8") == "甲乙\n"
     assert path_b.read_text(encoding="utf-8") == "A B\n"
     saved = load_report(report_path)
-    assert saved["ops"] == [{"s": [0], "t": [0], "sc": 0.75}]
+    assert saved["ops"] == [{"id": "L000001", "s": [0], "t": [0], "sc": 0.75}]
     assert saved["repair_log"] == []
     assert materialize_reader_rows(report_path, path_a, path_b) == (["甲乙"], ["A B"])
 
@@ -243,7 +245,10 @@ def test_two_sided_split_requires_both_split_types(tmp_path: Path):
     )
 
     assert partial_result is None
-    assert partial.remaining_actions == (action,)
+    assert len(partial.remaining_actions) == 1
+    assert partial.remaining_actions[0].kind == action.kind
+    assert partial.remaining_actions[0].data == action.data
+    assert partial.remaining_actions[0].relation_ids == ("L000001",)
     assert path_a.read_text(encoding="utf-8") == "甲乙\n"
     assert path_b.read_text(encoding="utf-8") == "AB\n"
 

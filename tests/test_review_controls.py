@@ -7,6 +7,7 @@ from dualign.gui.review import REVIEW_SHORTCUTS, ReviewController
 from dualign.gui.settings import DualignConfig, KEY_AUTO_NEXT_CHAPTER
 from dualign.gui.window import DualignWindow
 from dualign.models.action import RepairAction
+from dualign.models.relation_status import RelationAnomaly
 from dualign.services.repair import RepairState
 
 
@@ -21,7 +22,7 @@ class _Emitter:
 class _ReviewNavigationHarness:
     def __init__(self, auto_next):
         self._current_idx = 0
-        self._anomalies = [{"approval": "user"}]
+        self._anomalies = [RelationAnomaly(approval="user")]
         self._auto_next = auto_next
         self.next_chapter_requested = _Emitter()
         self.visited = []
@@ -150,17 +151,22 @@ def test_flag_note_update_and_removal_are_single_undoable_operations():
     window._set_flags([0], "拆分失败：文本重对齐失败")
 
     assert len(window._undo_stack) == 1
-    assert window._repair_state.flag_for_op(0).data["note"].endswith("重对齐失败")
+    relation_id = window._repair_state.snapshot.relation_id(0)
+    assert (
+        window._repair_state.flag_for_relation(relation_id)
+        .data["note"]
+        .endswith("重对齐失败")
+    )
 
     window._remove_flags([0])
 
     assert len(window._undo_stack) == 2
-    assert window._repair_state.flag_for_op(0) is None
-    assert window._repair_state.action_for_op(0).kind == "edit"
+    assert window._repair_state.flag_for_relation(relation_id) is None
+    assert window._repair_state.action_for_relation(relation_id).kind == "edit"
 
 
 def test_new_chapter_focus_prefers_first_visible_anomaly():
-    window = _InitialFocusHarness([{"snap_index": 12, "snap_indices": [12]}], {12})
+    window = _InitialFocusHarness([RelationAnomaly(ordinals=(12,))], {12})
 
     assert WindowTableMixin._initial_focus_target(window) == 12
 

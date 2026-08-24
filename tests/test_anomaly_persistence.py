@@ -9,12 +9,10 @@ import pytest
 from dualign.models.state import AlignmentSnapshot
 from dualign.models.action import RepairAction
 from dualign.services.repair import RepairState, RepairService
-from dualign.models.snap_state import (
-    SnapState,
-    build_snap_states,
-    refresh_snap_states,
+from dualign.models.relation_status import (
+    project_relation_statuses,
     APPROVAL_NONE,
-    APPROVAL_AUTO,
+    APPROVAL_PROPOSED,
     APPROVAL_AGENT,
     APPROVAL_USER,
 )
@@ -83,13 +81,8 @@ def raw_state(mixed_snapshot):
 
 
 @pytest.fixture
-def raw_states(mixed_snapshot):
-    return build_snap_states(
-        mixed_snapshot,
-        list(mixed_snapshot.original_src_lines),
-        list(mixed_snapshot.original_tgt_lines),
-        repair_log=[],
-    )
+def raw_states(raw_state):
+    return project_relation_statuses(raw_state)
 
 
 @pytest.fixture
@@ -99,14 +92,8 @@ def repaired_state(raw_state):
 
 
 @pytest.fixture
-def repaired_states(raw_states, mixed_snapshot, repaired_state):
-    """auto_repair 后 refreshed 的 SnapState 列表。"""
-    return refresh_snap_states(
-        raw_states,
-        mixed_snapshot,
-        repaired_state.current,
-        repaired_state.repair_log,
-    )
+def repaired_states(repaired_state):
+    return project_relation_statuses(repaired_state)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -118,8 +105,8 @@ class TestMultiPersistence:
     """NON_1TO1 异常（1:2, 2:1）的双模行为。"""
 
     def test_raw_multi_detected(self, raw_states):
-        assert "NON_1TO1" in raw_states[5].anomaly_types  # 1:2
-        assert "NON_1TO1" in raw_states[7].anomaly_types  # 2:1
+        assert "NON_1TO1" in raw_states[5].initial_anomaly_types  # 1:2
+        assert "NON_1TO1" in raw_states[7].initial_anomaly_types  # 2:1
 
     def test_multi_persists_after_auto_repair(self, repaired_states):
         """可执行的 merge 被修复；缺少模型的 split 保持原生关系。"""
@@ -132,16 +119,16 @@ class TestMultiPersistence:
         # merge → 逻辑 1:1
         assert "NON_1TO1" not in repaired_states[5].current_anomaly_types
         assert "NON_1TO1" in repaired_states[7].current_anomaly_types
-        assert repaired_states[5].approval == APPROVAL_AUTO
+        assert repaired_states[5].approval == APPROVAL_PROPOSED
         assert repaired_states[7].approval == APPROVAL_NONE
 
     def test_multi_after_ai_ok(self, repaired_state, repaired_states, mixed_snapshot):
         """AI ok 解析为 merge — merge 已使逻辑为 1:1，current 不再含 NON_1TO1。"""
         # AI 的 ok 在 ToolExecutor 层面解析为真实的操作 kind
-        s2 = repaired_state.apply(RepairAction(op_index=5, kind="merge", source="ai"))
-        r2 = refresh_snap_states(
-            repaired_states, mixed_snapshot, s2.current, s2.repair_log
+        s2 = repaired_state.apply(
+            RepairAction(kind="merge", source="ai", operation_indices=(5,))
         )
+        r2 = project_relation_statuses(s2)
         assert "NON_1TO1" in r2[5].initial_anomaly_types
         assert "NON_1TO1" not in r2[5].current_anomaly_types  # merge → 逻辑 1:1
         assert r2[5].approval == APPROVAL_AGENT
@@ -151,10 +138,10 @@ class TestMultiPersistence:
         self, repaired_state, repaired_states, mixed_snapshot
     ):
         """人类 ok — approval=USER → is_reviewable=False。"""
-        s2 = repaired_state.apply(RepairAction(op_index=5, kind="ok", source="user"))
-        r2 = refresh_snap_states(
-            repaired_states, mixed_snapshot, s2.current, s2.repair_log
+        s2 = repaired_state.apply(
+            RepairAction(kind="ok", source="user", operation_indices=(5,))
         )
+        r2 = project_relation_statuses(s2)
         assert not r2[5].is_reviewable
         assert r2[5].approval == APPROVAL_USER
 
@@ -168,24 +155,22 @@ class TestOrphanPersistence:
     """NON_1TO1 异常（1:0, 0:1）的双模行为。"""
 
     def test_raw_orphan_detected(self, raw_states):
-        assert "NON_1TO1" in raw_states[8].anomaly_types  # 1:0
+        assert "NON_1TO1" in raw_states[8].initial_anomaly_types  # 1:0
 
     def test_orphan_persists_after_auto_repair(self, repaired_states):
         """auto_repair 将 1:0 → placeholder_tgt — 占位后 n_src=n_tgt=1，current NON_1TO1 解除。"""
         assert "NON_1TO1" in repaired_states[8].initial_anomaly_types
         assert "NON_1TO1" not in repaired_states[8].current_anomaly_types  # 占位补为1:1
-        assert repaired_states[8].approval == APPROVAL_AUTO
+        assert repaired_states[8].approval == APPROVAL_PROPOSED
         assert repaired_states[8].has_missing
 
     def test_orphan_after_ai_ok(self, repaired_state, repaired_states, mixed_snapshot):
         """AI ok 解析为 placeholder_tgt — 占位文本保持不变，current 仍无 NON_1TO1。"""
         # AI 的 ok 在 ToolExecutor 层面解析为真实的操作 kind
         s2 = repaired_state.apply(
-            RepairAction(op_index=8, kind="placeholder_tgt", source="ai")
+            RepairAction(kind="placeholder_tgt", source="ai", operation_indices=(8,))
         )
-        r2 = refresh_snap_states(
-            repaired_states, mixed_snapshot, s2.current, s2.repair_log
-        )
+        r2 = project_relation_statuses(s2)
         assert "NON_1TO1" in r2[8].initial_anomaly_types
         assert "NON_1TO1" not in r2[8].current_anomaly_types  # 占位后结构不变
         assert r2[8].approval == APPROVAL_AGENT
@@ -195,10 +180,10 @@ class TestOrphanPersistence:
         self, repaired_state, repaired_states, mixed_snapshot
     ):
         """人类 ok — approval=USER → is_reviewable=False。"""
-        s2 = repaired_state.apply(RepairAction(op_index=8, kind="ok", source="user"))
-        r2 = refresh_snap_states(
-            repaired_states, mixed_snapshot, s2.current, s2.repair_log
+        s2 = repaired_state.apply(
+            RepairAction(kind="ok", source="user", operation_indices=(8,))
         )
+        r2 = project_relation_statuses(s2)
         assert not r2[8].is_reviewable
         assert r2[8].approval == APPROVAL_USER
 
@@ -206,9 +191,7 @@ class TestOrphanPersistence:
 # ═══════════════════════════════════════════════════════════════
 # LOW_SCORE 持久化说明
 #
-# LOW_SCORE 的 is_low_score 字段在 build_snap_states 中设置后，
-# refresh_snap_states 直接继承 states[si].is_low_score，不会重新计算。
-# 因此只要初始检测通过，持久化是自动保证的。
+# LOW_SCORE 只由不可变初始评分计算，当前修复不会改变它。
 # Z-score 检测本身由 anomaly_detection 的 is_statistical_low_score 覆盖。
 # ═══════════════════════════════════════════════════════════════
 
@@ -222,9 +205,9 @@ class TestNormalAnchors:
     """正常 1:1 锚点不产生异常。"""
 
     def test_normal_anchor_no_anomaly(self, raw_states):
-        assert raw_states[0].anomaly_types == []
+        assert raw_states[0].initial_anomaly_types == []
         assert not raw_states[0].is_reviewable
 
     def test_normal_anchor_after_auto_repair(self, repaired_states):
-        assert repaired_states[9].anomaly_types == []
+        assert repaired_states[9].initial_anomaly_types == []
         assert not repaired_states[9].is_reviewable

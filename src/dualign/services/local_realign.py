@@ -14,7 +14,6 @@ from dualign.algorithms.mdl.local_recursive_mdl import (
 )
 from dualign.algorithms.mdl.mdl_aligner import Operation
 
-
 LOCAL_REALIGN_ALIGNED = "aligned"
 LOCAL_REALIGN_NEEDS_REVIEW = "needs_review"
 LOCAL_REASON_COMPLEXITY_DISAGREEMENT = "complexity_disagreement"

@@ -38,9 +38,7 @@ def test_three_by_two_gapless_universe_contains_the_two_legal_paths():
     assert _gapless_structure_counts(3, 2, edges) == {1: 2}
 
     tied_edges = _all_gapless_edges(np.zeros((3, 2)), np.zeros((3, 2)))
-    tied = align_gapless_evidence_mdl(
-        3, 2, tied_edges, uniform_script_code=True
-    )
+    tied = align_gapless_evidence_mdl(3, 2, tied_edges, uniform_script_code=True)
     assert tied.solver_stats["optimal_path_ties"] == 2
 
 

@@ -28,12 +28,11 @@ from typing import Callable, Dict, Iterable, List, Optional
 
 from dualign.models.action import RepairAction
 from dualign.models.state import AlignmentSnapshot
-from dualign.models.snap_state import (
-    SnapState,
-    SnapInfo,
-    build_snap_states,
-    refresh_snap_states,
-    snap_state_to_info,
+from dualign.models.relation_status import (
+    RelationStatus,
+    RelationReviewInfo,
+    project_relation_statuses,
+    relation_status_to_info,
     build_context_windows,
     _parse_type,
 )
@@ -89,23 +88,23 @@ class ChapterContext:
     total_pairs: int
     snapshot: AlignmentSnapshot
     strategy: str = "src"
-    snap_states: List[SnapState] = field(default_factory=list)
-    snap_infos: List[SnapInfo] = field(default_factory=list)
+    snap_states: List[RelationStatus] = field(default_factory=list)
+    snap_infos: List[RelationReviewInfo] = field(default_factory=list)
     reviewable_ids: List[int] = field(default_factory=list)
 
-    def get_snap_info(self, snap_id: int) -> Optional[SnapInfo]:
+    def get_snap_info(self, snap_id: int) -> Optional[RelationReviewInfo]:
         if 0 <= snap_id < len(self.snap_infos):
             return self.snap_infos[snap_id]
         return None
 
-    def get_snap_state(self, snap_id: int) -> Optional[SnapState]:
+    def get_snap_state(self, snap_id: int) -> Optional[RelationStatus]:
         if 0 <= snap_id < len(self.snap_states):
             return self.snap_states[snap_id]
         return None
 
     @property
-    def reviewable_infos(self) -> List[SnapInfo]:
-        """返回需要审校的 SnapInfo 列表。"""
+    def reviewable_infos(self) -> List[RelationReviewInfo]:
+        """返回需要审校的关系视图。"""
         return [
             self.snap_infos[snap_id]
             for snap_id in self.reviewable_ids
@@ -151,15 +150,9 @@ class ChapterContext:
             )
         ch = repaired.current
 
-        snap_states = build_snap_states(
-            snapshot=snap,
-            src_lines=list(snap.original_src_lines),
-            tgt_lines=list(snap.original_tgt_lines),
-            repair_log=repaired.repair_log,
-        )
-        snap_states = refresh_snap_states(snap_states, snap, ch, repaired.repair_log)
+        snap_states = project_relation_statuses(repaired)
 
-        snap_infos: List[SnapInfo] = []
+        snap_infos: List[RelationReviewInfo] = []
         for si in range(total):
             g = ch.group(si)
             src = (
@@ -172,7 +165,7 @@ class ChapterContext:
                 if g is not None
                 else ""
             )
-            info = snap_state_to_info(snap_states[si], si, src, tgt)
+            info = relation_status_to_info(snap_states[si], si, src, tgt)
             # 初始文本
             s_idx, t_idx, _ = snap.original_ops[si]
             info.initial_src_text = (
@@ -671,22 +664,22 @@ def _parse_pair_spec(spec) -> List[int]:
     return sorted(indices)
 
 
-def _parse_op_index(op_index) -> tuple[List[int], bool]:
+def _parse_target(target) -> tuple[List[int], bool]:
     """解析 target 字符串: "3" → ([3], False), "10-13" → ([10..13], True)"""
-    op_index = _coerce_target(op_index)
-    if op_index.isdigit():
-        return [int(op_index)], False
-    if re.match(r"^\d+-\d+$", op_index):
-        parts = op_index.split("-")
+    target = _coerce_target(target)
+    if target.isdigit():
+        return [int(target)], False
+    if re.match(r"^\d+-\d+$", target):
+        parts = target.split("-")
         start, end = int(parts[0]), int(parts[1])
         if start > end:
-            raise ValueError(f"范围起止颠倒: {op_index}")
+            raise ValueError(f"范围起止颠倒: {target}")
         return list(range(start, end + 1)), True
-    raise ValueError(f"无效 target: {op_index!r}")
+    raise ValueError(f"无效 target: {target!r}")
 
 
 def compute_auto_action_kind(snap_state, strategy: str) -> Optional[str]:
-    """根据 SnapState 的 init_type 和策略推导应执行的自动修复操作 kind。
+    """根据 RelationStatus 的 init_type 和策略推导自动修复操作。
 
     返回 kind 字符串（merge/split/delete/placeholder_src/placeholder_tgt），
     或 None（无需操作）。
@@ -795,8 +788,8 @@ class ToolExecutor:
         ]
         return "\n".join(lines)
 
-    def _build_current_snap_infos(self) -> List[SnapInfo]:
-        """如果有 initial_state，通过重放已审校操作构建最新 SnapInfo 列表。"""
+    def _build_current_snap_infos(self) -> List[RelationReviewInfo]:
+        """如果有 initial_state，投影最新关系审阅视图。"""
         if self._state is None:
             return self.ctx.snap_infos
         state = self._replay_reviewed_actions()
@@ -819,7 +812,7 @@ class ToolExecutor:
         state = self._replay_reviewed_actions()
         META_KINDS = {"ok", "flag"}
         for a in reversed(state._repair_log):
-            if a.op_index == snap_id and a.kind not in META_KINDS:
+            if a.ordinal == snap_id and a.kind not in META_KINDS:
                 return a
         return None
 
@@ -828,7 +821,7 @@ class ToolExecutor:
         if tgt is None:
             return "❌ ok 缺少必填参数 target (如 '7')。请重试。"
         try:
-            snap_list, is_range = _parse_op_index(tgt)
+            snap_list, is_range = _parse_target(tgt)
         except ValueError as e:
             return f"❌ ok 无法解析 target: {e}"
         if is_range or len(snap_list) != 1:
@@ -841,15 +834,15 @@ class ToolExecutor:
         if existing:
             # 复制原操作的数据（split/edit 需要 new_src_lines 等）
             ra = RepairAction(
-                op_index=anchor,
                 kind=existing.kind,
                 source="ai",
                 data=dict(existing.data),
+                operation_indices=(anchor,),
             )
             decision = f"通过拟修复 {existing.kind}"
         else:
             # 无拟修复 → 确认原始对齐关系，不虚构修改。
-            ra = RepairAction(op_index=anchor, kind="ok", source="ai")
+            ra = RepairAction(kind="ok", source="ai", operation_indices=(anchor,))
             decision = "确认原始对齐关系（无修改）"
 
         self._record_review(snap_list, ra)
@@ -860,7 +853,7 @@ class ToolExecutor:
         if tgt is None:
             return "❌ edit 缺少必填参数 target (如 '7' 或 '10-13')。请重试。"
         try:
-            snap_list, is_range = _parse_op_index(tgt)
+            snap_list, is_range = _parse_target(tgt)
         except ValueError as e:
             return f"❌ edit 无法解析 target: {e}"
         already = [si for si in snap_list if si in self.reviewed_ids]
@@ -947,10 +940,10 @@ class ToolExecutor:
                 _src = [new_src[i]] if i < len(new_src) and new_src[i] else []
                 _tgt = [new_tgt[i]] if i < len(new_tgt) and new_tgt[i] else []
                 ra = RepairAction(
-                    op_index=si,
                     kind="edit",
                     source="ai",
                     data={"new_src_lines": _src, "new_tgt_lines": _tgt},
+                    operation_indices=(si,),
                 )
                 self.reviewed_ids.add(si)
                 self.reviewed_actions[si] = ra
@@ -964,10 +957,10 @@ class ToolExecutor:
                     if not new_tgt:
                         new_tgt = [t for t in info.tgt_text.split("\n") if t]
             ra = RepairAction(
-                op_index=anchor,
                 kind="edit",
                 source="ai",
                 data={"new_src_lines": new_src, "new_tgt_lines": new_tgt},
+                operation_indices=(anchor,),
             )
             self._record_review(snap_list, ra)
 
@@ -979,17 +972,16 @@ class ToolExecutor:
         if tgt is None:
             return "❌ merge 缺少必填参数 target (如 '7' 或 '10-13')。请重试。"
         try:
-            snap_list, _ = _parse_op_index(tgt)
+            snap_list, _ = _parse_target(tgt)
         except ValueError as e:
             return f"❌ merge 无法解析 target: {e}"
         already = [si for si in snap_list if si in self.reviewed_ids]
         anchor = snap_list[0]
         if len(snap_list) > 1:
             ra = RepairAction(
-                op_index=anchor,
                 kind="merge",
                 source="ai",
-                data={"orig_snaps": list(snap_list)},
+                operation_indices=tuple(snap_list),
             )
             self.reviewed_ids.update(snap_list)
             self.reviewed_actions[anchor] = ra
@@ -1004,17 +996,16 @@ class ToolExecutor:
         if tgt is None:
             return "❌ delete 缺少必填参数 target (如 '7' 或 '10-13')。请重试。"
         try:
-            snap_list, _ = _parse_op_index(tgt)
+            snap_list, _ = _parse_target(tgt)
         except ValueError as e:
             return f"❌ delete 无法解析 target: {e}"
         already = [si for si in snap_list if si in self.reviewed_ids]
         anchor = snap_list[0]
         if len(snap_list) > 1:
             ra = RepairAction(
-                op_index=anchor,
                 kind="delete",
                 source="ai",
-                data={"orig_snaps": list(snap_list)},
+                operation_indices=tuple(snap_list),
             )
             self.reviewed_ids.update(snap_list)
             self.reviewed_actions[anchor] = ra
@@ -1029,7 +1020,7 @@ class ToolExecutor:
         if tgt is None:
             return "❌ flag 缺少必填参数 target (如 '7')。请重试。"
         try:
-            snap_list, is_range = _parse_op_index(tgt)
+            snap_list, is_range = _parse_target(tgt)
         except ValueError as e:
             return f"❌ flag 无法解析 target: {e}"
         if is_range or len(snap_list) != 1:
@@ -1047,7 +1038,7 @@ class ToolExecutor:
         if tgt is None:
             return "❌ append 缺少必填参数 target (如 '7')。请重试。"
         try:
-            snap_list, is_range = _parse_op_index(tgt)
+            snap_list, is_range = _parse_target(tgt)
         except ValueError as e:
             return f"❌ append 无法解析 target: {e}"
         if is_range or len(snap_list) != 1:
@@ -1454,7 +1445,7 @@ def format_action(a, ctx=None) -> str:
     icon = _ACTION_ICON.get(kind, "❓")
 
     if kind == "ok" and ctx is not None:
-        ss = ctx.get_snap_state(a.op_index) if hasattr(ctx, "get_snap_state") else None
+        ss = ctx.get_snap_state(a.ordinal) if hasattr(ctx, "get_snap_state") else None
         resolved = (
             compute_auto_action_kind(ss, getattr(ctx, "strategy", "src"))
             if ss
@@ -1462,8 +1453,8 @@ def format_action(a, ctx=None) -> str:
         )
         if resolved:
             resolved_icon = _ACTION_ICON.get(resolved, "❓")
-            return f"  {resolved_icon} snap[{a.op_index}]  ok \u2192 {resolved}"
-        return f"  {icon} snap[{a.op_index}] {kind}"
+            return f"  {resolved_icon} snap[{a.ordinal}]  ok \u2192 {resolved}"
+        return f"  {icon} snap[{a.ordinal}] {kind}"
 
     detail = ""
     if kind == "edit":
@@ -1480,14 +1471,16 @@ def format_action(a, ctx=None) -> str:
         elif new_src:
             detail += f" {side_label}={new_src[0]}"
     elif kind == "merge":
-        orig = a.data.get("orig_snaps", "")
-        detail += f" {'合并' + str(orig) if orig else '单snap'}"
+        positions = a.operation_indices
+        detail += (
+            f" {'合并' + str(list(positions)) if len(positions) > 1 else '单关系'}"
+        )
     elif kind == "delete":
-        detail += " 批量" if a.data.get("orig_snaps", "") else ""
+        detail += " 批量" if len(a.operation_indices) > 1 else ""
     elif kind == "flag":
         detail += f" note={a.data.get('note', '')}"
 
-    return f"  {icon} snap[{a.op_index}] {kind}{detail}"
+    return f"  {icon} snap[{a.ordinal}] {kind}{detail}"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1642,7 +1635,7 @@ def dump_agent_raw(
             "completion": completion_tokens,
         },
         "final_actions": [
-            {"op_index": a.op_index, "kind": a.kind, "source": a.source, "data": a.data}
+            {"ordinal": a.ordinal, "kind": a.kind, "source": a.source, "data": a.data}
             for a in actions
         ],
         "turn_log": turn_log,

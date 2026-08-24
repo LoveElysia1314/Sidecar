@@ -1,7 +1,7 @@
 """
 Dualign — 对话框组件
 
-ConfigDialog, BlockEditDialog, FileListPanel, ChapterTree (deprecated alias)
+ConfigDialog, BlockEditDialog, FileListPanel and solidification dialogs.
 """
 
 from __future__ import annotations

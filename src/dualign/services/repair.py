@@ -8,11 +8,15 @@ RepairService (纯函数集合) = replay + auto_repair + render_rows
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
 from dualign.models.state import AlignmentSnapshot, MISSING
-from dualign.models.action import AiProposalStore, RepairAction
+from dualign.models.action import (
+    AiProposalStore,
+    RepairAction,
+    project_action_to_relation_order,
+)
 from dualign.models.marker import (
     is_merge,
     is_deleted,
@@ -24,12 +28,17 @@ from dualign.models.marker import (
     is_from_ai,
     combine,
     is_divider,
+    needs_zero_score,
     AI_PREFIX,
 )
-from dualign.models.state import AlignedRow, ChapterState, SnapGroup
+from dualign.models.state import ChapterState, RelationGroup, RelationRow
 from dualign.core import op_type_str, _smart_join_lines
 from dualign.services.embedding_cache import EmbeddingCache
 from dualign.services.repair_policy import choose_auto_repair
+from dualign.services.table_projection import (
+    current_relation_is_group_scoped,
+    project_table_cells,
+)
 
 SPLIT_FAILURE_UNSPLITTABLE = "文本无法进一步拆分"
 SPLIT_FAILURE_REALIGN = "文本重对齐失败"
@@ -62,13 +71,13 @@ def review_flags_for_uncertain_regions(
     def index_path(path: list):
         indexed = []
         cursor = (0, 0)
-        for op_index, operation in enumerate(path):
+        for ordinal, operation in enumerate(path):
             source_indices, target_indices, _score = operation
             end = (
                 cursor[0] + len(source_indices),
                 cursor[1] + len(target_indices),
             )
-            indexed.append((op_index, cursor, end, operation))
+            indexed.append((ordinal, cursor, end, operation))
             cursor = end
         return indexed
 
@@ -155,16 +164,16 @@ def review_flags_for_uncertain_regions(
                 changed_source = {source for source, _target in changed_pairs}
                 changed_target = {target for _source, target in changed_pairs}
             focused = {
-                op_index
-                for op_index, _op_start, _op_end, operation in current_region
+                ordinal
+                for ordinal, _op_start, _op_end, operation in current_region
                 if changed_source.intersection(operation[0])
                 or changed_target.intersection(operation[1])
             }
             if focused:
                 selected_indices = focused
 
-        for op_index in sorted(selected_indices):
-            action = RepairAction.make_flag(op_index, note)
+        for ordinal in sorted(selected_indices):
+            action = RepairAction.make_flag(ordinal, note)
             action.source = "auto"
             action.data["reason"] = "composition_disagreement"
             action.data["uncertain_region"] = region_data
@@ -227,7 +236,7 @@ def _apply_info_free(state: ChapterState, snap_i: int, marker: str) -> ChapterSt
             return _apply_info_full(
                 state, snap_i, [t[0] for t in texts], [t[1] for t in texts], [], marker
             )
-        return state.replace_snap(snap_i, g.with_marker(marker))
+        return state.replace_relation(snap_i, g.with_marker(marker))
 
     # [OK] / [F] 是元标记：叠加到现有操作标记上，保留修复信息与来源前缀。
     # 例如 [M] + [AI][OK] → "[M] [AI][OK]"（AI 认可了合并，而非覆盖它）。
@@ -236,10 +245,10 @@ def _apply_info_free(state: ChapterState, snap_i: int, marker: str) -> ChapterSt
         existing = g.rows[0].marker if g.rows else ""
         if existing:
             new = _combine_meta(existing, marker)
-            return state.replace_snap(snap_i, g.with_marker(new))
-        return state.replace_snap(snap_i, g.with_marker(marker))
+            return state.replace_relation(snap_i, g.with_marker(new))
+        return state.replace_relation(snap_i, g.with_marker(marker))
 
-    return state.replace_snap(snap_i, g.with_marker(marker))
+    return state.replace_relation(snap_i, g.with_marker(marker))
 
 
 def _combine_meta(existing: str, new_tag: str) -> str:
@@ -313,12 +322,12 @@ def _apply_info_full(
     it = g.rows[0].init_type
     osc = g.rows[0].orig_score
     n = len(texts)
-    rows: List[AlignedRow] = []
+    rows: List[RelationRow] = []
     for k in range(n):
         sc = scores[k] if k < len(scores) else (scores[0] if scores else osc)
         rows.append(
-            AlignedRow(
-                snap_index=snap_i,
+            RelationRow(
+                ordinal=snap_i,
                 sub=k,
                 init_type=it if k == 0 else "",
                 cur_type="1:1",
@@ -331,10 +340,17 @@ def _apply_info_full(
                 marker=marker,
             )
         )
-    return state.replace_snap(snap_i, SnapGroup(snap_i=snap_i, rows=tuple(rows)))
+    return state.replace_relation(
+        snap_i,
+        RelationGroup(
+            relation_id=state.snapshot.relation_id(snap_i),
+            ordinal=snap_i,
+            rows=tuple(rows),
+        ),
+    )
 
 
-def _apply_multi_snap_merge(
+def _apply_multi_relation_merge(
     state: ChapterState,
     action: RepairAction,
     snap_list: List[int],
@@ -348,7 +364,7 @@ def _apply_multi_snap_merge(
 
     # 删除非 anchor snaps
     for si in snap_list[1:]:
-        state = state.remove_snap(si)
+        state = state.remove_relation(si)
 
     # ── 收集所有捆绑 snap 的初始信息 ──
     init_types: List[str] = []
@@ -357,14 +373,18 @@ def _apply_multi_snap_merge(
         s_idx, t_idx, _sc = state.snapshot.original_ops[si]
         init_types.append(f"snap {si}\n{op_type_str(s_idx, t_idx)}")
         init_scores.append(float(_sc))
-    ist = "\n".join(f"{s:.1%}" for s in init_scores) if len(init_scores) > 1 else ""
-
     total = len(snap_list)
+    total_src = 0
+    total_tgt = 0
+    for si in snap_list:
+        s_idx, t_idx, _sc = state.snapshot.original_ops[si]
+        total_src += len(s_idx)
+        total_tgt += len(t_idx)
 
     # 构建 anchor group: 保留每个被捆绑 snap 的原始 N:M 多行布局
     # 不同于旧版将所有文本压缩到一个单元格，新版维护每个 snap 的子行结构，
     # 子行间用 is_divider 的虚线分隔。
-    rows: List[AlignedRow] = []
+    rows: List[RelationRow] = []
     sub = 0
     for k in range(total):
         si = snap_list[k]
@@ -374,31 +394,40 @@ def _apply_multi_snap_merge(
             src = state.snapshot.src_text(s_idx[r]) if r < len(s_idx) else ""
             tgt = state.snapshot.tgt_text(t_idx[r]) if r < len(t_idx) else ""
             rows.append(
-                AlignedRow(
-                    snap_index=anchor,
+                RelationRow(
+                    ordinal=anchor,
                     sub=sub,
                     init_type=init_types[k] if r == 0 else "",
-                    cur_type=f"{len(s_idx)}:{len(t_idx)}" if r == 0 else "",
+                    cur_type=f"{total_src}:{total_tgt}" if sub == 0 else "",
                     src_text=src,
                     tgt_text=tgt or "",
                     score=float(init_scores[k]),
                     orig_score=float(init_scores[k]),
-                    n_src=len(s_idx),
-                    n_tgt=len(t_idx),
+                    # 当前关系的基数属于整个 bundle，而不是某个原始 snap。
+                    # 原始 snap 边界仍由 init_type 保存，供初始列分别显示。
+                    n_src=total_src,
+                    n_tgt=total_tgt,
                     marker="[M]",
-                    init_score_text=ist if k == 0 and sub == 0 else "",
+                    init_score_text="",
                 )
             )
             sub += 1
-    return state.replace_snap(anchor, SnapGroup(snap_i=anchor, rows=tuple(rows)))
+    return state.replace_relation(
+        anchor,
+        RelationGroup(
+            relation_id=state.snapshot.relation_id(anchor),
+            ordinal=anchor,
+            rows=tuple(rows),
+        ),
+    )
 
 
-def _apply_multi_snap_edit(
+def _apply_multi_relation_edit(
     state: ChapterState,
     action: RepairAction,
     snap_list: List[int],
 ) -> ChapterState:
-    """跨 snap 校订：删除非 anchor snaps，合并到 anchor 一个 SnapGroup。
+    """跨关系校订：删除非 anchor 关系，合并到 anchor RelationGroup。
 
     Anchor 行的 init_type 换行拼接所有捆绑 snap 的初始类型，
     cur_type/score/text 独立对应每条校订后的 1:1 文本对。
@@ -430,16 +459,16 @@ def _apply_multi_snap_edit(
 
     # ── 删除非 anchor snaps ──
     for si in snap_list[1:]:
-        state = state.remove_snap(si)
+        state = state.remove_relation(si)
 
     # ── 构建 anchor group：每个新文本对一行 ──
     n = max(len(new_src), len(new_tgt))
-    rows: List[AlignedRow] = []
+    rows: List[RelationRow] = []
     for k in range(n):
         sc = scores[k] if k < len(scores) else (scores[0] if scores else osc)
         rows.append(
-            AlignedRow(
-                snap_index=anchor,
+            RelationRow(
+                ordinal=anchor,
                 sub=k,
                 init_type=it if k == 0 else "",
                 cur_type="1:1",
@@ -453,7 +482,14 @@ def _apply_multi_snap_edit(
                 init_score_text=ist if k == 0 else "",
             )
         )
-    state = state.replace_snap(anchor, SnapGroup(snap_i=anchor, rows=tuple(rows)))
+    state = state.replace_relation(
+        anchor,
+        RelationGroup(
+            relation_id=state.snapshot.relation_id(anchor),
+            ordinal=anchor,
+            rows=tuple(rows),
+        ),
+    )
     return state
 
 
@@ -483,7 +519,7 @@ def replay(snapshot: AlignmentSnapshot, log: List[RepairAction]) -> ChapterState
     state = ChapterState.from_snapshot(snapshot)
 
     for act in log:
-        snap_i = act.op_index
+        snap_i = act.ordinal
         if snap_i < 0 or snap_i >= len(snapshot.original_ops):
             continue
 
@@ -491,25 +527,14 @@ def replay(snapshot: AlignmentSnapshot, log: List[RepairAction]) -> ChapterState
         _marker = act.marker
 
         # 多 snap 操作
-        snaps = act.data.get("orig_snaps", [])
-        if isinstance(snaps, list) and len(snaps) > 1:
-            clean: List[int] = []
-            seen: set = set()
-            for s in snaps:
-                try:
-                    si = int(s)
-                except (TypeError, ValueError):
-                    continue
-                if si not in seen:
-                    seen.add(si)
-                    clean.append(si)
-            if len(clean) > 1:
-                if act.kind == "merge":
-                    state = _apply_multi_snap_merge(state, act, clean)
-                    continue
-                elif act.kind == "edit":
-                    state = _apply_multi_snap_edit(state, act, clean)
-                    continue
+        operation_indices = list(act.operation_indices)
+        if len(operation_indices) > 1:
+            if act.kind == "merge":
+                state = _apply_multi_relation_merge(state, act, operation_indices)
+                continue
+            elif act.kind == "edit":
+                state = _apply_multi_relation_edit(state, act, operation_indices)
+                continue
 
         # info-free: merge, delete, placeholder, flag, ok
         if act.kind in (
@@ -548,34 +573,23 @@ def normalize_repair_log(actions) -> list[RepairAction]:
     while retaining compatible meta actions (``ok`` and ``flag``).
     """
 
-    def affected_operations(action: RepairAction) -> set[int]:
-        affected = {action.op_index}
-        raw_orig = action.data.get("orig_snaps", [])
-        if isinstance(raw_orig, list):
-            for snap_i in raw_orig:
-                try:
-                    affected.add(int(snap_i))
-                except (TypeError, ValueError):
-                    continue
-        return affected
+    def targets(action: RepairAction) -> set[tuple[str, object]]:
+        if action.relation_ids:
+            return {("relation", relation_id) for relation_id in action.relation_ids}
+        return {("ordinal", ordinal) for ordinal in action.operation_indices}
 
     normalized: list[RepairAction] = []
     for action in actions:
-        affected = affected_operations(action)
+        affected = targets(action)
         if action.kind in ("ok", "flag"):
             normalized = [
                 previous
                 for previous in normalized
-                if not (
-                    affected_operations(previous) & affected
-                    and previous.kind == action.kind
-                )
+                if not (targets(previous) & affected and previous.kind == action.kind)
             ]
         else:
             normalized = [
-                previous
-                for previous in normalized
-                if not affected_operations(previous) & affected
+                previous for previous in normalized if not targets(previous) & affected
             ]
         normalized.append(action)
     return normalized
@@ -598,8 +612,17 @@ class RepairState:
         default=None, init=False, repr=False, compare=False
     )
 
+    def _project_action(self, action: RepairAction) -> RepairAction:
+        """Bind identity and derive the current ordinal projection."""
+
+        return project_action_to_relation_order(action, self._snapshot.relation_ids)
+
     def __post_init__(self):
-        self._repair_log = normalize_repair_log(self._repair_log)
+        bound_actions = [self._project_action(action) for action in self._repair_log]
+        self._repair_log = normalize_repair_log(bound_actions)
+        self._ai_proposal_store = self._ai_proposal_store.project_actions(
+            self._project_action
+        )
 
     # ── 属性 ──
 
@@ -638,6 +661,11 @@ class RepairState:
     def ai_proposal_store(self) -> AiProposalStore:
         return self._ai_proposal_store
 
+    def bind_action(self, action: RepairAction) -> RepairAction:
+        """Return an action whose stable identity and ordinal projection agree."""
+
+        return self._project_action(action)
+
     def set_ai_proposal_store(self, store: AiProposalStore) -> RepairState:
         """返回一个替换了 AI 建议存储的新 RepairState 实例。
 
@@ -650,28 +678,14 @@ class RepairState:
     def apply(self, action: RepairAction) -> RepairState:
         """应用操作，返回新 RepairState。
 
-        自动清除受影响 snap 的历史操作（同 snap 同类操作去重）。
+        动作进入状态时绑定稳定关系身份；统一规范化器负责替换冲突决策。
         """
-        # 跨 snap 操作：清空 orig_snaps 中所有涉及 snap 的历史操作
-        affected = {action.op_index}
-        orig = action.data.get("orig_snaps", [])
-        if isinstance(orig, list):
-            for si in orig:
-                try:
-                    affected.add(int(si))
-                except (TypeError, ValueError):
-                    pass
-
-        if action.kind in ("ok", "flag"):
-            new_log = [
-                a
-                for a in self._repair_log
-                if not (a.op_index in affected and a.kind == action.kind)
-            ]
-        else:
-            new_log = [a for a in self._repair_log if a.op_index not in affected]
-        new_log.append(action)
-        return RepairState(self._snapshot, new_log, self._ai_proposal_store)
+        action = self._project_action(action)
+        return RepairState(
+            self._snapshot,
+            [*self._repair_log, action],
+            self._ai_proposal_store,
+        )
 
     def undo(self) -> RepairState:
         """撤销最后一条操作。"""
@@ -685,46 +699,55 @@ class RepairState:
         """重置所有修复，保留 AI 建议。"""
         return RepairState(self._snapshot, [], self._ai_proposal_store)
 
-    def reset_op(self, op_index: int) -> RepairState:
-        """重置指定文本对的修复，保留 AI 建议。"""
-        return RepairState(
-            self._snapshot,
-            [a for a in self._repair_log if a.op_index != op_index],
-            self._ai_proposal_store,
-        )
-
-    def action_for_op(self, op_index: int) -> Optional[RepairAction]:
-        """查找指定 op_index 的最新 action。"""
-        for a in reversed(self._repair_log):
-            if a.op_index == op_index:
-                return a
-        return None
-
-    def text_changed_for_op(self, op_index: int) -> bool:
-        """Whether current row texts/layout differ from the immutable baseline."""
-        current = self.current.group(op_index)
-        if current is None:
-            return True
-        baseline = SnapGroup.from_snapshot(op_index, self._snapshot)
-        current_text = tuple((row.src_text, row.tgt_text) for row in current.rows)
-        baseline_text = tuple((row.src_text, row.tgt_text) for row in baseline.rows)
-        return current_text != baseline_text
-
-    def flag_for_op(self, op_index: int) -> Optional[RepairAction]:
-        """返回指定文本对当前的标记动作。"""
-        for action in reversed(self._repair_log):
-            if action.op_index == op_index:
-                return action if action.kind == "flag" else None
-        return None
-
-    def without_flag(self, op_index: int) -> RepairState:
-        """删除指定文本对的标记，保留正文修复和 AI 建议。"""
+    def reset_relation(self, relation_id: str) -> RepairState:
+        """重置指定关系的修复，保留 AI 建议。"""
+        self._snapshot.operation_index(relation_id)
         return RepairState(
             self._snapshot,
             [
                 action
                 for action in self._repair_log
-                if not (action.op_index == op_index and action.kind == "flag")
+                if relation_id not in action.relation_ids
+            ],
+            self._ai_proposal_store,
+        )
+
+    def action_for_relation(self, relation_id: str) -> Optional[RepairAction]:
+        """查找指定稳定关系身份的最新动作。"""
+        self._snapshot.operation_index(relation_id)
+        for action in reversed(self._repair_log):
+            if relation_id in action.relation_ids:
+                return action
+        return None
+
+    def relation_text_changed(self, relation_id: str) -> bool:
+        """Whether current row texts/layout differ from the immutable baseline."""
+        ordinal = self._snapshot.operation_index(relation_id)
+        current = self.current.group(ordinal)
+        if current is None:
+            return True
+        baseline = RelationGroup.from_snapshot(ordinal, self._snapshot)
+        current_text = tuple((row.src_text, row.tgt_text) for row in current.rows)
+        baseline_text = tuple((row.src_text, row.tgt_text) for row in baseline.rows)
+        return current_text != baseline_text
+
+    def flag_for_relation(self, relation_id: str) -> Optional[RepairAction]:
+        """返回指定文本对当前的标记动作。"""
+        self._snapshot.operation_index(relation_id)
+        for action in reversed(self._repair_log):
+            if relation_id in action.relation_ids:
+                return action if action.kind == "flag" else None
+        return None
+
+    def without_relation_flag(self, relation_id: str) -> RepairState:
+        """删除指定文本对的标记，保留正文修复和 AI 建议。"""
+        self._snapshot.operation_index(relation_id)
+        return RepairState(
+            self._snapshot,
+            [
+                action
+                for action in self._repair_log
+                if not (relation_id in action.relation_ids and action.kind == "flag")
             ],
             self._ai_proposal_store,
         )
@@ -747,43 +770,6 @@ class RepairState:
             ai_proposal_store or AiProposalStore(),
         )
 
-    # ── 序列化 ──
-
-    def to_dict(self) -> dict:
-        d = {
-            "version": 1,
-            "snapshot": {
-                "original_ops": [
-                    {"s": list(s), "t": list(t), "score": round(sc, 4)}
-                    for s, t, sc in self._snapshot.original_ops
-                ],
-            },
-            "repair_log": [a.to_dict() for a in self._repair_log],
-        }
-        d["ai_proposals"] = self._ai_proposal_store.to_dict()
-        return d
-
-    @classmethod
-    def from_dict(
-        cls, d: dict, src_lines: list, tgt_lines: list
-    ) -> Optional[RepairState]:
-        """从字典反序列化 RepairState（v1 格式）。
-
-        v1 不存储文本行，由调用方传入重建 snapshot。
-        """
-        try:
-            sd = d.get("snapshot", {})
-            ops = [
-                (tuple(o["s"]), tuple(o["t"]), float(o["score"]))
-                for o in sd.get("original_ops", [])
-            ]
-            snap = AlignmentSnapshot.from_alignment(ops, src_lines, tgt_lines)
-            log = [RepairAction.from_dict(a) for a in d.get("repair_log", [])]
-            store = AiProposalStore.from_dict(d.get("ai_proposals", {}))
-            return cls(snap, log, store)
-        except Exception:
-            return None
-
 
 # ═══════════════════════════════════════════════════════════════
 # 4. TableRow / TableViewModel (thin adapter)
@@ -794,7 +780,7 @@ class RepairState:
 class TableRow:
     """表格视图行（用于渲染）。"""
 
-    snap_index: int
+    ordinal: int
     sub: int
     n_src: int
     n_tgt: int
@@ -806,10 +792,6 @@ class TableRow:
     orig_score: float = 0.0
     marker: str = ""
     init_score_text: str = ""  # 捆绑编辑多行分数
-
-    @property
-    def op_index(self) -> int:
-        return self.snap_index
 
     @property
     def is_divider(self) -> bool:
@@ -850,7 +832,7 @@ class SplitAttempt:
 
 
 def _render_merged(
-    group: SnapGroup,
+    group: RelationGroup,
     snapshot: AlignmentSnapshot,
     sub_count: int,
 ) -> List[TableRow]:
@@ -861,10 +843,10 @@ def _render_merged(
     return rows
 
 
-def _raw_table_row(r: AlignedRow) -> TableRow:
-    """直接从 AlignedRow 转换为 TableRow。"""
+def _raw_table_row(r: RelationRow) -> TableRow:
+    """直接从 RelationRow 转换为 TableRow。"""
     return TableRow(
-        snap_index=r.snap_index,
+        ordinal=r.ordinal,
         sub=r.sub,
         n_src=r.n_src,
         n_tgt=r.n_tgt,
@@ -877,6 +859,30 @@ def _raw_table_row(r: AlignedRow) -> TableRow:
         marker=r.marker,
         init_score_text=getattr(r, "init_score_text", ""),
     )
+
+
+def current_score_slot_exists(group: RelationGroup, sub: int) -> bool:
+    """Whether ``sub`` owns a visible current-score cell."""
+    if sub < 0 or sub >= len(group.rows):
+        return False
+    if current_relation_is_group_scoped(group.rows):
+        return sub == 0
+    return True
+
+
+def current_score_texts(group: RelationGroup, sub: int):
+    """返回可编码评分槽的文本；固定分或被覆盖的子行返回 ``None``。"""
+    if not current_score_slot_exists(group, sub):
+        return None
+    if needs_zero_score(group.rows[sub].marker):
+        return None
+    if current_relation_is_group_scoped(group.rows):
+        return (
+            _smart_join_lines([r.src_text for r in group.rows if r.src_text]),
+            _smart_join_lines([r.tgt_text for r in group.rows if r.tgt_text]),
+        )
+    row = group.rows[sub]
+    return (row.src_text or "", row.tgt_text or "")
 
 
 def compute_spans(
@@ -892,64 +898,18 @@ def compute_spans(
     snap_col:   Snap 列索引（如 0），传入后自动为 snap 列生成跨行合并。
                 消除 GUI 层多处重复的 Snap 列合并循环。
 
-    同 snap 内:
-      col 0-1 (+offset): 始终跨满（初始类型/评分）
-      col 2-3 (+offset): 仅不对称操作跨满（当前类型/评分）
-      col 4   (+offset): 仅 n_src < n_tgt 时跨（原文）
-      col 5   (+offset): 仅 n_src > n_tgt 时跨（译文）
+    各列按其事实归属分别合并，而不是共用一个分组：
+      col 0-1 (+offset): 原始 snap 片段（初始类型/评分）
+      col 2-3 (+offset): 当前关系整体（当前类型/评分）
+      col 4-5 (+offset): 当前关系两侧；短侧跨满
+
+    这一区分对跨 snap merge 尤其重要：它有多个初始片段，但只有一个当前关系。
     """
-    o = col_offset
-    spans: Dict[Tuple[int, int], Tuple[int, int]] = {}
-
-    i = 0
-    while i < len(rows):
-        r = rows[i]
-        j = i
-        while j < len(rows) and rows[j].snap_index == r.snap_index:
-            j += 1
-        count = j - i
-
-        if count > 1:
-            if snap_col is not None:
-                spans[(i, snap_col)] = (count, 1)
-
-            # ── 按 init_type 识别子组（支持跨 snap 合并的正确分组）──
-            # 相同非空 init_type 的连续行属于同一原始 snap；
-            # 在每个子组内部做单-snap 级别的单元格合并。
-            sub_ranges: List[Tuple[int, int]] = []  # (start, end)
-            si = i
-            while si < j:
-                while si < j and rows[si].init_type == "":
-                    si += 1
-                if si >= j:
-                    break
-                ki = si
-                key = rows[si].init_type
-                while si < j and (
-                    rows[si].init_type == key or rows[si].init_type == ""
-                ):
-                    si += 1
-                sub_ranges.append((ki, si))
-
-            if not sub_ranges:
-                sub_ranges = [(i, j)]
-
-            for sub_i, sub_j in sub_ranges:
-                sub_count = sub_j - sub_i
-                sr = rows[sub_i]
-                if sub_count > 1:
-                    spans[(sub_i, 0 + o)] = (sub_count, 1)
-                    spans[(sub_i, 1 + o)] = (sub_count, 1)
-                    if sr.n_src != sr.n_tgt:
-                        spans[(sub_i, 2 + o)] = (sub_count, 1)
-                        spans[(sub_i, 3 + o)] = (sub_count, 1)
-                    if sr.n_src < sr.n_tgt:
-                        spans[(sub_i, 4 + o)] = (sub_count, 1)
-                    if sr.n_src > sr.n_tgt:
-                        spans[(sub_i, 5 + o)] = (sub_count, 1)
-        i = j
-
-    return spans
+    return project_table_cells(
+        rows,
+        col_offset=col_offset,
+        snap_col=snap_col,
+    ).spans
 
 
 def make_table_view(state: RepairState) -> TableViewModel:
@@ -970,7 +930,7 @@ def make_table_view(state: RepairState) -> TableViewModel:
 
         if is_merge(r0.marker):
             # info-free: 从 snapshot 重建合并文本
-            action = state.action_for_op(r0.snap_index)
+            action = state.action_for_relation(g.relation_id)
             sub_count = action.sub_count if action else max(r0.n_src, r0.n_tgt)
             rows.extend(_render_merged(g, snap, sub_count))
 
@@ -1049,12 +1009,7 @@ class RepairService:
 
         if unresolved_only:
             for action in state.repair_log:
-                affected = {action.op_index}
-                for raw_index in action.data.get("orig_snaps", []):
-                    try:
-                        affected.add(int(raw_index))
-                    except (TypeError, ValueError):
-                        continue
+                affected = set(action.operation_indices)
                 if action.kind == "flag":
                     for affected_index in affected:
                         flags_by_snap.setdefault(affected_index, []).append(action)
@@ -1102,7 +1057,9 @@ class RepairService:
             elif plan.kind == "placeholder_tgt":
                 result = RepairService.repair_placeholder(result, snap_i, "tgt")
 
-            applied_action = result.action_for_op(snap_i)
+            applied_action = result.action_for_relation(
+                result.snapshot.relation_id(snap_i)
+            )
             if applied_action is not None and applied_action.source == "auto":
                 applied_action.data["strategy"] = strategy
 
@@ -1249,9 +1206,9 @@ class RepairService:
     # ── 跨 snap 操作 ──
 
     @staticmethod
-    def repair_bundle_snaps(
+    def repair_bundle_relations(
         state: RepairState,
-        snap_list: List[int],
+        ordinals: List[int],
     ) -> RepairState:
         """跨 snap 合并：将多个 snap 捆绑为一个文本对。
 
@@ -1260,25 +1217,23 @@ class RepairService:
 
         自动消除占位、删除、拆分操作；但保留 edit 操作不撤销。
         """
-        if len(snap_list) < 2:
+        if len(ordinals) < 2:
             return state
 
-        anchor = snap_list[0]
-
         # 选择性重置：消除 placeholder/delete/split，保留 edit
-        for si in snap_list:
-            action = state.action_for_op(si)
+        for ordinal in ordinals:
+            relation_id = state.snapshot.relation_id(ordinal)
+            action = state.action_for_relation(relation_id)
             if action is None:
                 continue
             kind = action.kind
             # edit 操作保留，其余（placeholder_src/tgt, delete, split, ok, flag, merge）均重置
             if kind not in ("edit",):
-                state = state.reset_op(si)
+                state = state.reset_relation(relation_id)
 
         action = RepairAction(
-            op_index=anchor,
             kind="merge",
-            data={"orig_snaps": list(snap_list)},
+            operation_indices=tuple(ordinals),
         )
         return state.apply(action)
 
@@ -1304,7 +1259,7 @@ class RepairService:
         is_01 = ls == 0 and lt > 0
 
         # 已有操作时，某些操作被覆盖
-        action = state.action_for_op(snap_i)
+        action = state.action_for_relation(snap.relation_id(snap_i))
         has_action = action is not None
 
         ch = state.current
@@ -1347,7 +1302,7 @@ class RepairService:
         anchor = snap_list[0]
         action = RepairAction.make_edit(
             anchor,
-            orig_snaps=list(snap_list),
+            operation_indices=snap_list,
             new_src_lines=new_src_lines,
             new_tgt_lines=new_tgt_lines,
             inherited_scores=scores or [],
@@ -1377,11 +1332,11 @@ class RepairService:
 
         for g in ch.groups:
             if not g.rows:
-                # 空的 SnapGroup（可能来自跨 snap 操作后的残留），跳过
+                # 空关系组（可能来自跨关系操作后的残留），跳过
                 continue
             r0 = g.rows[0]
             marker = r0.marker
-            s_idx, t_idx, _sc = snap.original_ops[g.snap_i]
+            s_idx, t_idx, _sc = snap.original_ops[g.ordinal]
 
             if is_deleted(marker):
                 continue  # 跳过删除
@@ -1389,17 +1344,13 @@ class RepairService:
             if is_merge(marker):
                 # merge: 原文译文均合并为一行
                 # 检查是否为跨 snap 合并（bundle merge）
-                action = state.action_for_op(g.snap_i)
-                orig_snaps = action.data.get("orig_snaps", []) if action else []
-                if len(orig_snaps) > 1:
+                action = state.action_for_relation(g.relation_id)
+                operation_indices = action.operation_indices if action else ()
+                if len(operation_indices) > 1:
                     # 跨 snap 合并：收集所有被捆绑 snap 的文本再拼接
                     src_parts: List[str] = []
                     tgt_parts: List[str] = []
-                    for si in orig_snaps:
-                        try:
-                            si_int = int(si)
-                        except (TypeError, ValueError):
-                            continue
+                    for si_int in operation_indices:
                         if si_int >= len(snap.original_ops):
                             continue
                         ss, tt, _ = snap.original_ops[si_int]

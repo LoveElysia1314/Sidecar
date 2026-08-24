@@ -26,12 +26,8 @@ def test_contextual_residual_subtracts_the_no_current_baseline():
     def encode(texts):
         return np.asarray([mapping[text] for text in texts], dtype=np.float64)
 
-    full = contextual_embeddings(
-        ["left", "middle", "right"], encode, residual=False
-    )
-    residual = contextual_embeddings(
-        ["left", "middle", "right"], encode, residual=True
-    )
+    full = contextual_embeddings(["left", "middle", "right"], encode, residual=False)
+    residual = contextual_embeddings(["left", "middle", "right"], encode, residual=True)
 
     assert full.shape == residual.shape == (3, 2)
     assert np.linalg.norm(residual, axis=1) == pytest.approx([1.0, 1.0, 1.0])

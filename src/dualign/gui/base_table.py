@@ -6,7 +6,7 @@ Dualign — BaseTextTable: 文本对表格基类
 
 子类只需定义:
   - COL_HEADERS: 列标题列表
-  - _render_row(i, item) -> int: 渲染第 i 行数据，返回 snap_index
+  - _render_row(i, item): 渲染第 i 行数据；item.ordinal 是当前关系序号
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import Any, ClassVar, List, Optional, Set, Tuple
 import math
+import re
 
 from PySide6.QtCore import Qt, QPointF, QTimer, QSize
 from PySide6.QtGui import QColor, QPen, QPainter, QTextDocument
@@ -29,7 +30,7 @@ from PySide6.QtWidgets import (
     QStyle,
 )
 
-from dualign.services.repair import compute_spans
+from dualign.services.table_projection import project_table_cells
 from dualign.models.marker import resolve_hex_color
 from dualign.gui.theme import T
 
@@ -124,13 +125,19 @@ def type_cl(init_type: str) -> QColor:
     """初始/当前类型 → 颜色。"""
     if not init_type:
         return TYPE_CL_11
-    try:
-        ls, lt = (int(x) for x in init_type.split(":", 1))
-    except (ValueError, AttributeError):
+    # 跨 snap 行的展示标签还包含 ``snap N`` 和 ``---``。颜色应取其中的
+    # 关系事实，而不是因为展示字符串不再等于纯 ``N:M`` 就退回灰色。
+    relation_types = [
+        (int(match.group(1)), int(match.group(2)))
+        for match in re.finditer(r"(?m)^\s*(\d+)\s*:\s*(\d+)\s*$", str(init_type))
+    ]
+    if not relation_types:
         return TYPE_CL_11
-    if ls == 0 or lt == 0:
+    if any(ls == 0 or lt == 0 for ls, lt in relation_types):
         return TYPE_CL_10_01
-    return TYPE_CL_11 if ls == 1 and lt == 1 else TYPE_CL_NON11
+    if any(ls != 1 or lt != 1 for ls, lt in relation_types):
+        return TYPE_CL_NON11
+    return TYPE_CL_11
 
 
 def marker_cl(marker: str) -> QColor:
@@ -596,10 +603,8 @@ class BaseTextTable(QWidget):
         只需按需重写以下钩子：
           _pre_render()                      — 渲染前设置（如列可见性）
           _get_span_col_offset()             — 跨行合并偏移量
-          _compute_table_spans()             — 计算跨行合并（已集成偏移量）
+          _compute_table_projection()        — 计算单元格归属、跨度和边界
           _apply_table_spans()               — 应用跨行合并（可添加额外规则）
-          _get_hidden_cur_rows()             — 被 span 覆盖的当前类型行
-          _get_divider_rows()                — 虚线分隔行
           _extra_row_kwargs()                — 传递给 _render_row 的额外参数
           _post_render()                     — 渲染后收尾
         """
@@ -613,39 +618,17 @@ class BaseTextTable(QWidget):
         self._pre_render()
 
         # 跨行合并
-        spans = self._compute_table_spans()
+        projection = self._compute_table_projection()
+        spans = projection.spans
         self._apply_table_spans(spans)
         # 缓存 span 元数据供 _adjust_row_heights 使用
         self._render_spans = spans
-        self._render_spanned_cells = set()
-        for (sr, col), (rs, cs) in spans.items():
-            if rs > 1:
-                for r in range(sr + 1, sr + rs):
-                    for c in range(col, col + cs):
-                        self._render_spanned_cells.add((r, c))
+        self._render_spanned_cells = set(projection.covered_cells)
 
         # 元数据
-        hidden_cur = self._get_hidden_cur_rows(spans)
+        hidden_cur = set(projection.covered_rows(2 + self._get_span_col_offset()))
         # 单元格级分隔虚线：合并 [M] 子行之间画虚线
-        _divider_cells: Set[Tuple[int, int]] = set()
-        for _i, _item in enumerate(self._items):
-            _sub = getattr(_item, "sub", 0)
-            if (
-                _sub > 0
-                and _i - 1 >= 0
-                and getattr(self._items[_i - 1], "snap_index", -1)
-                == getattr(_item, "snap_index", -2)
-            ):
-                _first = self._items[_i - _sub]
-                if "[M]" in (getattr(_first, "marker", "") or ""):
-                    _prev = _i - 1
-                    for _col in (5, 6):
-                        if (_prev, _col) not in self._render_spanned_cells and (
-                            _prev,
-                            _col,
-                        ) not in self._render_spans:
-                            _divider_cells.add((_prev, _col))
-        self._divider_delegate.set_divider_cells(_divider_cells)
+        self._divider_delegate.set_divider_cells(set(projection.divider_cells))
 
         # 渲染每行
         for i, item in enumerate(self._items):
@@ -676,9 +659,9 @@ class BaseTextTable(QWidget):
         """
         return None
 
-    def _compute_table_spans(self) -> dict:
-        """计算跨行合并。子类可重写以改变 col_offset 或 snap_col。"""
-        return compute_spans(
+    def _compute_table_projection(self):
+        """构造单元格归属投影；跨度、覆盖格和虚线均由它派生。"""
+        return project_table_cells(
             self._items,
             col_offset=self._get_span_col_offset(),
             snap_col=self._get_snap_col(),
@@ -689,14 +672,6 @@ class BaseTextTable(QWidget):
         for (sr, col), (rs, cs) in spans.items():
             if sr < len(self._items) and rs > 1:
                 self.table.setSpan(sr, col, rs, cs)
-
-    def _get_hidden_cur_rows(self, spans: dict) -> Set[int]:
-        """返回当前类型/评分列被 span 覆盖（隐藏）的行索引。"""
-        return set()
-
-    def _get_divider_rows(self) -> Set[int]:
-        """返回需要虚线分隔的行索引集合。"""
-        return set()
 
     def _extra_row_kwargs(self, row: int, item, hidden_cur_rows: Set[int]) -> dict:
         """返回传递给 _render_row 的额外关键字参数。"""
@@ -820,7 +795,7 @@ class BaseTextTable(QWidget):
             cell.setToolTip(tooltip)
         # 设置 UserRole 供焦点/highlight 查找使用
         if row < len(self._items):
-            snap_i = getattr(self._items[row], "snap_index", None)
+            snap_i = getattr(self._items[row], "ordinal", None)
             if snap_i is not None:
                 cell.setData(Qt.ItemDataRole.UserRole, snap_i)
         self.table.setItem(row, col, cell)
@@ -830,15 +805,15 @@ class BaseTextTable(QWidget):
     # 焦点 / 滚动
     # ══════════════════════════════════════════════════════════
 
-    def focus_snap(self, snap_i: int) -> bool:
-        """高亮指定 Snap 的所有子行（含跨行合并子行），返回是否找到。
+    def focus_ordinal(self, ordinal: int) -> bool:
+        """高亮指定关系序号的所有子行（含跨行合并子行）。
 
         使用 HighlightDelegate 绘制高亮，而非 QItemSelection
         （NoSelection 模式下 QItemSelection 无视觉反馈）。
         """
         matched_indices = []
         for i, item in enumerate(self._items):
-            if getattr(item, "snap_index", None) == snap_i:
+            if getattr(item, "ordinal", None) == ordinal:
                 matched_indices.append(i)
 
         if not matched_indices:
@@ -859,11 +834,11 @@ class BaseTextTable(QWidget):
                 QAbstractItemView.ScrollHint.PositionAtCenter,
             )
 
-        self._on_focus_snap_found(snap_i)
+        self._on_focus_ordinal_found(ordinal)
         return True
 
-    def _on_focus_snap_found(self, snap_i: int):
-        """找到焦点 Snap 后的额外处理。子类可重写（如显示详情面板）。"""
+    def _on_focus_ordinal_found(self, ordinal: int):
+        """找到焦点关系后的额外处理。子类可重写。"""
 
     def _on_item_clicked(self, item):
         """行点击 — 子类可重写以处理信号发送。"""

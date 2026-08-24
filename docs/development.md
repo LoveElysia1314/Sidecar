@@ -76,7 +76,7 @@ dualign/
 │   │   ├── state.py             # AlignmentSnapshot, ChapterState, etc.
 │   │   ├── action.py            # RepairAction, AiProposal, AiProposalStore
 │   │   ├── marker.py            # 操作标记编解码
-│   │   └── snap_state.py        # SnapState 三层模型 + 审批四态
+│   │   └── relation_status.py   # RepairState 的关系审阅投影 + 审批四态
 │   │
 │   ├── services/                # 业务逻辑
 │   │   ├── repair.py            # RepairState, replay(), auto_repair

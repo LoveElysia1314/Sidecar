@@ -22,7 +22,7 @@ from dualign.core.file_pair_matcher import (
 )
 from dualign.models.state import AlignmentSnapshot, MISSING
 from dualign.models.action import RepairAction
-from dualign.models.state import AlignedRow, SnapGroup, ChapterState
+from dualign.models.state import ChapterState, RelationGroup, RelationRow
 from dualign.models.action import AiProposal, AiProposalStore
 from dualign.services.repair import (
     RepairState,
@@ -51,8 +51,8 @@ __all__ = [
     "op_type_str",
     "MISSING",
     "RepairAction",
-    "AlignedRow",
-    "SnapGroup",
+    "RelationRow",
+    "RelationGroup",
     "ChapterState",
     "RepairState",
     "RepairService",

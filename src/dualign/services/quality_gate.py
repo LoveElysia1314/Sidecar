@@ -125,15 +125,3 @@ def automatic_repair_blockers(assessment: dict | None) -> list[str]:
         REJECTION_MERGE_OVERFLOW,
     }
     return [reason for reason in assessment.get("rejections", []) if reason in known]
-
-
-def is_statistical_low_score(
-    score: float,
-    scores_1to1: list,
-    k: float = 3.0,
-    min_score: float = 0.6,
-) -> bool:
-    """Compatibility alias; import anomaly_detection in new code."""
-    from dualign.services.anomaly_detection import is_statistical_low_score as impl
-
-    return impl(score, scores_1to1, k=k, min_score=min_score)

@@ -187,8 +187,11 @@ def test_preserved_work_state_repairs_only_unresolved_relations(tmp_path):
 
     assert result["success"] and result["cache_hit"]
     actions = load_report(report)["repair_log"]
-    assert [a["kind"] for a in actions if a["op_index"] == 0] == ["merge", "flag"]
-    assert [a["kind"] for a in actions if a["op_index"] == 1] == ["ok"]
+    assert [a["kind"] for a in actions if a["relation_ids"] == ["L000001"]] == [
+        "merge",
+        "flag",
+    ]
+    assert [a["kind"] for a in actions if a["relation_ids"] == ["L000002"]] == ["ok"]
 
 
 def test_reader_rows_are_materialized_on_demand(tmp_path):
@@ -216,7 +219,7 @@ def test_empty_document_still_produces_a_replayable_report(tmp_path):
     assert result["success"]
     assert result["quality"] == "unreliable"
     assert json.loads(report.read_text(encoding="utf-8"))["ops"] == [
-        {"s": [], "t": [0], "sc": 0.0}
+        {"id": "L000001", "s": [], "t": [0], "sc": 0.0}
     ]
     assert load_report(report)["repair_log"][0]["kind"] == "delete"
 
@@ -254,7 +257,9 @@ def test_review_disagreement_is_persisted_as_annotated_flags(tmp_path, monkeypat
 
     assert saved["status"] == "needs_review"
     actions = load_report(report)["repair_log"]
-    assert [(action["op_index"], action["kind"]) for action in actions] == [(1, "flag")]
+    assert [(action["relation_ids"], action["kind"]) for action in actions] == [
+        (["L000002"], "flag")
+    ]
     assert actions[0]["data"]["reason"] == "composition_disagreement"
     assert actions[0]["data"]["current_structure"] == "1:1+1:0"
     assert actions[0]["data"]["alternative_structure"] == "2:1"
@@ -268,6 +273,6 @@ def test_review_disagreement_is_persisted_as_annotated_flags(tmp_path, monkeypat
     )
     reset_actions = load_report(report)["repair_log"]
     assert reset["cache_hit"] is True
-    assert [(action["op_index"], action["kind"]) for action in reset_actions] == [
-        (1, "flag")
+    assert [(action["relation_ids"], action["kind"]) for action in reset_actions] == [
+        (["L000002"], "flag")
     ]

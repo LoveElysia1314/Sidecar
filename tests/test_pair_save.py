@@ -43,6 +43,7 @@ def _case(tmp_path: Path):
         document_a_path=path_a,
         document_b_path=path_b,
         operations=[((0, 1), (0,), 0.9)],
+        relation_ids=["L1"],
         stats={"n_source": 2, "n_target": 1, "n_ops": 1},
         quality={"level": "ok", "rejections": [], "indicators": {}},
         provenance={"tool": "test"},
@@ -274,6 +275,7 @@ def test_solidification_rebases_only_unchanged_pending_derived_state(tmp_path: P
         document_a_path=path_a,
         document_b_path=path_b,
         operations=[((0,), (0,), 0.9), ((1,), (1,), 0.8), ((2,), (2,), 0.7)],
+        relation_ids=["L1", "L2", "L3"],
         stats={},
         quality={},
         provenance={},
@@ -293,16 +295,17 @@ def test_solidification_rebases_only_unchanged_pending_derived_state(tmp_path: P
         report_path,
         solidification_policy={"include": ["delete_pair"]},
         applied_repairs=[{"action": RepairAction.make_delete(0).to_dict()}],
-        operation_map=(None, 0, 1),
-        changed_operations={0},
-        remaining_repair_log=[RepairAction.make_flag(1, note="保留")],
+        changed_relation_ids={"L1"},
+        remaining_repair_log=[
+            RepairAction.make_flag(1, note="保留", relation_ids=["L2"])
+        ],
     )
 
     saved = load_report(report_path)
-    assert list(saved["ai_proposals"]) == ["1"]
-    assert saved["ai_proposals"]["1"][0]["action"]["op_index"] == 1
-    assert saved["scores"] == {"0_0": 0.81, "1_0": 0.71}
-    assert saved["repair_log"][0]["op_index"] == 1
+    assert list(saved["ai_proposals"]) == ["L3"]
+    assert saved["ai_proposals"]["L3"][0]["action"]["relation_ids"] == ["L3"]
+    assert saved["scores"] == {"L2": {"0": 0.81}, "L3": {"0": 0.71}}
+    assert saved["repair_log"][0]["relation_ids"] == ["L2"]
     assert saved["repair_log"][0]["data"]["note"] == "保留"
 
 
@@ -321,8 +324,7 @@ def test_solidified_edit_uses_fresh_alignment_score(tmp_path: Path):
         report_path,
         solidification_policy={"include": ["edit_b"]},
         applied_repairs=[{"action": action.to_dict(), "effects": ["edit_b"]}],
-        operation_map=(0,),
-        changed_operations={0},
+        changed_relation_ids={"L1"},
     )
 
     saved = load_report(report_path)
@@ -361,6 +363,7 @@ def test_solidification_realigns_a_compound_relation_into_independent_pairs(
         document_a_path=path_a,
         document_b_path=path_b,
         operations=[(tuple(range(9)), tuple(range(9)), 0.73)],
+        relation_ids=["L1"],
         stats={},
         quality={},
         provenance={},
@@ -373,8 +376,7 @@ def test_solidification_realigns_a_compound_relation_into_independent_pairs(
         path_b,
         report_path,
         solidification_policy={"include": ["edit_b"]},
-        operation_map=(0,),
-        changed_operations={0},
+        changed_relation_ids={"L1"},
     )
 
     saved = load_report(report_path)
@@ -410,6 +412,7 @@ def test_duplicate_relation_text_is_treated_as_ambiguous_and_not_reanchored(
         document_a_path=path_a,
         document_b_path=path_b,
         operations=[((0,), (0,), 0.8), ((1,), (1,), 0.8)],
+        relation_ids=["L1", "L2"],
         stats={},
         quality={},
         provenance={},
@@ -427,7 +430,6 @@ def test_duplicate_relation_text_is_treated_as_ambiguous_and_not_reanchored(
         path_b,
         report_path,
         solidification_policy={"include": ["edit_b"]},
-        operation_map=(0, 1),
     )
 
     saved = load_report(report_path)
@@ -451,7 +453,6 @@ def test_failed_realign_aborts_before_any_file_is_replaced(tmp_path: Path):
             path_b,
             report_path,
             solidification_policy={"include": ["edit_b"]},
-            operation_map=(0,),
             alignment_runner=fail,
         )
 

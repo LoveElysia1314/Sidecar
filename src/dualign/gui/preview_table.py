@@ -14,7 +14,6 @@ from PySide6.QtWidgets import QHeaderView, QSizePolicy
 
 from dualign.models.action import RepairAction
 from dualign.models.marker import from_kind as _marker_from_kind
-from dualign.models.marker import is_divider as _is_divider
 from dualign.models.marker import AI_PREFIX
 from dualign.gui.base_table import (
     BaseTextTable,
@@ -34,12 +33,12 @@ class AiSuggestionItem:
     """AI 建议的表格行数据，支持子行跨行合并。
 
     每个 RepairAction 可能包含多行原文/译文（如合并[M]、拆分[S]），
-    此时生成多个子行，子行的 snap_index/index 相同，sub 递增。
+    此时生成多个子行，子行的 ordinal 相同，sub 递增。
     """
 
     def __init__(
         self,
-        snap_index: int,
+        ordinal: int,
         action: RepairAction,
         status: str = "pending",
         sub: int = 0,
@@ -54,8 +53,10 @@ class AiSuggestionItem:
         init_src_text: str = "",
         init_tgt_text: str = "",
     ):
-        self.snap_index = snap_index
+        self.ordinal = ordinal
         self.action = action
+        # 同一 snap 可以同时存在多条 AI 建议；每条建议必须拥有独立的单元格组。
+        self.display_group_id = (ordinal, id(action))
         self.status = status
         self.sub = sub
         self.kind = action.kind
@@ -136,23 +137,11 @@ class SuggestionPreviewTable(BaseTextTable):
         return 0
 
     def _apply_table_spans(self, spans: dict):
-        """应用标准 span（Snap 列已由基类 _compute_table_spans 处理）。"""
+        """应用归属投影产生的标准 span。"""
         table = self.table
         for (sr, col), (rs, cs) in spans.items():
             if sr < len(self._items) and rs > 1 and col < table.columnCount():
                 table.setSpan(sr, col, rs, cs)
-
-    def _get_hidden_cur_rows(self, spans: dict) -> Set[int]:
-        """col_offset=1 时，预览状态列在 table col 3（即 span col 3）。"""
-        hidden = set()
-        for (sr, c_), (_, cnt) in spans.items():
-            if c_ == 3 and cnt > 1:
-                for ri in range(sr + 1, sr + cnt):
-                    hidden.add(ri)
-        return hidden
-
-    def _get_divider_rows(self) -> Set[int]:
-        return {i for i, it in enumerate(self._items) if _is_divider(it.marker, it.sub)}
 
     def _extra_row_kwargs(self, row: int, item, hidden_cur_rows: Set[int]) -> dict:
         return {"hide_cur": row in hidden_cur_rows}
@@ -177,7 +166,7 @@ class SuggestionPreviewTable(BaseTextTable):
         # 统一方案下 [AI] 前缀仅与操作标记结合出现（如 [AI][OK]），
         # 剥离前缀后自然显示为 [OK]，无需独立转译。
 
-        snap_text = str(item.snap_index) if is_first else ""
+        snap_text = str(item.ordinal) if is_first else ""
         self._set_cell(row, 0, snap_text, align=Qt.AlignCenter)
 
         # Col 1: 初始类型

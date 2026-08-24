@@ -71,7 +71,7 @@ class EncodeThread(QThread):
         src_lines=None,
         tgt_lines=None,
         entry_id="",
-        alignment_path="",
+        report_path="",
         expected_provenance=None,
     ):
         super().__init__(parent)
@@ -80,7 +80,7 @@ class EncodeThread(QThread):
         self._src_lines = src_lines
         self._tgt_lines = tgt_lines
         self.entry_id = entry_id
-        self.alignment_path = alignment_path
+        self.report_path = report_path
         self.expected_provenance = expected_provenance
         self.formal_alignment_error = ""
         self.time_s = 0.0
@@ -177,7 +177,7 @@ class EncodeThread(QThread):
 
     def _load_cached_alignment(self, src_hash: str, tgt_hash: str):
         """Restore a report only while its semantic alignment key matches."""
-        if self.alignment_path and os.path.isfile(self.alignment_path):
+        if self.report_path and os.path.isfile(self.report_path):
             from dualign.services.report_io import (
                 load_report,
                 operations_from_report,
@@ -186,7 +186,7 @@ class EncodeThread(QThread):
             )
 
             try:
-                report = load_report(self.alignment_path)
+                report = load_report(self.report_path)
                 if not report_matches_documents(report, self.src_path, self.tgt_path):
                     raise ValueError("源文档已变化")
                 if (
@@ -204,7 +204,9 @@ class EncodeThread(QThread):
                     anchors=[],
                     anchor_op_indices={},
                     stats=dict(report.get("stats") or {}),
-                    status=str((report.get("alignment") or {}).get("status", "aligned")),
+                    status=str(
+                        (report.get("alignment") or {}).get("status", "aligned")
+                    ),
                     reason=str((report.get("alignment") or {}).get("reason") or ""),
                     gate=dict((report.get("alignment") or {}).get("gate") or {}),
                     uncertain_regions=tuple(

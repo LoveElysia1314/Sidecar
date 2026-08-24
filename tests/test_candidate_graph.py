@@ -27,4 +27,6 @@ def test_centered_frontier_cover_matches_full_mdl_on_wrong_scaffold():
     assert centered.window_stats["frontier_paths"] >= centered.window_stats["windows"]
     assert centered.semantic_candidates
     assert centered.composition_stats["algorithm"] == "sparse_cardinality_chain"
-    assert all(source and target for source, target, _score in centered.semantic_candidates)
+    assert all(
+        source and target for source, target, _score in centered.semantic_candidates
+    )

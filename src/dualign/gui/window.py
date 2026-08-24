@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 
 from dualign.core import AlignConfig
 from dualign.models.state import AlignmentSnapshot
+from dualign.models.relation_status import RelationAnomaly
 from dualign.services.repair import (
     RepairState,
 )
@@ -128,7 +129,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
     数据:
       _repair_state: RepairState          — 唯一数据源
       _alignment_snapshot: AlignmentSnapshot
-      _anomalies: list[dict]              — 当前异常列表
+      _anomalies: list[RelationAnomaly]   — 当前异常投影
       _row_op_map: dict[int, int]         — table_row → snap_index
       _undo_stack: list[RepairState]      — 撤销栈
       _redo_stack: list[RepairState]      — 恢复栈
@@ -157,7 +158,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         # ── 数据成员 ──
         self._repair_state: Optional[RepairState] = None
         self._alignment_snapshot: Optional[AlignmentSnapshot] = None
-        self._anomalies: List[dict] = []
+        self._anomalies: List[RelationAnomaly] = []
         self._row_op_map: Dict[int, int] = {}
         self._undo_stack: deque = deque(maxlen=50)
         self._redo_stack: deque = deque(maxlen=50)
@@ -165,9 +166,9 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._current_entry: Any = None
         self._current_entry_id: str = ""
         self._entries: Optional[List[Any]] = file_entries
-        self._alignment_path: str = ""
-        self._alignment_file_hash: str = ""
-        self._alignment_file_present: bool = False
+        self._report_path: str = ""
+        self._report_file_hash: str = ""
+        self._report_file_present: bool = False
         self._pair_base_state = None
         self._document_a_id: str = ""
         self._document_b_id: str = ""
@@ -187,7 +188,9 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._dock_state_restored: bool = False
 
         # ── 持久化评分缓存 {f"{snap_index}_{sub}": score} ──
-        self._score_cache: dict[str, float] = {}
+        from dualign.models.score_cache import RelationScoreCache
+
+        self._score_cache = RelationScoreCache()
 
         # ── 统一评分管理器 ──
         from dualign.services.score_manager import ScoreManager
@@ -198,7 +201,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._score_mgr.status_changed.connect(self._on_score_status_changed)
 
         self._focus = FocusManager()
-        self._focus.snap_focused.connect(self._on_snap_focused)
+        self._focus.relation_focused.connect(self._on_relation_focused)
         self._focus.selection_changed.connect(self._on_selection_changed)
 
         self._review = ReviewController()
@@ -1021,8 +1024,8 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         QApplication.clipboard().setText("\n".join(lines))
         self._safe_status("📋 已复制预览行")
 
-    def _on_snap_focused(self, snap_i: int):
-        """FocusManager.snap_focused 信号处理。
+    def _on_relation_focused(self, ordinal: int):
+        """FocusManager.relation_focused 信号处理。
 
         不触发对齐表滚动（由 _on_go_to_row 的调用方按需触发），
         只更新 HighlightDelegate 选中状态 + AI 预览表高亮。
@@ -1031,7 +1034,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._update_table_highlight()
         # AI 预览表高亮（含滚动到对应行）
         if hasattr(self, "_review"):
-            self._review.focus_snap_ai(snap_i)
+            self._review.focus_relation_ai(ordinal)
 
     def _on_selection_changed(self, snaps: Set[int]):
         """FocusManager.selection_changed 信号处理。
@@ -1064,15 +1067,15 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
                 {
                     row
                     for row, si in self._row_op_map.items()
-                    if si in self._focus.selected_snaps
+                    if si in self._focus.selected_ordinals
                 }
             )
-            if self._focus.focused_snap is not None:
+            if self._focus.focused_ordinal is not None:
                 focused_row = next(
                     (
                         row
                         for row, si in self._row_op_map.items()
-                        if si == self._focus.focused_snap
+                        if si == self._focus.focused_ordinal
                     ),
                     None,
                 )
@@ -2211,7 +2214,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         """
         if self._repair_state is None:
             self._review.set_summary_paths("", "")
-            self._review.set_summary_filename("—")
+            self._review.set_summary_chapter()
             self._review.set_summary_cells()
             return
 
@@ -2233,7 +2236,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
                 chapter_text = f"{idx+1}/{len(entries)}章"
             except ValueError:
                 pass
-        self._review.set_summary_filename("", chapter_text)
+        self._review.set_summary_chapter(chapter_text)
 
         # 指标
         stats = getattr(self, "_align_stats", None) or {}
@@ -2244,9 +2247,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         gate = getattr(self, "_alignment_gate", None) or {}
         mutual_pairs = int(gate.get("mutual_pairs", 0) or 0)
         out_of_chain = int(gate.get("out_of_chain_pairs", 0) or 0)
-        order_text = (
-            f"{out_of_chain}/{mutual_pairs}" if mutual_pairs else "—"
-        )
+        order_text = f"{out_of_chain}/{mutual_pairs}" if mutual_pairs else "—"
         n_scaffold = int(stats.get("n_scaffold", 0) or 0)
         uncertain = int(stats.get("uncertain_regions", 0) or 0)
 

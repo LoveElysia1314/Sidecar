@@ -17,8 +17,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from dualign.models.action import RepairAction
+from dualign.models.action import RepairAction, canonicalize_action_payload
+from dualign.models.relation_identity import normalize_relation_ids
 from dualign.models.state import AlignmentSnapshot
+from dualign.models.score_cache import RelationScoreCache
 from dualign.services.alignment_io import document_sha256
 from dualign.services.repair import RepairService, RepairState
 
@@ -83,10 +85,17 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def operations_payload(operations) -> list[dict[str, Any]]:
+def operations_payload(operations, relation_ids=()) -> list[dict[str, Any]]:
+    operation_list = list(operations)
+    normalized_ids = normalize_relation_ids(len(operation_list), relation_ids)
     return [
-        {"s": list(source), "t": list(target), "sc": round(float(score), 6)}
-        for source, target, score in operations
+        {
+            "id": relation_id,
+            "s": list(source),
+            "t": list(target),
+            "sc": round(float(score), 6),
+        }
+        for relation_id, (source, target, score) in zip(normalized_ids, operation_list)
     ]
 
 
@@ -100,12 +109,63 @@ def operations_from_report(report: Mapping[str, Any]) -> list[tuple]:
         raise ReportError("报告中的对齐关系无效") from exc
 
 
+def relation_ids_from_report(report: Mapping[str, Any]) -> tuple[str, ...]:
+    """Read stable relation IDs, deriving them for reports from before IDs."""
+
+    try:
+        items = list(report["ops"])
+        values = tuple(
+            str(item.get("id") or "").strip()
+            for item in items
+            if isinstance(item, dict)
+        )
+        if len(values) != len(items):
+            raise ValueError("对齐关系必须是对象")
+        if values and all(not value for value in values):
+            return normalize_relation_ids(len(items))
+        if any(not value for value in values):
+            raise ValueError("关系 ID 不能只存在于部分关系")
+        return normalize_relation_ids(len(items), values)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ReportError("报告中的关系 ID 无效") from exc
+
+
+def _repair_action_payload(action: Any, relation_ids: tuple[str, ...]) -> dict:
+    payload = action.to_dict() if isinstance(action, RepairAction) else dict(action)
+    try:
+        return canonicalize_action_payload(payload, relation_ids)
+    except ValueError as exc:
+        raise ReportError(str(exc)) from exc
+
+
+def _canonical_ai_proposals(
+    raw_store: object, relation_ids: tuple[str, ...]
+) -> dict[str, list[dict]]:
+    if not isinstance(raw_store, Mapping):
+        return {}
+    result: dict[str, list[dict]] = {}
+    for proposals in raw_store.values():
+        if not isinstance(proposals, list):
+            continue
+        for raw_proposal in proposals:
+            if not isinstance(raw_proposal, Mapping):
+                continue
+            proposal = dict(raw_proposal)
+            proposal["action"] = _repair_action_payload(
+                proposal.get("action") or {}, relation_ids
+            )
+            target_ids = proposal["action"]["relation_ids"]
+            result.setdefault(target_ids[0], []).append(proposal)
+    return result
+
+
 def build_report(
     *,
     chapter_id: str,
     document_a_path: str | Path,
     document_b_path: str | Path,
     operations,
+    relation_ids=(),
     stats: Mapping[str, Any],
     quality: Mapping[str, Any],
     provenance: Mapping[str, Any],
@@ -119,7 +179,8 @@ def build_report(
 
     path_a = Path(document_a_path)
     path_b = Path(document_b_path)
-    ops = operations_payload(operations)
+    ops = operations_payload(operations, relation_ids)
+    normalized_relation_ids = tuple(item["id"] for item in ops)
     documents = {
         "a": {
             "path": path_a.name,
@@ -162,7 +223,7 @@ def build_report(
         "alignment": dict(alignment or {"status": "aligned"}),
         "quality": dict(quality),
         "repair_log": [
-            action.to_dict() if isinstance(action, RepairAction) else dict(action)
+            _repair_action_payload(action, normalized_relation_ids)
             for action in repair_log
         ],
         "ai_proposals": old.get("ai_proposals", {}),
@@ -180,6 +241,17 @@ def save_report(report: Mapping[str, Any], path: str | Path) -> Path:
     if data.get("format") != REPORT_FORMAT:
         raise ReportError("拒绝写入无法识别的 Dualign 报告")
     operations_from_report(data)
+    relation_ids = relation_ids_from_report(data)
+    data["repair_log"] = [
+        _repair_action_payload(action, relation_ids)
+        for action in data.get("repair_log", ())
+    ]
+    data["ai_proposals"] = _canonical_ai_proposals(
+        data.get("ai_proposals"), relation_ids
+    )
+    data["scores"] = RelationScoreCache.from_dict(
+        data.get("scores"), relation_ids
+    ).to_dict()
     data["updated_at"] = _now()
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -303,6 +375,7 @@ def repair_state_from_report(
         operations_from_report(report),
         load_text_lines(str(document_a_path)),
         load_text_lines(str(document_b_path)),
+        relation_ids_from_report(report),
     )
     actions = [RepairAction.from_dict(item) for item in report.get("repair_log", [])]
     return RepairState(snapshot, actions)

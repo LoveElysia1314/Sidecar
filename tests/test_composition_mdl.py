@@ -91,9 +91,7 @@ def test_sparse_edge_solver_matches_full_lattice_on_random_small_matrices():
             for _trial in range(4):
                 evidence = rng.normal(size=(n, m))
                 implicit = align_evidence_lattice_mdl(evidence)
-                explicit = align_explicit_evidence_mdl(
-                    n, m, _additive_edges(evidence)
-                )
+                explicit = align_explicit_evidence_mdl(n, m, _additive_edges(evidence))
 
                 assert explicit.complexity == implicit.complexity
                 assert np.isclose(explicit.semantic_bits, implicit.semantic_bits)

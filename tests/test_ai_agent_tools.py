@@ -190,7 +190,7 @@ class TestDoneFlow:
             ]
         )
         agent, actions = _run_agent(reviewable_ctx, [t1, t2])
-        kinds = sorted((a.op_index, a.kind) for a in actions)
+        kinds = sorted((a.ordinal, a.kind) for a in actions)
         assert (1, "edit") in kinds, kinds
         assert (3, "delete") in kinds, kinds
         assert (5, "ok") in kinds, kinds

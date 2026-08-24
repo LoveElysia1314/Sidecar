@@ -127,9 +127,7 @@ def main_align(
         if algorithm == "legacy-anchor-v1"
         else AlignConfig(algorithm=algorithm)
     )
-    result = align_documents(
-        document_a, document_b, str(output_path), config=config
-    )
+    result = align_documents(document_a, document_b, str(output_path), config=config)
     if not result.get("success"):
         print(f"对齐失败: {result.get('error', '未知错误')}")
         return 1

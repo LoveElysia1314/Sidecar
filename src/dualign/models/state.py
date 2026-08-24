@@ -4,8 +4,8 @@ Dualign — ChapterState: 重放后的章节状态
 数据流: AlignmentSnapshot + RepairAction[] → replay() → ChapterState
 
 核心原则:
-  1. snap_i 始终指向 original_ops[snap_i]（外部索引永不变化）
-  2. sub 仅在 SnapGroup.rows 内部有意义
+  1. relation_id 是身份，ordinal 是 original_ops 中的当前顺序
+  2. sub 仅在 RelationGroup.rows 内部有意义
   3. info-free 操作仅存 marker，文本在渲染时从 snapshot 重建
   4. info-full 操作存储完整新文本
 """
@@ -13,6 +13,7 @@ Dualign — ChapterState: 重放后的章节状态
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Iterable
 from typing import List, Optional, Tuple
 
 from dualign.models.marker import (
@@ -21,6 +22,7 @@ from dualign.models.marker import (
     needs_zero_score,
 )
 from dualign.core import op_type_str
+from dualign.models.relation_identity import normalize_relation_ids
 
 # ═══════════════════════════════════════════════════════════════
 # AlignmentSnapshot — 不可变对齐快照
@@ -38,23 +40,49 @@ class AlignmentSnapshot:
     original_src_lines:  原始原文行
     original_tgt_lines:  原始译文行
 
-    外部索引 snap_i 始终指向 original_ops[snap_i]。
+    ordinal 始终指向 original_ops[ordinal]；relation_id 承担持久身份。
     """
 
     original_ops: Tuple[OpT, ...]
     original_src_lines: Tuple[str, ...]
     original_tgt_lines: Tuple[str, ...]
+    relation_ids: Tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "relation_ids",
+            normalize_relation_ids(len(self.original_ops), self.relation_ids),
+        )
 
     @classmethod
     def from_alignment(
-        cls, all_ops: list, src_lines: list, tgt_lines: list
+        cls,
+        all_ops: list,
+        src_lines: list,
+        tgt_lines: list,
+        relation_ids: Iterable[str] = (),
     ) -> AlignmentSnapshot:
         """从对齐结果构造快照。"""
         return cls(
             original_ops=tuple((tuple(s), tuple(t), float(sc)) for s, t, sc in all_ops),
             original_src_lines=tuple(src_lines),
             original_tgt_lines=tuple(tgt_lines),
+            relation_ids=tuple(relation_ids),
         )
+
+    def relation_id(self, operation_index: int) -> str:
+        """Return the stable relation identity at the current ordered position."""
+
+        return self.relation_ids[operation_index]
+
+    def operation_index(self, relation_id: str) -> int:
+        """Project a stable relation identity back to its current position."""
+
+        try:
+            return self.relation_ids.index(relation_id)
+        except ValueError as exc:
+            raise KeyError(f"未知关系 ID: {relation_id}") from exc
 
     @property
     def ops_list(self) -> list:
@@ -78,27 +106,17 @@ class AlignmentSnapshot:
             return self.original_tgt_lines[idx].rstrip()
         return ""
 
-    def to_dict(self) -> dict:
-        return {
-            "original_ops": [
-                {"s": list(s), "t": list(t), "score": round(sc, 4)}
-                for s, t, sc in self.original_ops
-            ],
-            "original_src_lines": list(self.original_src_lines),
-            "original_tgt_lines": list(self.original_tgt_lines),
-        }
-
 
 # ═══════════════════════════════════════════════════════════════
-# AlignedRow — 表格行数据载体
+# RelationRow — 表格行数据载体
 # ═══════════════════════════════════════════════════════════════
 
 
 @dataclass(frozen=True)
-class AlignedRow:
+class RelationRow:
     """单个表格行（不可变数据载体）。
 
-    snap_index:  外部索引（指向 snapshot.original_ops）
+    ordinal:     当前关系序号（指向 snapshot.original_ops）
     sub:         内部相对索引（0, 1, 2...）
     init_type:   初始对齐类型 ("3:1", "1:2", "1:1" 等)
     cur_type:    当前类型（通常是 "1:1"）
@@ -111,7 +129,7 @@ class AlignedRow:
     marker:      操作标记 ("" / "[M]" / "[S]" / "[E]" / "[D]" / "[P]" / "[F]" / "[OK]")
     """
 
-    snap_index: int
+    ordinal: int
     sub: int
     init_type: str
     cur_type: str
@@ -136,34 +154,36 @@ class AlignedRow:
 
 
 # ═══════════════════════════════════════════════════════════════
-# SnapGroup — 一个初始文本对的当前状态
+# RelationGroup — 一个初始关系的当前状态
 # ═══════════════════════════════════════════════════════════════
 
 
 @dataclass(frozen=True)
-class SnapGroup:
-    """一个初始对齐文本对 (snap_i) 的当前状态。
+class RelationGroup:
+    """一个初始对齐关系的当前状态。
 
-    snap_i: 外部索引，指向 AlignmentSnapshot.original_ops，永不变化。
+    relation_id: 稳定关系身份。
+    ordinal: 当前快照中的有序位置。
     rows:   内部子行 (sub=0,1,2...)。info-free 操作只改 marker。
     """
 
-    snap_i: int
-    rows: Tuple[AlignedRow, ...]
+    relation_id: str
+    ordinal: int
+    rows: Tuple[RelationRow, ...]
 
     # ── 构造器 ──
 
     @classmethod
-    def from_snapshot(cls, snap_i: int, snapshot: AlignmentSnapshot) -> SnapGroup:
-        """从快照构建初始 SnapGroup。"""
-        s_idx, t_idx, sc = snapshot.original_ops[snap_i]
+    def from_snapshot(cls, ordinal: int, snapshot: AlignmentSnapshot) -> RelationGroup:
+        """从快照构建初始关系。"""
+        s_idx, t_idx, sc = snapshot.original_ops[ordinal]
         it = op_type_str(s_idx, t_idx)
         n = max(len(s_idx), len(t_idx))
-        rows: List[AlignedRow] = []
+        rows: List[RelationRow] = []
         for sub in range(n):
             rows.append(
-                AlignedRow(
-                    snap_index=snap_i,
+                RelationRow(
+                    ordinal=ordinal,
                     sub=sub,
                     init_type=it if sub == 0 else "",
                     cur_type=it,
@@ -175,12 +195,16 @@ class SnapGroup:
                     n_tgt=len(t_idx),
                 )
             )
-        return cls(snap_i=snap_i, rows=tuple(rows))
+        return cls(
+            relation_id=snapshot.relation_id(ordinal),
+            ordinal=ordinal,
+            rows=tuple(rows),
+        )
 
-    # ── 修改器（返回新 SnapGroup） ──
+    # ── 修改器（返回新 RelationGroup） ──
 
-    def with_marker(self, marker: str) -> SnapGroup:
-        """对所有行设置相同的 marker。返回新 SnapGroup。
+    def with_marker(self, marker: str) -> RelationGroup:
+        """对所有行设置相同的 marker。返回新 RelationGroup。
 
         兼容格式: "[M]", "[AI][OK]", "[M] [AI][OK]"
         cur_type 改为 1:1 的条件: marker 含 [M], [S], [P], [OK]
@@ -199,11 +223,12 @@ class SnapGroup:
         else:
             logical_n_src = self.rows[0].n_src
             logical_n_tgt = self.rows[0].n_tgt
-        return SnapGroup(
-            snap_i=self.snap_i,
+        return RelationGroup(
+            relation_id=self.relation_id,
+            ordinal=self.ordinal,
             rows=tuple(
-                AlignedRow(
-                    snap_index=r.snap_index,
+                RelationRow(
+                    ordinal=r.ordinal,
                     sub=r.sub,
                     init_type=r.init_type,
                     cur_type=new_cur,
@@ -221,16 +246,17 @@ class SnapGroup:
 
     def with_text(
         self, texts: List[tuple], scores: List[float], marker: str = "[E]"
-    ) -> SnapGroup:
+    ) -> RelationGroup:
         """info-full 操作：用完整新文本对替换。texts = [(src, tgt), ...]"""
         it = self.rows[0].init_type
         osc = self.rows[0].orig_score
         n = len(texts)
-        return SnapGroup(
-            snap_i=self.snap_i,
+        return RelationGroup(
+            relation_id=self.relation_id,
+            ordinal=self.ordinal,
             rows=tuple(
-                AlignedRow(
-                    snap_index=self.snap_i,
+                RelationRow(
+                    ordinal=self.ordinal,
                     sub=0,
                     init_type=it if k == 0 else "",
                     cur_type="1:1",
@@ -256,15 +282,15 @@ class SnapGroup:
 
 @dataclass(frozen=True)
 class ChapterState:
-    """整章状态：所有 SnapGroup 的有序集合。
+    """整章状态：所有 RelationGroup 的有序集合。
 
-    groups:   按 snap_i 排序的 SnapGroup 元组
+    groups:   按 ordinal 排序的 RelationGroup 元组
     snapshot: 原始对齐快照（始终引用，不做拷贝）
 
     GUI 渲染统一入口: ChapterState.rows
     """
 
-    groups: Tuple[SnapGroup, ...]
+    groups: Tuple[RelationGroup, ...]
     snapshot: AlignmentSnapshot
 
     # ── 构造器 ──
@@ -274,7 +300,7 @@ class ChapterState:
         """从快照构建初始 ChapterState。"""
         return cls(
             groups=tuple(
-                SnapGroup.from_snapshot(i, snapshot)
+                RelationGroup.from_snapshot(i, snapshot)
                 for i in range(len(snapshot.original_ops))
             ),
             snapshot=snapshot,
@@ -283,26 +309,26 @@ class ChapterState:
     # ── 属性 ──
 
     @property
-    def rows(self) -> Tuple[AlignedRow, ...]:
-        """所有行（按 snap_i 排序）。GUI 渲染统一入口。"""
-        result: List[AlignedRow] = []
+    def rows(self) -> Tuple[RelationRow, ...]:
+        """所有行（按 ordinal 排序）。GUI 渲染统一入口。"""
+        result: List[RelationRow] = []
         for g in self.groups:
             result.extend(g.rows)
         return tuple(result)
 
     # ── 查询 ──
 
-    def group(self, snap_i: int) -> Optional[SnapGroup]:
-        """按外部索引查找 SnapGroup。"""
-        # groups 始终按 snap_i 排序。逐项扫描会在评分轮询逐行查询时
+    def group(self, ordinal: int) -> Optional[RelationGroup]:
+        """按当前 ordinal 查找关系组。"""
+        # groups 始终按 ordinal 排序。逐项扫描会在评分轮询逐行查询时
         # 将大章节退化为 O(n²)，两千行即可让 GUI 停顿十余秒。
         lo, hi = 0, len(self.groups)
         while lo < hi:
             mid = (lo + hi) // 2
             group = self.groups[mid]
-            if group.snap_i < snap_i:
+            if group.ordinal < ordinal:
                 lo = mid + 1
-            elif group.snap_i > snap_i:
+            elif group.ordinal > ordinal:
                 hi = mid
             else:
                 return group
@@ -310,16 +336,19 @@ class ChapterState:
 
     # ── 结构操作（返回新 ChapterState） ──
 
-    def replace_snap(self, snap_i: int, group: SnapGroup) -> ChapterState:
-        """替换指定 snap 的 group。"""
+    def replace_relation(self, ordinal: int, group: RelationGroup) -> ChapterState:
+        """替换指定 ordinal 的关系组。"""
         return ChapterState(
-            groups=tuple(group if g.snap_i == snap_i else g for g in self.groups),
+            groups=tuple(
+                group if existing.ordinal == ordinal else existing
+                for existing in self.groups
+            ),
             snapshot=self.snapshot,
         )
 
-    def remove_snap(self, snap_i: int) -> ChapterState:
-        """删除指定 snap。"""
+    def remove_relation(self, ordinal: int) -> ChapterState:
+        """删除指定 ordinal 的关系组。"""
         return ChapterState(
-            groups=tuple(g for g in self.groups if g.snap_i != snap_i),
+            groups=tuple(group for group in self.groups if group.ordinal != ordinal),
             snapshot=self.snapshot,
         )

@@ -24,6 +24,7 @@ from dualign.services.report_io import (
     build_report,
     load_report,
     operations_from_report,
+    relation_ids_from_report,
     report_matches_alignment,
     save_report,
 )
@@ -260,6 +261,7 @@ def align_documents(
             cached = load_report(target)
             if report_matches_alignment(cached, path_a, path_b, provenance):
                 cached_operations = operations_from_report(cached)
+                cached_relation_ids = relation_ids_from_report(cached)
                 cached_alignment = dict(cached.get("alignment") or {})
                 if reset_work_state:
                     from dualign.models.action import RepairAction
@@ -279,7 +281,10 @@ def align_documents(
                     if cached_alignment.get("status", "aligned") == "aligned":
                         state = RepairState(
                             AlignmentSnapshot.from_alignment(
-                                cached_operations, lines_a, lines_b
+                                cached_operations,
+                                lines_a,
+                                lines_b,
+                                cached_relation_ids,
                             ),
                             existing_actions,
                         )
@@ -305,6 +310,7 @@ def align_documents(
                         document_a_path=path_a,
                         document_b_path=path_b,
                         operations=cached_operations,
+                        relation_ids=cached_relation_ids,
                         stats=dict(cached.get("stats") or {}),
                         quality=quality,
                         provenance=provenance,
