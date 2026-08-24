@@ -228,6 +228,11 @@ class WorkspacePanel(QWidget):
     def selected_item(self):
         return self._selected
 
+    def queue_items(self):
+        """Return a snapshot of the file queue for document-level batch actions."""
+
+        return list(self._queue)
+
     def _rebuild(self):
         """重建文件列表，每项显示两行：标题 + 路径概要。
 

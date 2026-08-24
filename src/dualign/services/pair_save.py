@@ -15,6 +15,7 @@ from dualign.models.pair_editing import PairEditingState
 from dualign.models.state import MISSING
 from dualign.services.alignment_io import document_sha256, document_sha256_from_text
 from dualign.services.report_io import build_report
+from dualign.services.realignment import RebuiltAlignment, rebuild_alignment
 
 
 class PairSaveError(RuntimeError):
@@ -141,6 +142,164 @@ def recover_pending_pair_saves(transaction_dir: str | Path | None = None) -> lis
     return messages
 
 
+def _mapped_operation(
+    operation: object, operation_map: tuple[int | None, ...]
+) -> int | None:
+    try:
+        index = int(operation)
+    except (TypeError, ValueError):
+        return None
+    if index < 0 or index >= len(operation_map):
+        return None
+    return operation_map[index]
+
+
+def _action_operations(action: dict, fallback: object) -> set[int]:
+    data = action.get("data") if isinstance(action.get("data"), dict) else {}
+    raw = data.get("orig_snaps") or [action.get("op_index", fallback)]
+    result: set[int] = set()
+    for value in raw:
+        try:
+            result.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _reanchor_proposal_action(
+    raw_action: object,
+    operation_map: tuple[int | None, ...],
+    changed_operations: frozenset[int],
+) -> dict | None:
+    if not isinstance(raw_action, dict):
+        return None
+    operations = _action_operations(raw_action, raw_action.get("op_index"))
+    if not operations or operations & changed_operations:
+        return None
+    mapped = []
+    for operation in sorted(operations):
+        new_operation = _mapped_operation(operation, operation_map)
+        if new_operation is None:
+            return None
+        if new_operation not in mapped:
+            mapped.append(new_operation)
+    action = dict(raw_action)
+    action["op_index"] = mapped[0]
+    data = dict(action.get("data") or {})
+    if len(mapped) > 1:
+        data["orig_snaps"] = mapped
+    else:
+        data.pop("orig_snaps", None)
+    action["data"] = data
+    return action
+
+
+def _rebase_pending_ai_proposals(
+    raw_store: object,
+    operation_map: tuple[int | None, ...],
+    changed_operations: frozenset[int],
+) -> dict:
+    """Keep only still-actionable pending proposals after solidification."""
+
+    if not isinstance(raw_store, dict):
+        return {}
+    rebased: dict[str, list[dict]] = {}
+    for proposals in raw_store.values():
+        if not isinstance(proposals, list):
+            continue
+        for raw_proposal in proposals:
+            if (
+                not isinstance(raw_proposal, dict)
+                or raw_proposal.get("status", "pending") != "pending"
+            ):
+                continue
+            action = _reanchor_proposal_action(
+                raw_proposal.get("action"), operation_map, changed_operations
+            )
+            if action is None:
+                continue
+            proposal = dict(raw_proposal)
+            proposal["action"] = action
+            rebased.setdefault(str(action["op_index"]), []).append(proposal)
+    return rebased
+
+
+def _rebase_score_cache(
+    raw_scores: object,
+    operation_map: tuple[int | None, ...],
+    changed_operations: frozenset[int],
+) -> dict:
+    """Re-anchor scores for unchanged text and invalidate changed relations."""
+
+    if not isinstance(raw_scores, dict):
+        return {}
+    rebased = {}
+    for key, score in raw_scores.items():
+        snap, separator, sub = str(key).partition("_")
+        if not separator:
+            continue
+        try:
+            old_operation = int(snap)
+            int(sub)
+        except ValueError:
+            continue
+        if old_operation in changed_operations:
+            continue
+        new_operation = _mapped_operation(old_operation, operation_map)
+        if new_operation is not None:
+            rebased[f"{new_operation}_{sub}"] = score
+    return rebased
+
+
+def _operation_fingerprint(operation, lines_a, lines_b):
+    source, target, _score = operation
+    return (
+        tuple(lines_a[index] for index in source),
+        tuple(lines_b[index] for index in target),
+    )
+
+
+def _exact_relation_map(old_operations, new_operations, lines_a, lines_b):
+    """Map only relations whose exact two-sided content is uniquely preserved."""
+
+    old_by_fingerprint: dict[tuple, list[int]] = {}
+    new_by_fingerprint: dict[tuple, list[int]] = {}
+    for index, operation in enumerate(old_operations):
+        old_by_fingerprint.setdefault(
+            _operation_fingerprint(operation, lines_a, lines_b), []
+        ).append(index)
+    for index, operation in enumerate(new_operations):
+        new_by_fingerprint.setdefault(
+            _operation_fingerprint(operation, lines_a, lines_b), []
+        ).append(index)
+
+    result: list[int | None] = [None] * len(old_operations)
+    for fingerprint, old_indices in old_by_fingerprint.items():
+        new_indices = new_by_fingerprint.get(fingerprint, ())
+        if len(old_indices) == 1 and len(new_indices) == 1:
+            result[old_indices[0]] = new_indices[0]
+    return tuple(result)
+
+
+def _compose_operation_maps(first, second):
+    if first is None:
+        return second
+    return tuple(
+        second[index] if index is not None and index < len(second) else None
+        for index in first
+    )
+
+
+def _rebase_repair_log(raw_actions, operation_map):
+    result = []
+    for raw_action in raw_actions:
+        action = raw_action.to_dict() if hasattr(raw_action, "to_dict") else raw_action
+        rebased = _reanchor_proposal_action(action, operation_map, frozenset())
+        if rebased is not None:
+            result.append(rebased)
+    return result
+
+
 def save_pair_transaction(
     state: PairEditingState,
     *,
@@ -154,12 +313,15 @@ def save_pair_transaction(
     remaining_repair_log=(),
     solidification_policy: dict | None = None,
     applied_repairs=(),
+    operation_map: tuple[int | None, ...] | None = None,
+    changed_operations=(),
+    alignment_runner=None,
 ) -> PairSaveResult:
     """Save two documents and their rebased report as one transaction.
 
-    ``remaining_repair_log`` is already anchored to the rebuilt operations.
-    This makes full and selective solidification share the same recoverable
-    three-file transaction.
+    Selective solidification first aligns the future natural documents from
+    scratch.  Derived state is migrated only through exact, unique two-sided
+    relation identities; positional indices are never treated as identity.
     """
 
     path_a = Path(document_a_path).resolve()
@@ -194,8 +356,9 @@ def save_pair_transaction(
     _guard_no_missing_placeholder(text_a, text_b)
     hash_a = document_sha256_from_text(text_a)
     hash_b = document_sha256_from_text(text_b)
+    changed = frozenset(int(index) for index in changed_operations)
     pair = state.to_alignment_pair()
-    operations = [
+    intermediate_operations = [
         (
             tuple(index - 1 for index in link.document_a),
             tuple(index - 1 for index in link.document_b),
@@ -204,6 +367,25 @@ def save_pair_transaction(
         for link in pair.links
         if link.state != "rejected"
     ]
+    relation_map: tuple[int | None, ...] | None = None
+    rebuilt: RebuiltAlignment | None = None
+    if solidification_policy is not None:
+        runner = alignment_runner or rebuild_alignment
+        try:
+            rebuilt = runner(
+                list(state.document_a.blocks), list(state.document_b.blocks)
+            )
+            operations = list(rebuilt.operations)
+            relation_map = _exact_relation_map(
+                intermediate_operations,
+                operations,
+                state.document_a.blocks,
+                state.document_b.blocks,
+            )
+        except Exception as exc:
+            raise PairSaveError(f"固化后的文本重新对齐失败: {exc}") from exc
+    else:
+        operations = intermediate_operations
     from datetime import datetime
 
     previous = dict(report)
@@ -222,12 +404,24 @@ def save_pair_transaction(
         }
     )
     previous["history"] = history
-    # Proposal and score caches use the old snap numbers.  Accepted work is in
-    # repair_log/history, so clearing these derived views avoids stale anchors.
-    previous["ai_proposals"] = {}
+    # Resolved suggestions are historical, while pending suggestions and scores
+    # remain useful only when their text survived unchanged.  Re-anchor those
+    # views to the rebuilt operation list; invalidate everything derived from a
+    # relation that was actually solidified.
+    if solidification_policy is not None and relation_map is not None:
+        original_to_rebuilt = _compose_operation_maps(operation_map, relation_map)
+        previous["ai_proposals"] = _rebase_pending_ai_proposals(
+            previous.get("ai_proposals"), original_to_rebuilt, changed
+        )
+        previous["scores"] = _rebase_score_cache(
+            previous.get("scores"), original_to_rebuilt, changed
+        )
+        remaining_repair_log = _rebase_repair_log(remaining_repair_log, relation_map)
+    else:
+        previous["ai_proposals"] = {}
+        previous["scores"] = {}
     previous["ai_review"] = {}
-    previous["scores"] = {}
-    stats = dict(previous.get("stats") or {})
+    stats = dict(rebuilt.stats if rebuilt is not None else previous.get("stats") or {})
     stats.update(
         {
             "n_source": len(state.document_a.blocks),
@@ -238,6 +432,16 @@ def save_pair_transaction(
                 if solidification_policy is not None
                 else "source-overwrite"
             ),
+            "preserved_relation_states": (
+                sum(index is not None for index in relation_map)
+                if relation_map is not None
+                else 0
+            ),
+            "invalidated_relation_states": (
+                sum(index is None for index in relation_map)
+                if relation_map is not None
+                else 0
+            ),
         }
     )
     rebased_report = build_report(
@@ -246,8 +450,21 @@ def save_pair_transaction(
         document_b_path=path_b,
         operations=operations,
         stats=stats,
-        quality=dict(previous.get("quality") or {}),
-        provenance=dict(previous.get("provenance") or {}),
+        quality=(
+            dict(rebuilt.quality)
+            if rebuilt is not None
+            else dict(previous.get("quality") or {})
+        ),
+        provenance=(
+            dict(rebuilt.provenance)
+            if rebuilt is not None
+            else dict(previous.get("provenance") or {})
+        ),
+        alignment=(
+            dict(rebuilt.alignment)
+            if rebuilt is not None
+            else dict(previous.get("alignment") or {"status": "aligned"})
+        ),
         repair_log=remaining_repair_log,
         previous=previous,
         document_a_sha256_value=hash_a,

@@ -14,7 +14,10 @@ result = align_documents(
 )
 ```
 
-成功结果含 `success`、`ops`、`stats`、`quality` 和 `report_path`。缓存命中要求两份文档哈希以及模型、算法、配置来源都完全一致。
+调用成功结果含 `success`、`ops`、`status`、`reason`、`quality` 和 `report_path`。
+`success` 表示报告已生成，不等于对齐已接受；应检查 `status` 的 `aligned`、
+`needs_review` 或 `rejected`。缓存命中要求两份文档哈希以及模型、算法、配置来源都完全
+一致。默认算法为 `mdl-v1`；`legacy-anchor-v1` 只供 CLI 显式回归。
 
 ## 报告
 
@@ -54,6 +57,21 @@ plan, result = solidify_report(
 )
 ```
 
-GUI 与 CLI 都使用该 API 和 `pair_save` 三文件事务。可用类型为 `merge_a`、`split_a`、`edit_a`、`merge_b`、`split_b`、`edit_b` 和 `delete_pair`；占位不是固化类型。双侧 N:M 结构操作只有在两侧相应类型均启用时才原子应用。报告按固化后的正文建立新快照，已固化效果进入 `history`，未固化操作以及仍有关系锚点的 `flag` / `ok` 会重锚后继续保留。程序不创建 `.bak`。
+GUI 与 CLI 都使用该 API 和 `pair_save` 三文件事务。可用类型为 `merge_a`、`split_a`、`edit_a`、`merge_b`、`split_b`、`edit_b` 和 `delete_pair`；占位不是固化类型。双侧 N:M 结构操作只有在两侧相应类型均启用时才原子应用。报告会对固化后的未来正文重新运行正式对齐；已固化效果进入 `history`，未固化操作、待处理 AI 建议、评分以及 `flag` / `ok` 仅在双侧有序文本关系完全相同且唯一时重锚。程序不创建 `.bak`。
+
+批量调用使用与 CLI 相同的共享计划：
+
+```python
+from dualign.services.solidify import (
+    SolidifyTarget,
+    apply_batch_solidification,
+    plan_batch_solidification,
+)
+
+batch = plan_batch_solidification(targets, policy)
+result = apply_batch_solidification(batch)
+```
+
+CLI 对应命令为 `dualign solidify-batch --entries-file chapters.json`，默认只预览，追加 `--apply` 后逐文件对提交独立事务。
 
 详细约束见 [工作报告架构](architecture.md)。

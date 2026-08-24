@@ -29,6 +29,7 @@ from dualign.services.pair_save import (
     recover_pending_pair_saves,
     save_pair_transaction,
 )
+from dualign.services.realignment import RebuiltAlignment, rebuild_alignment
 from dualign.services.change_set import (
     PairChangeSet,
     build_pair_change_set,
@@ -53,12 +54,17 @@ from dualign.services.report_io import (
     set_ai_review,
 )
 from dualign.services.solidify import (
+    BatchSolidificationPlan,
+    BatchSolidificationResult,
     SOLIDIFY_PRESETS,
     SOLIDIFY_TYPES,
     SolidificationPlan,
     SolidifyPolicy,
+    SolidifyTarget,
+    apply_batch_solidification,
     build_solidification_plan,
     load_solidify_policy,
+    plan_batch_solidification,
     plan_report_solidification,
     solidify_report,
 )
@@ -96,6 +102,8 @@ __all__ = [
     "PairChangeSet",
     "build_pair_change_set",
     "save_pair_transaction",
+    "RebuiltAlignment",
+    "rebuild_alignment",
     # editing bridge
     "apply_repair_log_to_pair_state",
     "link_id_for_operation",
@@ -115,10 +123,15 @@ __all__ = [
     # selective solidification
     "SOLIDIFY_PRESETS",
     "SOLIDIFY_TYPES",
+    "BatchSolidificationPlan",
+    "BatchSolidificationResult",
     "SolidificationPlan",
     "SolidifyPolicy",
+    "SolidifyTarget",
+    "apply_batch_solidification",
     "build_solidification_plan",
     "load_solidify_policy",
+    "plan_batch_solidification",
     "plan_report_solidification",
     "solidify_report",
 ]

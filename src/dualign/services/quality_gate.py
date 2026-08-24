@@ -1,5 +1,4 @@
-"""
-Dualign — 质量门控
+"""Frozen legacy-anchor quality diagnostics.
 
 文档级质量评估（G1/G2/G3）+ 文本对级异常检测。
 所有阈值可配置，消费端可通过 QualityGateConfig 覆写。
@@ -7,6 +6,8 @@ Dualign — 质量门控
 G1 → anchor_density 不足 → 对齐不可靠
 G2 → gap_row_ratio 过高 → 间隙行占比异常（孤行 1:0 + 0:1）
 G3 → n_overflow_rows > 0 → 合并编码触顶
+New MDL alignment decisions do not consume this module.  It remains only for
+legacy reports and benchmarks during the retirement window.
 """
 
 from __future__ import annotations
@@ -132,21 +133,7 @@ def is_statistical_low_score(
     k: float = 3.0,
     min_score: float = 0.6,
 ) -> bool:
-    """Z-score 离群低分检测。
+    """Compatibility alias; import anomaly_detection in new code."""
+    from dualign.services.anomaly_detection import is_statistical_low_score as impl
 
-    两个条件同时满足：
-      1. Z > k（默认 k=3.0，极保守阈值）
-      2. 绝对得分 < min_score（默认 0.6）
-    """
-    if len(scores_1to1) < 3:
-        return False
-    if score >= min_score:
-        return False
-    import numpy as np
-
-    mu = float(np.mean(scores_1to1))
-    sigma = float(np.std(scores_1to1, ddof=1))
-    if sigma < 1e-8:
-        return False
-    z = (mu - score) / sigma
-    return z > k
+    return impl(score, scores_1to1, k=k, min_score=min_score)

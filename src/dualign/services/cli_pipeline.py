@@ -6,7 +6,16 @@ from pathlib import Path
 
 from dualign.common import load_text_lines
 from dualign.config import get_embedding_cache_path
-from dualign.core import AlignConfig, AlignmentResult, align
+from dualign.core import (
+    ALGORITHM_LEGACY_ANCHOR_V1,
+    ALGORITHM_MDL_V1,
+    AlignConfig,
+    AlignmentResult,
+    LegacyAnchorConfig,
+    align,
+    alignment_payload,
+)
+from dualign.core.calibration import resolve_alignment_calibration
 from dualign.services.cached_encoder import CachedEncoder
 from dualign.services.embedding_cache import EmbeddingCache
 from dualign.services.quality_gate import automatic_repair_blockers
@@ -26,12 +35,71 @@ def default_report_path(document_a_path: str | Path) -> Path:
     return path.parent / f"{stem}.report.json"
 
 
-def _provenance(model, config: AlignConfig) -> dict:
+def _review_flags_from_alignment(operations: list, alignment: dict) -> list:
+    from dualign.services.repair import review_flags_for_uncertain_regions
+
+    regions = []
+    for item in alignment.get("uncertain_regions", []):
+        try:
+            regions.append(
+                (
+                    (
+                        int(item["start"]["source"]),
+                        int(item["start"]["target"]),
+                    ),
+                    (
+                        int(item["end"]["source"]),
+                        int(item["end"]["target"]),
+                    ),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    alternative_operations = []
+    for item in alignment.get("alternative_ops", []):
+        try:
+            alternative_operations.append(
+                (
+                    tuple(int(index) for index in item["s"]),
+                    tuple(int(index) for index in item["t"]),
+                    float(item.get("sc", 0.0)),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return review_flags_for_uncertain_regions(
+        operations,
+        regions,
+        alternative_operations=alternative_operations,
+    )
+
+
+def _provenance(model, config, calibration_id: str = "") -> dict:
     import hashlib
     import json
 
     from dualign import __version__
-    from dualign.core import ALIGN_CACHE_REVISION, ALIGN_CORE_VERSION
+
+    if (
+        not calibration_id
+        and isinstance(config, AlignConfig)
+        and config.algorithm == ALGORITHM_MDL_V1
+    ):
+        resolved = resolve_alignment_calibration(
+            model, calibration_id=config.calibration_id
+        )
+        calibration_id = resolved.calibration_id if resolved is not None else ""
+    if isinstance(config, LegacyAnchorConfig):
+        from dualign.core.legacy_anchor_aligner import (
+            ALIGN_CACHE_REVISION,
+            ALIGN_CORE_VERSION,
+        )
+
+        algorithm_name = ALGORITHM_LEGACY_ANCHOR_V1
+    else:
+        from dualign.core import ALIGN_CACHE_REVISION, ALIGN_CORE_VERSION
+
+        algorithm_name = config.algorithm
 
     provider = ""
     endpoint = ""
@@ -53,12 +121,13 @@ def _provenance(model, config: AlignConfig) -> dict:
                 instruction = INSTRUCTION_TEXT
     except (OSError, ValueError):
         pass
-    config_payload = json.dumps(vars(config), sort_keys=True, separators=(",", ":"))
+    config_values = {**vars(config), "resolved_calibration_id": calibration_id}
+    config_payload = json.dumps(config_values, sort_keys=True, separators=(",", ":"))
     result = {
         "tool": "dualign",
         "tool_version": __version__,
         "algorithm": {
-            "name": "dualign-pairwise",
+            "name": algorithm_name,
             "revision": ALIGN_CORE_VERSION,
             "cache_revision": ALIGN_CACHE_REVISION,
             "configuration_sha256": hashlib.sha256(
@@ -73,10 +142,22 @@ def _provenance(model, config: AlignConfig) -> dict:
         result["embedding"]["instruction_sha256"] = hashlib.sha256(
             instruction.encode("utf-8")
         ).hexdigest()
+    if calibration_id:
+        result["algorithm"]["calibration_id"] = calibration_id
     return result
 
 
-def _empty_result(source_count: int, target_count: int) -> AlignmentResult:
+def _empty_result(source_count: int, target_count: int, config) -> AlignmentResult:
+    if not isinstance(config, LegacyAnchorConfig):
+        return AlignmentResult(
+            all_ops=[],
+            anchors=[],
+            anchor_op_indices={},
+            stats={"n_source": source_count, "n_target": target_count, "n_ops": 0},
+            status="rejected",
+            reason="empty_document",
+            algorithm=ALGORITHM_MDL_V1,
+        )
     operations = []
     if source_count and not target_count:
         operations = [((index,), (), 0.0) for index in range(source_count)]
@@ -94,7 +175,33 @@ def _empty_result(source_count: int, target_count: int) -> AlignmentResult:
             "anchor_density": 0.0,
             "avg_similarity": 0.0,
         },
+        algorithm=ALGORITHM_LEGACY_ANCHOR_V1,
     )
+
+
+def _quality_diagnostics(result, source_count: int, target_count: int) -> dict:
+    """Keep anomaly diagnostics separate from the mdl applicability decision."""
+
+    if result.algorithm != ALGORITHM_LEGACY_ANCHOR_V1:
+        return {
+            "level": "diagnostic_only",
+            "rejections": [],
+            "indicators": {"alignment_status": result.status},
+        }
+    from dualign.services.quality_gate import _gap_row_ratio, assess_alignment_quality
+
+    assessment = assess_alignment_quality(
+        result.stats or {},
+        source_count,
+        target_count,
+        _gap_row_ratio(result.all_ops, source_count, target_count),
+        (result.stats or {}).get("n_overflow_rows", 0),
+    )
+    return {
+        "level": assessment["quality"],
+        "rejections": assessment.get("rejections", []),
+        "indicators": assessment["indicators"],
+    }
 
 
 def _safe_repair_mode(strategy: str, model, quality: dict) -> tuple[str, object]:
@@ -140,13 +247,20 @@ def align_documents(
         encoder = _ensure_model(model)
         if encoder is None:
             return {"success": False, "error": "模型未加载"}
-    provenance = _provenance(encoder, cfg)
+    resolved = None
+    if isinstance(cfg, AlignConfig) and cfg.algorithm == ALGORITHM_MDL_V1:
+        resolved = resolve_alignment_calibration(
+            encoder, calibration_id=cfg.calibration_id
+        )
+    calibration_id = resolved.calibration_id if resolved is not None else ""
+    provenance = _provenance(encoder, cfg, calibration_id)
 
     if reuse_alignment and target.is_file():
         try:
             cached = load_report(target)
             if report_matches_alignment(cached, path_a, path_b, provenance):
                 cached_operations = operations_from_report(cached)
+                cached_alignment = dict(cached.get("alignment") or {})
                 if reset_work_state:
                     from dualign.models.action import RepairAction
                     from dualign.models.state import AlignmentSnapshot
@@ -161,21 +275,31 @@ def align_documents(
                         else []
                     )
                     quality = dict(cached.get("quality") or {})
-                    state = RepairState(
-                        AlignmentSnapshot.from_alignment(
-                            cached_operations, lines_a, lines_b
-                        ),
-                        existing_actions,
-                    )
-                    repair_strategy, repair_model = _safe_repair_mode(
-                        strategy, encoder, quality
-                    )
-                    repair_log = RepairService.auto_repair(
-                        state,
-                        strategy=repair_strategy,
-                        model=repair_model,
-                        unresolved_only=preserve_work_state,
-                    ).repair_log
+                    repair_log = []
+                    if cached_alignment.get("status", "aligned") == "aligned":
+                        state = RepairState(
+                            AlignmentSnapshot.from_alignment(
+                                cached_operations, lines_a, lines_b
+                            ),
+                            existing_actions,
+                        )
+                        repair_strategy, repair_model = _safe_repair_mode(
+                            strategy, encoder, quality
+                        )
+                        repair_log = RepairService.auto_repair(
+                            state,
+                            strategy=repair_strategy,
+                            model=repair_model,
+                            unresolved_only=preserve_work_state,
+                        ).repair_log
+                    elif cached_alignment.get("status") == "needs_review":
+                        repair_log = (
+                            existing_actions
+                            if preserve_work_state
+                            else _review_flags_from_alignment(
+                                cached_operations, cached_alignment
+                            )
+                        )
                     report = build_report(
                         chapter_id=path_a.stem.split(".")[0],
                         document_a_path=path_a,
@@ -184,6 +308,7 @@ def align_documents(
                         stats=dict(cached.get("stats") or {}),
                         quality=quality,
                         provenance=provenance,
+                        alignment=cached_alignment,
                         repair_log=repair_log,
                         previous=cached if preserve_work_state else None,
                     )
@@ -194,6 +319,8 @@ def align_documents(
                         "report_path": str(target),
                         "quality": quality.get("level", ""),
                         "rejections": quality.get("rejections", []),
+                        "status": cached_alignment.get("status", "aligned"),
+                        "reason": cached_alignment.get("reason"),
                         "cache_hit": True,
                         "work_state_reset": True,
                         "work_state_preserved": preserve_work_state,
@@ -204,6 +331,8 @@ def align_documents(
                     "report_path": str(target),
                     "quality": (cached.get("quality") or {}).get("level", ""),
                     "rejections": (cached.get("quality") or {}).get("rejections", []),
+                    "status": cached_alignment.get("status", "aligned"),
+                    "reason": cached_alignment.get("reason"),
                     "cache_hit": True,
                 }
         except ReportError:
@@ -219,26 +348,15 @@ def align_documents(
                 cached_encoder.encode(lines_b),
                 cfg,
                 encode_fn=cached_encoder.encode,
+                calibration=resolved.calibration if resolved is not None else None,
             )
     else:
-        result = _empty_result(len(lines_a), len(lines_b))
+        result = _empty_result(len(lines_a), len(lines_b), cfg)
 
-    from dualign.services.quality_gate import _gap_row_ratio, assess_alignment_quality
-
-    assessment = assess_alignment_quality(
-        result.stats or {},
-        len(lines_a),
-        len(lines_b),
-        _gap_row_ratio(result.all_ops, len(lines_a), len(lines_b)),
-        (result.stats or {}).get("n_overflow_rows", 0),
-    )
-    quality = {
-        "level": assessment["quality"],
-        "rejections": assessment.get("rejections", []),
-        "indicators": assessment["indicators"],
-    }
+    quality = _quality_diagnostics(result, len(lines_a), len(lines_b))
+    alignment = alignment_payload(result, calibration_id=calibration_id)
     repair_log = []
-    if result.all_ops:
+    if result.status == "aligned" and result.all_ops:
         from dualign.models.state import AlignmentSnapshot
         from dualign.services.repair import RepairService, RepairState
 
@@ -249,6 +367,14 @@ def align_documents(
         repair_log = RepairService.auto_repair(
             state, strategy=repair_strategy, model=repair_model
         ).repair_log
+    elif result.status == "needs_review" and result.all_ops:
+        from dualign.services.repair import review_flags_for_uncertain_regions
+
+        repair_log = review_flags_for_uncertain_regions(
+            result.all_ops,
+            result.uncertain_regions,
+            alternative_operations=result.alternative_ops,
+        )
 
     previous = None
     if reuse_alignment and target.is_file() and not reset_work_state:
@@ -266,6 +392,7 @@ def align_documents(
         stats=result.stats or {},
         quality=quality,
         provenance=provenance,
+        alignment=alignment,
         repair_log=repair_log,
         previous=previous,
     )
@@ -276,6 +403,8 @@ def align_documents(
         "report_path": str(target),
         "quality": quality["level"],
         "rejections": quality["rejections"],
+        "status": result.status,
+        "reason": result.reason or None,
         "cache_hit": False,
         "work_state_reset": reset_work_state,
     }

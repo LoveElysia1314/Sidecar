@@ -222,6 +222,34 @@ def test_review_session_does_not_overwrite_existing_user_repair():
     assert session.proposed_state.action_for_op(1).source == "user"
 
 
+def test_review_session_preserves_explicitly_selected_normal_pairs():
+    state = RepairState(_snapshot())
+
+    session = build_agent_review_session(
+        state,
+        strategy="tgt",
+        model=None,
+        reviewable_ids=[0, 3],
+    )
+
+    assert session.context.reviewable_ids == [0, 3]
+    assert [info.snap_id for info in session.context.reviewable_infos] == [0, 3]
+    assert not session.context.get_snap_info(0).is_reviewable
+    assert not session.context.get_snap_info(3).is_reviewable
+
+    prompt = AiRepairAgent(strategy="tgt")._build_initial_user_message(session.context)
+    assert '>> {"id": 0' in prompt
+    assert '>> {"id": 3' in prompt
+
+    executor = ToolExecutor(
+        session.context,
+        initial_state=session.proposed_state,
+        strategy="tgt",
+    )
+    executor.execute(ToolCall("normal", "ok", {"target": "0"}))
+    assert executor.reviewed_actions[0].kind == "ok"
+
+
 def test_ok_result_distinguishes_original_relation_confirmation():
     """无拟修复时，工具回复应明确说明是确认原始关系。"""
     raw_state = RepairState(_snapshot())

@@ -57,3 +57,44 @@ def test_missing_split_capability_preserves_relation_instead_of_merging_it():
 
     assert repaired.repair_log == []
     assert repaired.current.group(0).rows[0].cur_type == "2:1"
+
+
+def test_document_a_strategy_preserves_a_and_inserts_target_placeholder_for_1_to_0():
+    snapshot = AlignmentSnapshot.from_alignment(
+        [((0,), (), 0.0)], ["必须保留的文档 A 行"], []
+    )
+
+    repaired = RepairService.auto_repair(
+        RepairState(snapshot), strategy="src", model=None
+    )
+
+    assert [action.kind for action in repaired.repair_log] == ["placeholder_tgt"]
+    rows = repaired.current.group(0).rows
+    assert [(row.src_text, row.tgt_text) for row in rows] == [
+        ("必须保留的文档 A 行", "⟢MISSING⟣")
+    ]
+    assert repaired.repair_log[0].data["strategy"] == "src"
+
+
+def test_switching_to_document_a_replaces_stale_automatic_delete():
+    snapshot = AlignmentSnapshot.from_alignment(
+        [((0,), (), 0.0)], ["必须保留的文档 A 行"], []
+    )
+    deleted = RepairService.auto_repair(
+        RepairState(snapshot), strategy="tgt", model=None
+    )
+    assert deleted.repair_log[0].kind == "delete"
+
+    repaired = RepairService.auto_repair(
+        deleted,
+        strategy="src",
+        model=None,
+        unresolved_only=True,
+    )
+
+    assert [action.kind for action in repaired.repair_log] == ["placeholder_tgt"]
+    row = repaired.current.group(0).rows[0]
+    assert (row.src_text, row.tgt_text) == (
+        "必须保留的文档 A 行",
+        "⟢MISSING⟣",
+    )

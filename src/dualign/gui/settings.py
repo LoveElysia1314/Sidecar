@@ -45,8 +45,8 @@ ALL_APPROVAL_STATES = [
     "user",
 ]
 
-# 质量门控
-KEY_QUALITY_GATE = "quality_gate"
+# 对齐后的异常诊断（旧 quality_gate 键仅在 load 时迁移）
+KEY_ANOMALY_DETECTION = "anomaly_detection"
 KEY_SOLIDIFY_TYPES = "solidify_types"
 
 # ═══════════════════════════════════════════════════════════════
@@ -101,7 +101,17 @@ class DualignConfig:
                     self._data = json.load(f)
         except Exception:
             self._data = {}
-        self._dirty = False
+        legacy = self._data.pop("quality_gate", None)
+        migrated = legacy is not None
+        if (
+            isinstance(legacy, dict)
+            and KEY_ANOMALY_DETECTION not in self._data
+        ):
+            self._data[KEY_ANOMALY_DETECTION] = {
+                "zscore_k": legacy.get("zscore_k", 3.0),
+                "zscore_min_score": legacy.get("zscore_min_score", 0.6),
+            }
+        self._dirty = migrated
         return self._data
 
     def save(self) -> None:
@@ -147,10 +157,8 @@ class DualignConfig:
             # 固化修改：出厂默认仅校订（双侧）+ 译文拆分；
             # 原文合并/拆分/删除等破坏性效果需用户显式启用
             KEY_SOLIDIFY_TYPES: ["edit_a", "edit_b", "split_b"],
-            # 质量门控
-            KEY_QUALITY_GATE: {
-                "anchor_density_min": 0.60,
-                "gap_row_ratio_max": 0.10,
+            # 对齐后异常诊断；不参与文档接受/拒绝
+            KEY_ANOMALY_DETECTION: {
                 "zscore_k": 3.0,
                 "zscore_min_score": 0.6,
             },

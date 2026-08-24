@@ -70,8 +70,7 @@ from dualign.gui.settings import (
     KEY_LAST_OPEN_DIR,
     KEY_SHOW_HANDLED,
     KEY_CROSS_GROUP_OP,
-    KEY_QUALITY_GATE,
-    KEY_SOLIDIFY_TYPES,
+    KEY_ANOMALY_DETECTION,
 )
 
 # 底部面板：展开最小总高度（含标题栏 24px），低于此值自动折叠
@@ -87,19 +86,17 @@ def _vline() -> QFrame:
     return s
 
 
-def _load_quality_config():
-    """从配置中加载 QualityGateConfig。"""
-    from dualign.services.quality_gate import QualityGateConfig
+def _load_anomaly_detection_config():
+    """加载只影响对齐后标记的异常检测参数。"""
+    from dualign.services.anomaly_detection import AnomalyDetectionConfig
 
-    cfg_data = DualignConfig.instance().get(KEY_QUALITY_GATE, None)
+    cfg_data = DualignConfig.instance().get(KEY_ANOMALY_DETECTION, None)
     if cfg_data and isinstance(cfg_data, dict):
-        return QualityGateConfig(
-            anchor_density_min=cfg_data.get("anchor_density_min", 0.60),
-            gap_row_ratio_max=cfg_data.get("gap_row_ratio_max", 0.10),
+        return AnomalyDetectionConfig(
             zscore_k=cfg_data.get("zscore_k", 3.0),
             zscore_min_score=cfg_data.get("zscore_min_score", 0.6),
         )
-    return QualityGateConfig()
+    return AnomalyDetectionConfig()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -185,7 +182,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._ai_focus_lost: bool = False
         self._auto_select_on_render: Optional[int] = None
         self._preview_active: bool = False
-        self._quality_config = _load_quality_config()
+        self._anomaly_detection_config = _load_anomaly_detection_config()
         self._last_quality_assessment: Optional[dict] = None
         self._dock_state_restored: bool = False
 
@@ -220,6 +217,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._hovered_pos: Optional[QPoint] = None
 
         self._bottom_collapsed: bool = False  # 底部面板折叠状态
+        self._bottom_user_collapsed: bool = False  # 用户折叠后禁止程序自动展开
         self._bottom_locked: bool = False  # 欢迎页时锁定
         self._bottom_snap_idx: int = (
             3  # 当前吸附档位索引 (25%/30%/35%/40%/45%/50%，默认 40%)
@@ -793,15 +791,21 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         has_data = self._repair_state is not None
         should_expand = has_data and (has_pending or ai_ok)
 
-        if should_expand and self._bottom_collapsed:
-            self._toggle_bottom_panel()
+        if (
+            should_expand
+            and self._bottom_collapsed
+            and not getattr(self, "_bottom_user_collapsed", False)
+        ):
+            self._toggle_bottom_panel(user_initiated=False)
         elif not should_expand and not self._bottom_collapsed:
-            self._toggle_bottom_panel()
+            self._toggle_bottom_panel(user_initiated=False)
 
-    def _toggle_bottom_panel(self):
+    def _toggle_bottom_panel(self, *, user_initiated: bool = True):
         """折叠/展开 AI 建议内容区（欢迎页时锁定）。
 
         展开到当前吸附档位 (_bottom_snap_idx)，折叠为 0。
+        用户主动折叠后，自动同步不得在切章时重新展开；用户主动
+        展开后解除该限制。程序性折叠/展开不改变用户偏好。
         """
         if getattr(self, "_bottom_locked", False):
             return
@@ -831,6 +835,8 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             self._bottom_title.setText("AI 建议列表")
             self._main_splitter.setSizes([total, 0])
 
+        if user_initiated:
+            self._bottom_user_collapsed = self._bottom_collapsed
         self._debounce_save_history()
 
     def _on_splitter_moved(self, pos: int, index: int):
@@ -861,6 +867,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             # 折叠态：拖过 EXPAND_RATIO 则展开至 30%
             if ratio >= _EXPAND_RATIO:
                 self._bottom_collapsed = False
+                self._bottom_user_collapsed = False
                 self._bottom_content.show()
                 self._bottom_toggle_btn.setText("▼")
                 self._bottom_toggle_btn.setToolTip("折叠底部面板")
@@ -882,6 +889,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             # 展开态：底栏 < COLLAPSE_RATIO → 折叠
             if ratio < _COLLAPSE_RATIO:
                 self._bottom_collapsed = True
+                self._bottom_user_collapsed = True
                 self._bottom_content.hide()
                 self._bottom_toggle_btn.setText("▲")
                 self._bottom_toggle_btn.setToolTip("展开底部面板")
@@ -971,12 +979,12 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         if preview:
             self._preview_saved_bottom = not self._bottom_collapsed
             if not self._bottom_collapsed:
-                self._toggle_bottom_panel()
+                self._toggle_bottom_panel(user_initiated=False)
         else:
             saved = getattr(self, "_preview_saved_bottom", None)
             if saved is not None:
                 if saved and self._bottom_collapsed:
-                    self._toggle_bottom_panel()
+                    self._toggle_bottom_panel(user_initiated=False)
             self._preview_saved_bottom = None
         # 刷新视图
         self._apply_filter()
@@ -1220,8 +1228,8 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             self._table_page_layout.addWidget(self._table_stack, 1)
             self._stacked.addWidget(self._table_page)
 
-    def _on_quality_gate_config(self):
-        """打开质量门控参数配置对话框。"""
+    def _on_anomaly_detection_config(self):
+        """打开对齐后异常检测参数配置对话框。"""
         from PySide6.QtWidgets import (
             QDialog,
             QFormLayout,
@@ -1233,43 +1241,25 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             QHBoxLayout,
             QLabel,
         )
-        from dualign.services.quality_gate import QualityGateConfig
-        from dualign.gui.settings import KEY_QUALITY_GATE
+        from dualign.services.anomaly_detection import AnomalyDetectionConfig
+        from dualign.gui.settings import KEY_ANOMALY_DETECTION
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("质量门控参数")
+        dlg.setWindowTitle("异常检测参数")
         dlg.setMinimumWidth(320)
 
         layout = QVBoxLayout(dlg)
         layout.setSpacing(8)
 
-        cfg = self._quality_config
-        defaults = QualityGateConfig()
+        cfg = self._anomaly_detection_config
+        defaults = AnomalyDetectionConfig()
 
-        info = QLabel("调整对齐质量评估阈值。\n" "修改后仅在下次对齐时生效。")
+        info = QLabel(
+            "调整对齐完成后的低分异常标记。\n"
+            "这些参数不参与文档接受、拒绝或对齐路径选择。"
+        )
         info.setWordWrap(True)
         layout.addWidget(info)
-
-        # ── 文档级门控 ──
-        g0 = QGroupBox("文档级")
-        fl0 = QFormLayout(g0)
-        fl0.setSpacing(4)
-
-        sb_ad = QDoubleSpinBox()
-        sb_ad.setRange(0.05, 0.95)
-        sb_ad.setSingleStep(0.05)
-        sb_ad.setDecimals(2)
-        sb_ad.setValue(cfg.anchor_density_min)
-        fl0.addRow("锚点密度下限", sb_ad)
-
-        sb_gr = QDoubleSpinBox()
-        sb_gr.setRange(0.01, 0.50)
-        sb_gr.setSingleStep(0.01)
-        sb_gr.setDecimals(2)
-        sb_gr.setValue(cfg.gap_row_ratio_max)
-        fl0.addRow("间隙行比例上限", sb_gr)
-
-        layout.addWidget(g0)
 
         # ── 离群低分 ──
         g1 = QGroupBox("离群低分")
@@ -1299,8 +1289,6 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         restore_defaults_btn = QPushButton("恢复默认")
         restore_defaults_btn.clicked.connect(
             lambda: (
-                sb_ad.setValue(defaults.anchor_density_min),
-                sb_gr.setValue(defaults.gap_row_ratio_max),
                 sb_k.setValue(defaults.zscore_k),
                 sb_ms.setValue(defaults.zscore_min_score),
             )
@@ -1316,25 +1304,21 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         layout.addLayout(btn_row)
 
         if dlg.exec() == QDialog.Accepted:
-            self._quality_config = QualityGateConfig(
-                anchor_density_min=sb_ad.value(),
-                gap_row_ratio_max=sb_gr.value(),
+            self._anomaly_detection_config = AnomalyDetectionConfig(
                 zscore_k=sb_k.value(),
                 zscore_min_score=sb_ms.value(),
             )
             DualignConfig.instance().set(
-                KEY_QUALITY_GATE,
+                KEY_ANOMALY_DETECTION,
                 {
-                    "anchor_density_min": sb_ad.value(),
-                    "gap_row_ratio_max": sb_gr.value(),
                     "zscore_k": sb_k.value(),
                     "zscore_min_score": sb_ms.value(),
                 },
             )
             DualignConfig.instance().save()
             self._safe_status(
-                f"✅ 门控参数已更新：锚点≥{sb_ad.value():.0%} "
-                f"间隙≤{sb_gr.value():.0%} k={sb_k.value():.1f}"
+                f"✅ 异常检测参数已更新：k={sb_k.value():.1f} "
+                f"最低分={sb_ms.value():.2f}"
             )
 
     def _build_bottom_bar(self):
@@ -1633,37 +1617,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             self._on_apply_confirmed_changes,
             QKeySequence("Ctrl+Shift+S"),
         )
-        solidify_settings = fm.addMenu("固化范围")
-        presets = solidify_settings.addMenu("预设")
-        for label, preset in (
-            ("仅校订文本", "edits"),
-            ("行级兼容（全部）", "line-aligned"),
-            ("仅文档 A", "document-a"),
-            ("仅文档 B", "document-b"),
-            ("全部关闭", "none"),
-        ):
-            presets.addAction(
-                label,
-                lambda _checked=False, name=preset: self._set_solidify_preset(name),
-            )
-        solidify_settings.addSeparator()
-        from dualign.services.solidify import (
-            DEFAULT_SOLIDIFY_TYPES,
-            SOLIDIFY_TYPE_LABELS,
-            SolidifyPolicy,
-        )
-
-        saved_types = DualignConfig.instance().get(
-            KEY_SOLIDIFY_TYPES,
-            list(SolidifyPolicy(DEFAULT_SOLIDIFY_TYPES).enabled),
-        )
-        self._solidify_type_actions = {}
-        for key, label in SOLIDIFY_TYPE_LABELS.items():
-            action = solidify_settings.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(key in saved_types)
-            action.toggled.connect(self._save_solidify_types)
-            self._solidify_type_actions[key] = action
+        fm.addAction("批量固化修改...", self._on_batch_solidify)
         fm.addSeparator()
 
         # ── 查看文件子菜单：快速打开源文件/修复文件/报告 ──
@@ -1781,7 +1735,8 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         sm = mb.addMenu("设置(&S)")
         sm.addAction("模型与 Agent 配置...", self._on_open_agent_config)
         sm.addSeparator()
-        sm.addAction("质量门控参数...", self._on_quality_gate_config)
+        sm.addAction("固化修改设置...", self._on_solidify_settings)
+        sm.addAction("异常检测参数...", self._on_anomaly_detection_config)
         sm.addAction(
             "刷新环境检测",
             self._refresh_status_dots,
@@ -2173,8 +2128,9 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             self.resizeDocks([l_dock], [300], Qt.Orientation.Horizontal)
 
         # ── 展开底部面板 ──
+        self._bottom_user_collapsed = False
         if self._bottom_content.isHidden():
-            self._toggle_bottom_panel()
+            self._toggle_bottom_panel(user_initiated=False)
 
         # ── 恢复表格列宽默认 ──
         hdr = self.table.horizontalHeader()
@@ -2250,7 +2206,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         row0: 文档 A：完整文件名（超链接）
         row1: 文档 B：完整文件名（超链接）
         row2: 文档 A 块数 | 文档 B 块数 | 关系均分
-        row3: 真锚点率 | 间隙行率 | 合并触顶
+        row3: 单调脚手架 | 顺序链外 | 分歧区
         末尾：章节进度
         """
         if self._repair_state is None:
@@ -2281,34 +2237,26 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
 
         # 指标
         stats = getattr(self, "_align_stats", None) or {}
-        qa = getattr(self, "_last_quality_assessment", None)
-        indicators = qa.get("indicators", {}) if qa else {}
         # Snap均分
         avg_sim = stats.get("avg_similarity", 0)
         avg_pct = f"{avg_sim:.1%}" if avg_sim else "—"
 
-        # 真锚点率 = 参与锚点的去重行数 / 总行数
-        n_true_anchors = stats.get("n_true_anchors", 0)
-        n_denom = n_src + n_tgt
-        anchor_ratio = n_true_anchors / n_denom if n_denom > 0 else 0
-        anchor_pct = f"{anchor_ratio:.1%}"
-
-        # 间隙行率
-        gap_ratio = indicators.get("gap_row_ratio", 0)
-        gap_pct = f"{gap_ratio:.1%}" if gap_ratio else "—"
-
-        # 合并触顶（0 显示 0，不隐藏）
-        n_overflow = indicators.get("n_overflow_rows", 0) or stats.get(
-            "n_overflow_rows", 0
+        gate = getattr(self, "_alignment_gate", None) or {}
+        mutual_pairs = int(gate.get("mutual_pairs", 0) or 0)
+        out_of_chain = int(gate.get("out_of_chain_pairs", 0) or 0)
+        order_text = (
+            f"{out_of_chain}/{mutual_pairs}" if mutual_pairs else "—"
         )
+        n_scaffold = int(stats.get("n_scaffold", 0) or 0)
+        uncertain = int(stats.get("uncertain_regions", 0) or 0)
 
         self._review.set_summary_cells(
             f"文档 A 块数：{n_src}",
             f"文档 B 块数：{n_tgt}",
             f"Snap均分：{avg_pct}",
-            f"真锚点率：{anchor_pct}",
-            f"间隙行率：{gap_pct}",
-            f"合并触顶：{n_overflow}",
+            f"单调脚手架：{n_scaffold}",
+            f"顺序链外：{order_text}",
+            f"分歧区：{uncertain}",
         )
 
     def _update_status_bar(self):

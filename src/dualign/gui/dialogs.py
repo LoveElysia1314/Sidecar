@@ -775,7 +775,9 @@ class FlagEditDialog(QDialog):
         layout.addWidget(QLabel(target))
 
         self._note_edit = QPlainTextEdit(note)
-        self._note_edit.setPlaceholderText("例如：拆分失败：文本重对齐失败")
+        self._note_edit.setPlaceholderText(
+            "例如：拆分需复核：拆分后的局部对齐无法唯一确定"
+        )
         self._note_edit.setMinimumHeight(100)
         layout.addWidget(self._note_edit)
 

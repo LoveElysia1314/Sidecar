@@ -7,12 +7,13 @@ import pytest
 from dualign.models.state import AlignmentSnapshot
 from dualign.models.action import RepairAction
 from dualign.models.state import AlignedRow, SnapGroup, ChapterState
-from dualign.core import AlignmentResult
 from dualign.services.repair import (
     RepairState,
     RepairService,
-    SPLIT_FAILURE_REALIGN,
+    SPLIT_FAILURE_AMBIGUOUS,
     SPLIT_FAILURE_UNSPLITTABLE,
+    normalize_repair_log,
+    review_flags_for_uncertain_regions,
 )
 
 
@@ -25,6 +26,46 @@ def simple_snapshot():
 @pytest.fixture
 def simple_state(simple_snapshot):
     return RepairState(simple_snapshot)
+
+
+def test_uncertain_region_flags_cover_the_whole_disagreement_island():
+    ops = [
+        ((0,), (0,), 0.9),
+        ((1, 2), (1,), 0.8),
+        ((), (2,), 0.0),
+        ((3,), (3,), 0.9),
+    ]
+
+    flags = review_flags_for_uncertain_regions(ops, (((1, 1), (3, 3)),))
+
+    assert [flag.op_index for flag in flags] == [1, 2]
+    assert all(flag.source == "auto" for flag in flags)
+    assert all(flag.data["reason"] == "composition_disagreement" for flag in flags)
+    assert "A 行 2–3" in flags[0].data["note"]
+    assert flags[0].data["uncertain_region"]["end"] == {
+        "source": 3,
+        "target": 3,
+    }
+
+
+def test_uncertain_region_flags_only_the_line_whose_matchedness_changes():
+    current = [
+        ((0,), (0,), 0.9),
+        ((1,), (), 0.0),
+        ((2,), (1,), 0.9),
+    ]
+    alternative = [((0, 1), (0,), 0.7), ((2,), (1,), 0.9)]
+
+    flags = review_flags_for_uncertain_regions(
+        current,
+        (((0, 0), (2, 1)),),
+        alternative_operations=alternative,
+    )
+
+    assert [flag.op_index for flag in flags] == [1]
+    assert flags[0].data["current_structure"] == "1:1+1:0"
+    assert flags[0].data["alternative_structure"] == "2:1"
+    assert "当前路径 1:1+1:0；备选路径 2:1" in flags[0].data["note"]
 
 
 class TestRepairStateCreate:
@@ -109,6 +150,30 @@ class TestApplyUndo:
         assert cleared.action_for_op(0).kind == "edit"
         assert cleared.current.group(0).rows[0].src_text == "edited"
 
+    def test_new_content_decision_replaces_stale_append_only_decision(
+        self, simple_state
+    ):
+        deletion = RepairAction.make_delete(0, source="auto")
+        edit = RepairAction.make_edit(0, source="ai", new_tgt_lines=["fixed"])
+
+        normalized = normalize_repair_log([deletion, edit])
+        restored = RepairState(simple_state.snapshot, [deletion, edit])
+
+        assert normalized == [edit]
+        assert restored.repair_log == [edit]
+        assert restored.current.group(0).rows[0].tgt_text == "fixed"
+
+    def test_meta_decisions_survive_a_compatible_content_decision(self):
+        edit = RepairAction.make_edit(0, source="ai", new_tgt_lines=["fixed"])
+        flag = RepairAction.make_flag(0, "review")
+        approval = RepairAction.make_ok(0)
+
+        assert normalize_repair_log([edit, flag, approval]) == [
+            edit,
+            flag,
+            approval,
+        ]
+
 
 class _PartitionEncoder:
     def encode(self, texts, **_kwargs):
@@ -154,22 +219,66 @@ class TestSplitAttempt:
         assert attempt.failure_reason == SPLIT_FAILURE_UNSPLITTABLE
         assert attempt.state is state
 
-    def test_split_reports_when_realign_cannot_cover_every_line(self, monkeypatch):
+    def test_split_does_not_use_soft_clause_punctuation(self):
         state = RepairState.from_ops(
-            [((0, 1, 2), (0,), 0.7)],
-            ["one", "two", "three"],
-            ["First. Second."],
-        )
-        monkeypatch.setattr(
-            "dualign.services.repair.align",
-            lambda *_args, **_kwargs: AlignmentResult([], [], {}, {}),
+            [((0, 1), (0,), 0.7)],
+            ["source one", "source two"],
+            ["A grammatical clause, but still one sentence"],
         )
 
         attempt = RepairService.try_split(state, 0, "tgt", model=_ZeroEncoder())
 
         assert not attempt.succeeded
-        assert attempt.failure_reason == SPLIT_FAILURE_REALIGN
+        assert attempt.failure_reason == SPLIT_FAILURE_UNSPLITTABLE
         assert attempt.state is state
+
+    def test_split_reports_when_local_evidence_is_exactly_ambiguous(self):
+        state = RepairState.from_ops(
+            [((0, 1, 2), (0,), 0.7)],
+            ["one", "two", "three"],
+            ["First. Second."],
+        )
+
+        attempt = RepairService.try_split(state, 0, "tgt", model=_ZeroEncoder())
+
+        assert not attempt.succeeded
+        assert attempt.needs_review
+        assert attempt.failure_reason == SPLIT_FAILURE_AMBIGUOUS
+        assert attempt.state is state
+
+    def test_split_may_merge_the_other_side_after_adding_a_boundary(self):
+        state = RepairState.from_ops(
+            [((0, 1, 2), (0,), 0.7)],
+            ["alpha first", "alpha second", "beta"],
+            ["Alpha. Beta."],
+        )
+
+        class RecursiveEncoder:
+            def encode(self, texts, **_kwargs):
+                vectors = {
+                    "alpha first": (1.0, 0.0),
+                    "alpha second": (0.9, 0.1),
+                    "beta": (0.0, 1.0),
+                    "Alpha.": (1.0, 0.0),
+                    "Beta.": (0.0, 1.0),
+                    "alpha first alpha second": (1.0, 0.0),
+                    "alpha second beta": (0.2, 0.8),
+                }
+                return np.asarray(
+                    [vectors.get(text, (0.5, 0.5)) for text in texts]
+                )
+
+        attempt = RepairService.try_split(
+            state, 0, "tgt", model=RecursiveEncoder()
+        )
+
+        assert attempt.succeeded
+        action = attempt.state.repair_log[-1]
+        assert action.data["new_src_lines"] == [
+            "alpha first alpha second",
+            "beta",
+        ]
+        assert action.data["new_tgt_lines"] == ["Alpha.", "Beta."]
 
 
 class TestChapterState:

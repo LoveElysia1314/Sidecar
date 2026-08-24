@@ -275,19 +275,6 @@ class UniversalSplitter:
         """按硬分割点拆分文本。"""
         return cls._split_at_points(text, cls.find_hard_split_points(text))
 
-    @classmethod
-    def alignment_split(cls, text: str) -> List[str]:
-        """为局部对齐生成硬/软边界候选片段。
-
-        软边界只是可选的对齐切点，不改变其“句内停顿”语义；
-        后续由嵌入得分选择最佳分区。
-        """
-        points = sorted(
-            set(cls.find_hard_split_points(text))
-            | set(cls.find_soft_split_points(text))
-        )
-        return cls._split_at_points(text, points)
-
     @staticmethod
     def _split_at_points(text: str, points: List[int]) -> List[str]:
         if not points:

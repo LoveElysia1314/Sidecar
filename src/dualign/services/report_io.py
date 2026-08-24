@@ -109,6 +109,7 @@ def build_report(
     stats: Mapping[str, Any],
     quality: Mapping[str, Any],
     provenance: Mapping[str, Any],
+    alignment: Mapping[str, Any] | None = None,
     repair_log=(),
     previous: Mapping[str, Any] | None = None,
     document_a_sha256_value: str = "",
@@ -158,6 +159,7 @@ def build_report(
         "alignment_key": alignment_key.to_dict(),
         "provenance": dict(provenance),
         "stats": dict(stats),
+        "alignment": dict(alignment or {"status": "aligned"}),
         "quality": dict(quality),
         "repair_log": [
             action.to_dict() if isinstance(action, RepairAction) else dict(action)
@@ -213,6 +215,14 @@ def load_report(path: str | Path) -> dict[str, Any]:
     if not isinstance(data, dict) or data.get("format") != REPORT_FORMAT:
         raise ReportError("报告格式已过时，请重新对齐文档")
     operations_from_report(data)
+    # Reports written before the decision contract represent completed legacy
+    # alignments.  Keep them readable without pretending they passed mdl-v1.
+    if "alignment" not in data:
+        data["alignment"] = {
+            "status": "aligned",
+            "reason": None,
+            "algorithm": "legacy-anchor-v1",
+        }
     return data
 
 

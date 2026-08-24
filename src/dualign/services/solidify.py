@@ -8,6 +8,7 @@ rebased onto the rebuilt alignment snapshot and remain in ``repair_log``.
 from __future__ import annotations
 
 import json
+import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +20,12 @@ from dualign.models.action import RepairAction
 from dualign.models.pair_editing import PairEditingState
 from dualign.services._text_diff import unified_text_diff
 from dualign.services.alignment_io import create_alignment_pair
-from dualign.services.pair_save import PairSaveResult, save_pair_transaction
+from dualign.services.pair_save import (
+    PairSaveError,
+    PairSaveResult,
+    save_pair_transaction,
+)
+from dualign.services.repair import normalize_repair_log
 from dualign.services.report_io import (
     ReportError,
     load_report,
@@ -182,6 +188,8 @@ class SolidificationPlan:
     original_actions: tuple[RepairAction, ...]
     remaining_actions: tuple[RepairAction, ...]
     applied: tuple[dict, ...]
+    operation_map: tuple[int | None, ...]
+    changed_operations: frozenset[int]
 
     @property
     def document_a_changed(self) -> bool:
@@ -219,6 +227,85 @@ class SolidificationPlan:
 
 
 @dataclass(frozen=True)
+class SolidifyTarget:
+    """One document pair addressable by GUI integrations and the batch CLI."""
+
+    label: str
+    document_a_path: str
+    document_b_path: str
+    report_path: str
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "SolidifyTarget":
+        if not isinstance(value, Mapping):
+            raise ValueError("批量固化清单中的条目必须是对象")
+        path_a = str(value.get("document_a_path") or "")
+        path_b = str(value.get("document_b_path") or "")
+        report = str(value.get("report_path") or value.get("alignment_path") or "")
+        if not path_a or not path_b or not report:
+            raise ValueError(
+                "批量固化条目缺少 document_a_path/document_b_path/report_path"
+            )
+        return cls(
+            label=str(value.get("label") or Path(path_a).name),
+            document_a_path=path_a,
+            document_b_path=path_b,
+            report_path=report,
+        )
+
+
+@dataclass(frozen=True)
+class BatchSolidificationItem:
+    target: SolidifyTarget
+    plan: SolidificationPlan
+    report: dict
+    report_sha256: str
+
+
+@dataclass(frozen=True)
+class BatchSolidificationIssue:
+    target: SolidifyTarget
+    reason: str
+    error: bool = False
+
+
+@dataclass(frozen=True)
+class BatchSolidificationPlan:
+    policy: SolidifyPolicy
+    ready: tuple[BatchSolidificationItem, ...]
+    skipped: tuple[BatchSolidificationIssue, ...]
+
+    @property
+    def action_count(self) -> int:
+        return sum(len(item.plan.applied) for item in self.ready)
+
+    @property
+    def document_a_count(self) -> int:
+        return sum(item.plan.document_a_changed for item in self.ready)
+
+    @property
+    def document_b_count(self) -> int:
+        return sum(item.plan.document_b_changed for item in self.ready)
+
+    @property
+    def effect_counts(self) -> dict[str, int]:
+        counts = {key: 0 for key in SOLIDIFY_TYPES}
+        for item in self.ready:
+            for applied in item.plan.applied:
+                for effect in applied.get("effects", ()):
+                    if effect in counts:
+                        counts[effect] += 1
+        return counts
+
+
+@dataclass(frozen=True)
+class BatchSolidificationResult:
+    succeeded: tuple[SolidifyTarget, ...]
+    failed: tuple[BatchSolidificationIssue, ...]
+    skipped: tuple[BatchSolidificationIssue, ...]
+
+
+@dataclass(frozen=True)
 class _PendingAction:
     action: RepairAction
     link_ids: tuple[str, ...]
@@ -232,7 +319,7 @@ def build_solidification_plan(
     """Apply selected effects and re-anchor everything that remains."""
 
     state = baseline
-    actions = tuple(repair_log)
+    actions = tuple(normalize_repair_log(repair_log))
     old_to_link = {index: link.id for index, link in enumerate(state.links)}
     pending: list[_PendingAction] = []
     applied: list[dict] = []
@@ -416,6 +503,16 @@ def build_solidification_plan(
             data.pop("orig_snaps", None)
         remaining.append(_action_copy(item.action, op_index=positions[0], data=data))
 
+    operation_map = tuple(
+        final_positions.get(old_to_link[old_index])
+        for old_index in range(len(baseline.links))
+    )
+    changed_operations = frozenset(
+        operation
+        for item in applied
+        for operation in _action_operations(RepairAction.from_dict(item["action"]))
+    )
+
     return SolidificationPlan(
         baseline=baseline,
         solidified=state,
@@ -423,6 +520,8 @@ def build_solidification_plan(
         original_actions=actions,
         remaining_actions=tuple(remaining),
         applied=tuple(applied),
+        operation_map=operation_map,
+        changed_operations=changed_operations,
     )
 
 
@@ -483,5 +582,84 @@ def solidify_report(
         remaining_repair_log=plan.remaining_actions,
         solidification_policy=policy.to_dict(),
         applied_repairs=plan.applied,
+        operation_map=plan.operation_map,
+        changed_operations=plan.changed_operations,
     )
     return plan, result
+
+
+def plan_batch_solidification(
+    targets: Iterable[SolidifyTarget], policy: SolidifyPolicy
+) -> BatchSolidificationPlan:
+    """Build an immutable, exact batch preview without modifying any file."""
+
+    ready: list[BatchSolidificationItem] = []
+    skipped: list[BatchSolidificationIssue] = []
+    seen: set[tuple[str, str, str]] = set()
+    for target in targets:
+        identity = tuple(
+            os.path.normcase(str(Path(path).resolve()))
+            for path in (
+                target.document_a_path,
+                target.document_b_path,
+                target.report_path,
+            )
+        )
+        if identity in seen:
+            skipped.append(BatchSolidificationIssue(target, "重复文件对"))
+            continue
+        seen.add(identity)
+        try:
+            plan, report = plan_report_solidification(
+                target.document_a_path,
+                target.document_b_path,
+                target.report_path,
+                policy,
+            )
+            if not plan.has_changes:
+                skipped.append(
+                    BatchSolidificationIssue(target, "没有符合当前范围的待固化修改")
+                )
+                continue
+            ready.append(
+                BatchSolidificationItem(
+                    target,
+                    plan,
+                    report,
+                    file_bytes_sha256(target.report_path),
+                )
+            )
+        except (OSError, ValueError) as exc:
+            skipped.append(BatchSolidificationIssue(target, str(exc), error=True))
+    return BatchSolidificationPlan(policy, tuple(ready), tuple(skipped))
+
+
+def apply_batch_solidification(
+    batch: BatchSolidificationPlan,
+) -> BatchSolidificationResult:
+    """Commit exactly the plans shown in a batch preview, one transaction each."""
+
+    succeeded: list[SolidifyTarget] = []
+    failed: list[BatchSolidificationIssue] = []
+    for item in batch.ready:
+        plan = item.plan
+        target = item.target
+        try:
+            save_pair_transaction(
+                plan.solidified,
+                document_a_path=target.document_a_path,
+                document_b_path=target.document_b_path,
+                report_path=target.report_path,
+                report=item.report,
+                expected_report_sha256=item.report_sha256,
+                expected_report_exists=True,
+                remaining_repair_log=plan.remaining_actions,
+                solidification_policy=batch.policy.to_dict(),
+                applied_repairs=plan.applied,
+                operation_map=plan.operation_map,
+                changed_operations=plan.changed_operations,
+            )
+            succeeded.append(target)
+        except (OSError, ValueError, PairSaveError) as exc:
+            failed.append(BatchSolidificationIssue(target, str(exc), error=True))
+    return BatchSolidificationResult(tuple(succeeded), tuple(failed), batch.skipped)

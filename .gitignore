@@ -68,6 +68,7 @@ scripts/anchor_report.py
 scripts/anchor_ratio_report.py
 demo/output/
 demo/raw/*.report.json
+.artifacts/
 
 # ═══════════════════════════════════════════════════════════════
 # 演示 — 临时测试文件

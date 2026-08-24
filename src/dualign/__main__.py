@@ -106,8 +106,15 @@ def main_gui(src_path: str = "", tgt_path: str = "", entries_file: str = ""):
     sys.exit(app.exec())
 
 
-def main_align(document_a: str, document_b: str, output: str = ""):
+def main_align(
+    document_a: str,
+    document_b: str,
+    output: str = "",
+    *,
+    algorithm: str = "mdl-v1",
+):
     """Create a replayable work report without rewriting either document."""
+    from dualign.core import AlignConfig, LegacyAnchorConfig
     from dualign.services.cli_pipeline import align_documents, default_report_path
 
     output_path = Path(output) if output else default_report_path(document_a)
@@ -115,11 +122,29 @@ def main_align(document_a: str, document_b: str, output: str = ""):
         output_path = output_path / default_report_path(document_a).name
     print(f"文档 A: {document_a}")
     print(f"文档 B: {document_b}")
-    result = align_documents(document_a, document_b, str(output_path))
+    config = (
+        LegacyAnchorConfig()
+        if algorithm == "legacy-anchor-v1"
+        else AlignConfig(algorithm=algorithm)
+    )
+    result = align_documents(
+        document_a, document_b, str(output_path), config=config
+    )
     if not result.get("success"):
         print(f"对齐失败: {result.get('error', '未知错误')}")
         return 1
-    print("\n[OK] 对齐完成")
+    status = result.get("status", "aligned")
+    if status == "rejected":
+        print(f"\n[REJECTED] 未生成对齐关系: {result.get('reason', 'unknown')}")
+        print(f"   决策报告: {result['report_path']}")
+        return 2
+    if status == "needs_review":
+        print("\n[REVIEW] 已生成 provisional 对齐，组合证据分歧区需要人工复核")
+        print(f"   工作报告: {result['report_path']}")
+        print(f"   关系数量: {len(result.get('ops', []))}")
+        print("   两份输入文档未被改写。")
+        return 0
+    print(f"\n[OK] 对齐完成（{status}）")
     print(f"   工作报告: {result['report_path']}")
     print(f"   关系数量: {len(result.get('ops', []))}")
     print("   两份输入文档未被改写。")
@@ -140,25 +165,18 @@ def main_solidify(
     """Preview or apply selective report solidification."""
 
     from dualign.services.solidify import (
-        DEFAULT_SOLIDIFY_TYPES,
-        SolidifyPolicy,
-        load_solidify_policy,
         plan_report_solidification,
         solidify_report,
     )
     from dualign.services.pair_save import PairSaveError
 
     try:
-        if config:
-            policy = load_solidify_policy(config)
-        elif preset:
-            policy = SolidifyPolicy.from_preset(preset)
-        else:
-            policy = SolidifyPolicy(DEFAULT_SOLIDIFY_TYPES)
-        enabled = set(policy.enabled)
-        enabled.update(include or ())
-        enabled.difference_update(exclude or ())
-        policy = SolidifyPolicy(frozenset(enabled))
+        policy = _resolve_solidify_policy(
+            preset=preset,
+            config=config,
+            include=include,
+            exclude=exclude,
+        )
         plan, _report = plan_report_solidification(
             document_a, document_b, report, policy
         )
@@ -195,6 +213,88 @@ def main_solidify(
     return 0
 
 
+def _resolve_solidify_policy(*, preset="", config="", include=(), exclude=()):
+    from dualign.services.solidify import (
+        DEFAULT_SOLIDIFY_TYPES,
+        SolidifyPolicy,
+        load_solidify_policy,
+    )
+
+    if config:
+        policy = load_solidify_policy(config)
+    elif preset:
+        policy = SolidifyPolicy.from_preset(preset)
+    else:
+        policy = SolidifyPolicy(DEFAULT_SOLIDIFY_TYPES)
+    enabled = set(policy.enabled)
+    enabled.update(include or ())
+    enabled.difference_update(exclude or ())
+    return SolidifyPolicy(frozenset(enabled))
+
+
+def main_solidify_batch(
+    entries_file: str,
+    *,
+    preset: str = "",
+    config: str = "",
+    include=(),
+    exclude=(),
+    apply: bool = False,
+):
+    """Preview or apply a manifest of document-pair solidifications."""
+
+    from dualign.services.solidify import (
+        SOLIDIFY_TYPE_LABELS,
+        SolidifyTarget,
+        apply_batch_solidification,
+        plan_batch_solidification,
+    )
+
+    try:
+        with open(entries_file, encoding="utf-8") as source:
+            raw_entries = json.load(source)
+        if not isinstance(raw_entries, list):
+            raise ValueError("批量固化清单必须是 JSON 数组")
+        targets = [SolidifyTarget.from_mapping(item) for item in raw_entries]
+        policy = _resolve_solidify_policy(
+            preset=preset,
+            config=config,
+            include=include,
+            exclude=exclude,
+        )
+        batch = plan_batch_solidification(targets, policy)
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"批量固化计划失败: {exc}")
+        return 1
+
+    print("固化范围: " + (", ".join(sorted(policy.enabled)) or "（无）"))
+    print(f"可固化: {len(batch.ready)} 对")
+    print(f"跳过: {len(batch.skipped)} 对")
+    print(f"修复动作: {batch.action_count} 条")
+    print(f"影响文档 A: {batch.document_a_count} 对")
+    print(f"影响文档 B: {batch.document_b_count} 对")
+    for key, count in batch.effect_counts.items():
+        if count:
+            print(f"  {SOLIDIFY_TYPE_LABELS[key]}: {count} 处")
+    for issue in batch.skipped:
+        print(f"  [跳过] {issue.target.label}: {issue.reason}")
+
+    if not batch.ready:
+        return 1 if any(issue.error for issue in batch.skipped) else 0
+    if not apply:
+        print("\n以上仅为预览；确认后追加 --apply 才会改写文件。")
+        return 1 if any(issue.error for issue in batch.skipped) else 0
+
+    result = apply_batch_solidification(batch)
+    for issue in result.failed:
+        print(f"  [失败] {issue.target.label}: {issue.reason}")
+    print(
+        f"\n批量固化完成: 成功 {len(result.succeeded)}，"
+        f"失败 {len(result.failed)}，跳过 {len(result.skipped)}。"
+    )
+    return 1 if result.failed else 0
+
+
 def main():
     from dualign import __version__
 
@@ -207,6 +307,7 @@ def main():
         "  dualign models                  列出可用模型\n"
         "  dualign align -a a.md -b b.md     生成可恢复的 JSON 报告\n"
         "  dualign solidify -a a.md -b b.md -r a.report.json  预览固化\n"
+        "  dualign solidify-batch --entries-file chapters.json  批量预览固化\n"
         "  dualign gui                     启动图形界面",
     )
     parser.add_argument(
@@ -247,6 +348,12 @@ def main():
         "--out",
         default="",
         help="*.report.json 路径；传目录时使用默认文件名",
+    )
+    p_align.add_argument(
+        "--algorithm",
+        choices=("mdl-v1", "legacy-anchor-v1"),
+        default="mdl-v1",
+        help="对齐算法；legacy 仅供显式回归与 benchmark",
     )
 
     # ── solidify ──
@@ -297,6 +404,56 @@ def main():
         "--apply", action="store_true", help="实际写入；省略时仅显示预览"
     )
 
+    # ── solidify-batch ──
+    p_solidify_batch = sub.add_parser(
+        "solidify-batch", help="按同一配置批量固化章节清单"
+    )
+    p_solidify_batch.add_argument(
+        "--entries-file",
+        required=True,
+        help="JSON 数组；字段与 GUI --entries-file 相同",
+    )
+    p_solidify_batch.add_argument(
+        "--preset",
+        choices=("edits", "line-aligned", "document-a", "document-b", "none"),
+        default="",
+        help="固化预设；省略时使用出厂默认",
+    )
+    p_solidify_batch.add_argument("--config", default="", help="JSON/TOML 固化配置")
+    p_solidify_batch.add_argument(
+        "--include",
+        action="append",
+        choices=(
+            "merge_a",
+            "split_a",
+            "edit_a",
+            "merge_b",
+            "split_b",
+            "edit_b",
+            "delete_pair",
+        ),
+        default=[],
+        help="额外启用一种修复类型，可重复指定",
+    )
+    p_solidify_batch.add_argument(
+        "--exclude",
+        action="append",
+        choices=(
+            "merge_a",
+            "split_a",
+            "edit_a",
+            "merge_b",
+            "split_b",
+            "edit_b",
+            "delete_pair",
+        ),
+        default=[],
+        help="排除一种修复类型，可重复指定",
+    )
+    p_solidify_batch.add_argument(
+        "--apply", action="store_true", help="实际写入；省略时仅显示预览"
+    )
+
     # ── check ──
     sub.add_parser("check", help="环境健康检查")
 
@@ -312,12 +469,26 @@ def main():
             entries_file=args.entries_file,
         )
     elif args.command == "align":
-        return main_align(args.document_a, args.document_b, args.output)
+        return main_align(
+            args.document_a,
+            args.document_b,
+            args.output,
+            algorithm=args.algorithm,
+        )
     elif args.command == "solidify":
         return main_solidify(
             args.document_a,
             args.document_b,
             args.report,
+            preset=args.preset,
+            config=args.config,
+            include=args.include,
+            exclude=args.exclude,
+            apply=args.apply,
+        )
+    elif args.command == "solidify-batch":
+        return main_solidify_batch(
+            args.entries_file,
             preset=args.preset,
             config=args.config,
             include=args.include,

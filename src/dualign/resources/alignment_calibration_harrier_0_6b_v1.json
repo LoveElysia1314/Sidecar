@@ -1,0 +1,43 @@
+{
+  "id": "harrier-0.6b.zh-ja-real20.v1",
+  "status": "provisional",
+  "provider": "ollama",
+  "model": "leoipulsar/harrier-0.6b",
+  "instruction_sha256": "51e9fbc22ee90e6197531edf5bb498e6b812e4b866a3faa221f6146869fb2ae2",
+  "alpha": 0.05,
+  "existence_null_pairing": "cyclic_next_derangement",
+  "existence_null": [
+    0.6107637380480269,
+    0.6271184190987318,
+    0.6186849273959425,
+    0.6162292768244008,
+    0.6195698428480607,
+    0.6103378680383413,
+    0.6159864713143774,
+    0.6192993001328952,
+    0.5987653400488351,
+    0.6008376592828839,
+    0.6132064598601964,
+    0.6140570768670751,
+    0.6338479128841162,
+    0.6277818478553701,
+    0.6243651885070063,
+    0.6175458234545614,
+    0.6186653579256974,
+    0.6127027165647385,
+    0.6215448550266953,
+    0.6115639300058742
+  ],
+  "parallel_order_counts": [
+    [1, 241], [12, 1076], [0, 186], [3, 572], [2, 472],
+    [3, 331], [0, 152], [3, 383], [5, 414], [0, 166],
+    [2, 308], [0, 92], [2, 348], [12, 525], [2, 399],
+    [2, 618], [3, 227], [4, 315], [0, 253], [7, 345]
+  ],
+  "sample_scope": "20 reviewed zh-ja light-novel chapter pairs",
+  "limitations": [
+    "The minimum attainable conformal p-value is 1/21.",
+    "The corpus is single-domain and does not establish cross-domain calibration.",
+    "The source experiment did not persist its embedding identity; this resource is bound to the recorded default runner configuration and remains provisional."
+  ]
+}

@@ -1,53 +1,55 @@
-"""Dualign — GUI 模块"""
+"""Dualign GUI public API, loaded lazily by component.
 
-from dualign.gui.window import DualignWindow
-from dualign.gui.dialogs import (
-    ConfigDialog,
-    BlockEditDialog,
-    ChangeReviewDialog,
-    FileListPanel,
-)
-from dualign.gui.review import ReviewController
-from dualign.gui.filter import FilterPanel
-from dualign.gui.base_table import (
-    HighlightDelegate,
-    score_to_color,
-    type_cl,
-    marker_cl,
-    anomaly_cl,
-    priority_anomaly_type,
-    TYPE_CL_11,
-    TYPE_CL_10_01,
-    TYPE_CL_NON11,
-    TEXT_CL_NORMAL,
-    TEXT_CL_DELETED,
-    TEXT_CL_CONTEXT,
-)
+Importing a lightweight component such as ``dualign.gui.dialogs`` must not
+initialize the main window and its complete service dependency graph. Besides
+reducing startup coupling, lazy exports prevent a long-running host process
+from mixing an already-cached service module with newly edited GUI modules.
+"""
 
-from dualign.gui.panels import SnapIndicator, DockPanelHelper
-from dualign.gui.log_panel import LogPanel
+from __future__ import annotations
 
-__all__ = [
-    "DualignWindow",
-    "ConfigDialog",
-    "BlockEditDialog",
-    "ChangeReviewDialog",
-    "FileListPanel",
-    "ReviewController",
-    "FilterPanel",
-    "SnapIndicator",
-    "DockPanelHelper",
-    "LogPanel",
-    "HighlightDelegate",
-    "score_to_color",
-    "type_cl",
-    "marker_cl",
-    "anomaly_cl",
-    "priority_anomaly_type",
-    "TYPE_CL_11",
-    "TYPE_CL_10_01",
-    "TYPE_CL_NON11",
-    "TEXT_CL_NORMAL",
-    "TEXT_CL_DELETED",
-    "TEXT_CL_CONTEXT",
-]
+from importlib import import_module
+
+_EXPORTS = {
+    "DualignWindow": ("dualign.gui.window", "DualignWindow"),
+    "ConfigDialog": ("dualign.gui.dialogs", "ConfigDialog"),
+    "BlockEditDialog": ("dualign.gui.dialogs", "BlockEditDialog"),
+    "ChangeReviewDialog": ("dualign.gui.dialogs", "ChangeReviewDialog"),
+    "FileListPanel": ("dualign.gui.dialogs", "FileListPanel"),
+    "ReviewController": ("dualign.gui.review", "ReviewController"),
+    "FilterPanel": ("dualign.gui.filter", "FilterPanel"),
+    "SnapIndicator": ("dualign.gui.panels", "SnapIndicator"),
+    "DockPanelHelper": ("dualign.gui.panels", "DockPanelHelper"),
+    "LogPanel": ("dualign.gui.log_panel", "LogPanel"),
+    "HighlightDelegate": ("dualign.gui.base_table", "HighlightDelegate"),
+    "score_to_color": ("dualign.gui.base_table", "score_to_color"),
+    "type_cl": ("dualign.gui.base_table", "type_cl"),
+    "marker_cl": ("dualign.gui.base_table", "marker_cl"),
+    "anomaly_cl": ("dualign.gui.base_table", "anomaly_cl"),
+    "priority_anomaly_type": (
+        "dualign.gui.base_table",
+        "priority_anomaly_type",
+    ),
+    "TYPE_CL_11": ("dualign.gui.base_table", "TYPE_CL_11"),
+    "TYPE_CL_10_01": ("dualign.gui.base_table", "TYPE_CL_10_01"),
+    "TYPE_CL_NON11": ("dualign.gui.base_table", "TYPE_CL_NON11"),
+    "TEXT_CL_NORMAL": ("dualign.gui.base_table", "TEXT_CL_NORMAL"),
+    "TEXT_CL_DELETED": ("dualign.gui.base_table", "TEXT_CL_DELETED"),
+    "TEXT_CL_CONTEXT": ("dualign.gui.base_table", "TEXT_CL_CONTEXT"),
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str):
+    try:
+        module_name, attribute_name = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+    value = getattr(import_module(module_name), attribute_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))

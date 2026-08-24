@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from dualign.__main__ import main_solidify
+from dualign.__main__ import main_solidify, main_solidify_batch
 from dualign.models.action import RepairAction
 from dualign.models.alignment_pair import (
     AlignmentLink,
@@ -18,12 +18,31 @@ from dualign.services.report_io import (
     save_report,
 )
 from dualign.services.pair_save import PairSaveConflictError
+from dualign.services.realignment import RebuiltAlignment
 from dualign.services.solidify import (
     SolidifyPolicy,
+    SolidifyTarget,
+    apply_batch_solidification,
     build_solidification_plan,
     load_solidify_policy,
+    plan_batch_solidification,
     solidify_report,
 )
+
+
+def _positional_rebuild(document_a, document_b):
+    paired = min(len(document_a), len(document_b))
+    operations = [((index,), (index,), 0.75) for index in range(paired)]
+    operations.extend(((index,), (), 0.0) for index in range(paired, len(document_a)))
+    operations.extend(((), (index,), 0.0) for index in range(paired, len(document_b)))
+    return RebuiltAlignment(tuple(operations), {}, {}, {})
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_realign(monkeypatch):
+    monkeypatch.setattr(
+        "dualign.services.pair_save.rebuild_alignment", _positional_rebuild
+    )
 
 
 def _baseline(text_a="甲\n", text_b="A\n"):
@@ -75,6 +94,34 @@ def test_partial_edit_solidification_keeps_other_side_as_rebased_action():
     assert len(plan.remaining_actions) == 1
     assert "new_src_lines" in plan.remaining_actions[0].data
     assert "new_tgt_lines" not in plan.remaining_actions[0].data
+
+
+def test_partial_edit_does_not_promote_score_for_the_uncommitted_full_edit(
+    tmp_path: Path,
+):
+    action = RepairAction.make_edit(
+        0,
+        source="user",
+        new_src_lines=["甲校订"],
+        new_tgt_lines=["A edited"],
+    )
+    path_a, path_b, report_path = _report_case(
+        tmp_path, "甲\n", "A\n", [((0,), (0,), 0.4)], [action]
+    )
+    report = load_report(report_path)
+    report["scores"] = {"0_0": 0.9}
+    save_report(report, report_path)
+
+    solidify_report(
+        path_a,
+        path_b,
+        report_path,
+        SolidifyPolicy(frozenset({"edit_b"})),
+    )
+
+    saved = load_report(report_path)
+    assert saved["ops"][0]["sc"] == pytest.approx(0.75)
+    assert saved["scores"] == {}
 
 
 def test_two_sided_merge_requires_both_merge_types(tmp_path: Path):
@@ -142,7 +189,10 @@ def test_split_solidification_rebuilds_ops_and_removes_applied_action(tmp_path: 
     assert plan.remaining_actions == ()
     assert path_b.read_text(encoding="utf-8") == "A\nB\n"
     saved = load_report(report_path)
-    assert saved["ops"] == [{"s": [0, 1], "t": [0, 1], "sc": 0.8}]
+    assert saved["ops"] == [
+        {"s": [0], "t": [0], "sc": 0.75},
+        {"s": [1], "t": [1], "sc": 0.75},
+    ]
     assert saved["repair_log"] == []
     assert saved["history"][-1]["type"] == "selective-solidification"
 
@@ -168,7 +218,7 @@ def test_cross_snap_two_sided_merge_is_atomic(tmp_path: Path):
     assert path_a.read_text(encoding="utf-8") == "甲乙\n"
     assert path_b.read_text(encoding="utf-8") == "A B\n"
     saved = load_report(report_path)
-    assert saved["ops"] == [{"s": [0], "t": [0], "sc": 0.8}]
+    assert saved["ops"] == [{"s": [0], "t": [0], "sc": 0.75}]
     assert saved["repair_log"] == []
     assert materialize_reader_rows(report_path, path_a, path_b) == (["甲乙"], ["A B"])
 
@@ -344,6 +394,30 @@ def test_ai_edit_can_be_solidified_without_manual_ok(tmp_path: Path):
     assert load_report(report_path)["repair_log"] == []
 
 
+def test_later_edit_supersedes_stale_delete_before_solidification(tmp_path: Path):
+    deletion = RepairAction.make_delete(0, source="auto")
+    edit = RepairAction.make_edit(0, source="ai", new_tgt_lines=["AI edit"])
+    path_a, path_b, report_path = _report_case(
+        tmp_path,
+        "甲\n",
+        "A\n",
+        [((0,), (0,), 0.9)],
+        [deletion, edit],
+    )
+
+    plan, result = solidify_report(
+        path_a,
+        path_b,
+        report_path,
+        SolidifyPolicy(frozenset({"edit_b", "delete_pair"})),
+    )
+
+    assert result is not None
+    assert [item["action"]["kind"] for item in plan.applied] == ["edit"]
+    assert path_a.read_text(encoding="utf-8") == "甲\n"
+    assert path_b.read_text(encoding="utf-8") == "AI edit\n"
+
+
 def test_cli_is_preview_only_until_apply_flag(tmp_path: Path, capsys):
     action = RepairAction.make_edit(0, source="user", new_tgt_lines=["changed"])
     path_a, path_b, report_path = _report_case(
@@ -372,4 +446,76 @@ def test_cli_is_preview_only_until_apply_flag(tmp_path: Path, capsys):
         )
         == 0
     )
+    assert path_b.read_text(encoding="utf-8") == "changed\n"
+
+
+def test_batch_plan_and_apply_share_the_exact_previewed_transactions(tmp_path: Path):
+    (tmp_path / "first").mkdir()
+    (tmp_path / "second").mkdir()
+    first = _report_case(
+        tmp_path / "first",
+        "甲\n",
+        "A\n",
+        [((0,), (0,), 0.9)],
+        [RepairAction.make_edit(0, source="user", new_tgt_lines=["A1"])],
+    )
+    second = _report_case(
+        tmp_path / "second",
+        "乙\n",
+        "B\n",
+        [((0,), (0,), 0.8)],
+        [],
+    )
+    targets = [
+        SolidifyTarget("first", *(str(path) for path in first)),
+        SolidifyTarget("second", *(str(path) for path in second)),
+    ]
+
+    batch = plan_batch_solidification(targets, SolidifyPolicy(frozenset({"edit_b"})))
+
+    assert len(batch.ready) == 1
+    assert batch.action_count == 1
+    assert batch.document_b_count == 1
+    assert len(batch.skipped) == 1
+    assert not batch.skipped[0].error
+
+    result = apply_batch_solidification(batch)
+
+    assert [target.label for target in result.succeeded] == ["first"]
+    assert result.failed == ()
+    assert first[1].read_text(encoding="utf-8") == "A1\n"
+    assert second[1].read_text(encoding="utf-8") == "B\n"
+
+
+def test_batch_cli_uses_the_gui_manifest_and_is_preview_only_by_default(
+    tmp_path: Path, capsys
+):
+    path_a, path_b, report_path = _report_case(
+        tmp_path,
+        "甲\n",
+        "A\n",
+        [((0,), (0,), 0.9)],
+        [RepairAction.make_edit(0, source="user", new_tgt_lines=["changed"])],
+    )
+    manifest = tmp_path / "entries.json"
+    manifest.write_text(
+        __import__("json").dumps(
+            [
+                {
+                    "label": "chapter",
+                    "document_a_path": str(path_a),
+                    "document_b_path": str(path_b),
+                    "report_path": str(report_path),
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert main_solidify_batch(str(manifest), preset="edits") == 0
+    assert path_b.read_text(encoding="utf-8") == "A\n"
+    assert "仅为预览" in capsys.readouterr().out
+
+    assert main_solidify_batch(str(manifest), preset="edits", apply=True) == 0
     assert path_b.read_text(encoding="utf-8") == "changed\n"

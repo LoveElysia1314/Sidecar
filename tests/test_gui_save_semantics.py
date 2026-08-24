@@ -48,6 +48,9 @@ class _ScoreManager:
     def invalidate_snaps(self, snaps):
         self.invalidated.extend(snaps)
 
+    def invalidate(self, snap_i, sub=None):
+        self.invalidated.append((snap_i, sub))
+
     def set_ready_score(self, snap_i, sub, score):
         self.ready[(snap_i, sub)] = score
 
@@ -151,3 +154,17 @@ def test_loading_split_prefers_action_scores_over_pre_split_cache():
 
     assert harness._score_mgr.ready == {(0, 0): 0.73, (0, 1): 0.76}
     assert harness._score_cache == {"0_0": 0.73, "0_1": 0.76}
+
+
+def test_unchanged_text_uses_baseline_score_without_async_rescoring():
+    state = RepairState.from_ops([((0,), (0,), 0.593)], ["甲"], ["A"])
+    harness = _ScoreLoadHarness()
+    harness._repair_state = state
+    harness._score_cache = {"0_0": 0.717}
+    harness._score_mgr = _ScoreManager()
+
+    harness._load_initial_scores()
+
+    assert harness._score_mgr.ready == {(0, 0): 0.593}
+    assert harness._score_mgr.invalidated == []
+    assert harness._score_cache == {}

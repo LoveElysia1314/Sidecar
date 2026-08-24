@@ -135,12 +135,10 @@ class AgentRunThread(QThread):
                     self._repair_state,
                     strategy=self._strategy,
                     model=self._model,
+                    reviewable_ids=self._ctx.reviewable_ids,
                 )
                 self._repair_state = session.proposed_state
                 ctx = session.context
-                ctx.reviewable_ids = [
-                    i for i in ctx.reviewable_ids if i in self._ctx.reviewable_ids
-                ]
 
             agent = AiRepairAgent(
                 backend=self._backend,
@@ -414,7 +412,7 @@ class ReviewController(QWidget):
         row0: 文档 A：fullname（超链接，跨 3 列）
         row1: 文档 B：fullname（超链接，跨 3 列）
         row2: 文档 A 块数 | 文档 B 块数 | 关系均分
-        row3: 真锚点率 | 间隙行率 | 合并触顶
+        row3: 单调脚手架 | 顺序链外 | 分歧区
         末尾：章节进度
         """
         g = QGroupBox("文档摘要")
@@ -1239,12 +1237,12 @@ class ReviewController(QWidget):
     @staticmethod
     def _predict_auto_action(ls: int, lt: int, strategy: str) -> Optional[str]:
         """预测自动修复会执行的操作 key。匹配 _btn_refs 的 key。"""
-        from dualign.services.repair_policy import (
-            choose_auto_repair,
-            strategy_for_ai_review,
-        )
+        from dualign.services.repair_policy import choose_auto_repair
 
-        plan = choose_auto_repair(ls, lt, strategy_for_ai_review(strategy))
+        # This is the deterministic auto-repair preview, not the AI review
+        # policy.  In particular ``minimal`` intentionally differs between the
+        # two paths and must remain a deletion for 1:0 / 0:1 relations here.
+        plan = choose_auto_repair(ls, lt, strategy)
         if plan is None:
             return None
         if plan.kind.startswith("placeholder_"):
@@ -1633,18 +1631,17 @@ class ReviewController(QWidget):
     # ═══════════════════════════════════════════════════════════
 
     def analyze_snaps(self, snap_indices: List[int]):
-        """使用 AiRepairAgent 分析选中的文本对。
+        """使用 AiRepairAgent 分析用户显式选中的文本对。
 
         拟修复在 AgentRunThread 的异步线程内自动构造。
         此处 skip_auto_repair=True 避免主线程阻塞。
+        显式选择是权威待审集合，不受异常检测或当前筛选条件限制。
         """
-        ctx = self._build_chapter_context(skip_auto_repair=True)
+        ctx = self._build_chapter_context(
+            for_snaps=snap_indices,
+            skip_auto_repair=True,
+        )
         if ctx is None:
-            return
-        # 裁剪到目标 snap
-        target = set(snap_indices)
-        ctx.reviewable_ids = [i for i in ctx.reviewable_ids if i in target]
-        if not ctx.reviewable_ids:
             return
         self._reviewed_count = 0
         n_meta = len(ctx.reviewable_infos)
@@ -1717,9 +1714,8 @@ class ReviewController(QWidget):
     ):
         """从当前 RepairState 构造 ChapterContext。
 
-        使用 GUI 的 _anomalies 列表直接构建 reviewable_infos，
-        确保所有按当前筛选条件统计到的异常 snap 都传入 AI，
-        无论其是否已被处理过。
+        未指定 ``for_snaps`` 时，使用 GUI 的异常列表构建全章待审集合；
+        指定后则以用户显式选择为准，正常文本对也必须传入 AI。
 
         Args:
             skip_auto_repair: 为 True 时跳过内部 auto_repair（调用方已构造拟修复）。
@@ -1731,32 +1727,33 @@ class ReviewController(QWidget):
         # 获取用户偏好的修复策略
         strategy = getattr(w, "_strategy", "src")
 
-        # 从当前筛选后的异常列表提取需要处理的 snap
-        anomaly_snaps = set()
-        for a in self._anomalies:
-            snaps = a.get("snap_indices", [a.get("snap_index")])
-            for s in snaps:
-                if s is not None:
-                    anomaly_snaps.add(s)
+        explicitly_selected = for_snaps is not None
+        if explicitly_selected:
+            target_snaps = set(for_snaps)
+        else:
+            target_snaps = set()
+            for anomaly in self._anomalies:
+                snaps = anomaly.get("snap_indices", [anomaly.get("snap_index")])
+                target_snaps.update(s for s in snaps if s is not None)
 
-        if not anomaly_snaps:
+        if not target_snaps:
             return None
-
-        target_snaps = set(for_snaps) if for_snaps else anomaly_snaps
 
         ctx = build_chapter_context(
             w._repair_state,
             strategy=strategy,
             model=getattr(w, "_model", None),
             skip_auto_repair=skip_auto_repair,
+            reviewable_ids=target_snaps if explicitly_selected else None,
         )
-        if not ctx.reviewable_ids:
-            return None
 
         # 保留完整 snap_infos（供 _build_initial_user_message 的 ±3 上下文用索引查找），
-        # 只裁剪 reviewable_ids 到目标 snap 范围。
+        # 全章审校只裁剪天然异常；显式选择已由构造器直接设为待审集合。
         # initial_* 已在 from_repair_state 中统一填充。
-        ctx.reviewable_ids = [i for i in ctx.reviewable_ids if i in target_snaps]
+        if not explicitly_selected:
+            ctx.reviewable_ids = [
+                snap_i for snap_i in ctx.reviewable_ids if snap_i in target_snaps
+            ]
 
         if not ctx.reviewable_ids:
             return None

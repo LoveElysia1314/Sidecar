@@ -4,9 +4,9 @@ import json
 
 import numpy as np
 
-from dualign.core import AlignConfig
+from dualign.core import AlignmentResult, LegacyAnchorConfig
 from dualign.models.action import RepairAction
-from dualign.services.cli_pipeline import align_documents
+from dualign.services.cli_pipeline import align_documents as _align_documents
 from dualign.services.report_io import load_report, materialize_reader_rows, save_report
 
 
@@ -18,6 +18,13 @@ class MockEncoder:
             texts = [texts]
         vectors = np.eye(max(len(texts), 1), 8, dtype=np.float32)[: len(texts)]
         return vectors
+
+
+def align_documents(*args, **kwargs):
+    """Historical report lifecycle cases exercise the explicit legacy CLI."""
+
+    kwargs.setdefault("config", LegacyAnchorConfig())
+    return _align_documents(*args, **kwargs)
 
 
 def _pair(tmp_path):
@@ -72,7 +79,7 @@ def test_alignment_configuration_is_part_of_report_cache_identity(tmp_path):
         str(target),
         str(report),
         model=encoder,
-        config=AlignConfig(anchor_min_score=0.42),
+        config=LegacyAnchorConfig(anchor_min_score=0.42),
     )
 
     assert changed["success"] and not changed["cache_hit"]
@@ -212,3 +219,55 @@ def test_empty_document_still_produces_a_replayable_report(tmp_path):
         {"s": [], "t": [0], "sc": 0.0}
     ]
     assert load_report(report)["repair_log"][0]["kind"] == "delete"
+
+
+def test_new_default_abstains_when_embedding_calibration_is_unavailable(tmp_path):
+    source, target = _pair(tmp_path)
+    report = tmp_path / "uncalibrated.report.json"
+
+    result = _align_documents(
+        str(source), str(target), str(report), model=MockEncoder()
+    )
+
+    assert result["success"]
+    assert result["status"] == "rejected"
+    assert result["reason"] == "calibration_unavailable"
+    assert result["ops"] == []
+
+
+def test_review_disagreement_is_persisted_as_annotated_flags(tmp_path, monkeypatch):
+    source, target = _pair(tmp_path)
+    report = tmp_path / "review.report.json"
+    ops = [((0,), (0,), 0.9), ((1,), (), 0.0), ((), (1,), 0.0)]
+    result = AlignmentResult(
+        all_ops=ops,
+        anchors=[],
+        anchor_op_indices={},
+        stats={"n_source": 2, "n_target": 2},
+        status="needs_review",
+        uncertain_regions=(((0, 0), (2, 1)),),
+        alternative_ops=[((0, 1), (0,), 0.8), ((), (1,), 0.0)],
+    )
+    monkeypatch.setattr("dualign.services.cli_pipeline.align", lambda *_a, **_k: result)
+
+    saved = align_documents(str(source), str(target), str(report), model=MockEncoder())
+
+    assert saved["status"] == "needs_review"
+    actions = load_report(report)["repair_log"]
+    assert [(action["op_index"], action["kind"]) for action in actions] == [(1, "flag")]
+    assert actions[0]["data"]["reason"] == "composition_disagreement"
+    assert actions[0]["data"]["current_structure"] == "1:1+1:0"
+    assert actions[0]["data"]["alternative_structure"] == "2:1"
+
+    reset = align_documents(
+        str(source),
+        str(target),
+        str(report),
+        model=MockEncoder(),
+        reset_work_state=True,
+    )
+    reset_actions = load_report(report)["repair_log"]
+    assert reset["cache_hit"] is True
+    assert [(action["op_index"], action["kind"]) for action in reset_actions] == [
+        (1, "flag")
+    ]

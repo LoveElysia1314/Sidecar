@@ -2,7 +2,7 @@
 
 双文档对齐、校订与人工审核工具。
 
-Dualign 为两份自然结构的 Markdown 建立 1:1、N:1、1:M、N:M 和单侧缺失关系。文档 A / 文档 B 是中性位置；如果需要更多语言，按实际需要分别建立文档对。
+Dualign 为两份自然结构的 Markdown 建立单调、完整覆盖的 `1:1 / N:1 / 1:N / 1:0 / 0:1` 初始关系。人工校订可形成双侧复合关系；生成算法不猜测一般 `N:M`。文档 A / 文档 B 是中性位置；如果需要更多语言，按实际需要分别建立文档对。
 
 ## 当前工作流
 
@@ -15,8 +15,9 @@ Dualign 为两份自然结构的 Markdown 建立 1:1、N:1、1:M、N:M 和单侧
 - Snap/RepairState 从不可变初始关系重放操作，正文编辑不会让后续操作因行号变化而漂移。
 - 旧报告不迁移；重新对齐时可继续复用独立的 SQLite 词向量缓存。
 - 等行 Markdown 只作为显式、临时的阅读器兼容制品生成。
+- 默认 `mdl-v1` 在无对应、显著乱序或缺少匹配校准时明确拒绝，不静默回退旧算法；组合证据分歧会标记局部复核。
 
-完整设计见 [工作报告架构](docs/architecture.md)。
+完整设计见 [工作报告架构](docs/architecture.md) 和 [对齐算法](docs/algorithm.md)。
 
 ## 安装与启动
 
@@ -55,6 +56,15 @@ uv run dualign solidify -a document-a.md -b document-b.md \
 ```
 
 预设包括 `edits`、`line-aligned`、`document-a`、`document-b` 和 `none`。也可以用 `--include/--exclude` 微调，或通过 `--config policy.toml` 读取配置。
+
+批量固化复用 GUI `--entries-file` 的 JSON 清单格式，默认同样只预览：
+
+```bash
+uv run dualign solidify-batch --entries-file chapters.json --preset edits
+uv run dualign solidify-batch --entries-file chapters.json --preset edits --apply
+```
+
+每个文件对独立执行可恢复事务；某一对失败不会让已经成功的其他文件对回滚。
 
 ## Demo
 

@@ -24,7 +24,7 @@ import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 from dualign.models.action import RepairAction
 from dualign.models.state import AlignmentSnapshot
@@ -106,7 +106,11 @@ class ChapterContext:
     @property
     def reviewable_infos(self) -> List[SnapInfo]:
         """返回需要审校的 SnapInfo 列表。"""
-        return [si for si in self.snap_infos if si.is_reviewable]
+        return [
+            self.snap_infos[snap_id]
+            for snap_id in self.reviewable_ids
+            if 0 <= snap_id < len(self.snap_infos)
+        ]
 
     @classmethod
     def from_repair_state(
@@ -203,6 +207,12 @@ class ChapterContext:
         self.reviewable_ids.sort()
         return True
 
+    def select_reviewable(self, snap_ids: Iterable[int]) -> None:
+        """以调用方显式指定的文本对替换天然异常集合。"""
+        self.reviewable_ids = []
+        for snap_id in sorted(set(snap_ids)):
+            self.append_reviewable(snap_id)
+
 
 @dataclass(frozen=True)
 class AgentReviewSession:
@@ -227,6 +237,7 @@ def build_agent_review_session(
     model=None,
     chapter_id: str = "",
     chapter_title: str = "",
+    reviewable_ids: Iterable[int] | None = None,
 ) -> AgentReviewSession:
     """同时构造 Agent 上下文和与之完全一致的拟修复状态。
 
@@ -251,6 +262,8 @@ def build_agent_review_session(
         model=model,
         skip_auto_repair=True,
     )
+    if reviewable_ids is not None:
+        context.select_reviewable(reviewable_ids)
     return AgentReviewSession(context=context, proposed_state=proposed_state)
 
 
@@ -261,6 +274,7 @@ def build_chapter_context(
     chapter_id: str = "",
     chapter_title: str = "",
     skip_auto_repair: bool = False,
+    reviewable_ids: Iterable[int] | None = None,
 ) -> ChapterContext:
     """从 RepairState 构建 ChapterContext，自动确保嵌入模型就绪。
 
@@ -272,6 +286,7 @@ def build_chapter_context(
 
     Args:
         skip_auto_repair: 为 True 时跳过内部 auto_repair（调用方已构造拟修复）。
+        reviewable_ids: 用户显式指定的待审文本对；提供后不再受异常判定限制。
     """
     strategy = strategy_for_ai_review(strategy)
     if model is None:
@@ -282,7 +297,7 @@ def build_chapter_context(
         except Exception as e:
             logger.warning("嵌入模型加载失败: %s（需要 split 的关系将保持不变）", e)
     if skip_auto_repair:
-        return ChapterContext.from_repair_state(
+        context = ChapterContext.from_repair_state(
             state,
             chapter_id=chapter_id,
             chapter_title=chapter_title,
@@ -290,12 +305,16 @@ def build_chapter_context(
             model=model,
             skip_auto_repair=True,
         )
+        if reviewable_ids is not None:
+            context.select_reviewable(reviewable_ids)
+        return context
     return build_agent_review_session(
         state,
         strategy=strategy,
         model=model,
         chapter_id=chapter_id,
         chapter_title=chapter_title,
+        reviewable_ids=reviewable_ids,
     ).context
 
 
@@ -1393,7 +1412,7 @@ class AiRepairAgent:
         if score_line:
             lines.append(f"**{score_line}**")
         lines.append("")
-        lines.append("待审区域（>> 标记异常，±3 上下文一并展示）：")
+        lines.append("待审区域（>> 标记待审文本对，±3 上下文一并展示）：")
         lines.append("")
 
         for start, end in merged_windows:

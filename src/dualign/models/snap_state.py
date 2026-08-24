@@ -446,8 +446,8 @@ class SnapInfo:
 
 
 def _calc_low_score(scores: List[float], score: float, k: float = 3.0) -> bool:
-    """Z-score 离群检测（委托给 quality_gate）。"""
-    from dualign.services.quality_gate import is_statistical_low_score
+    """Z-score 离群检测（只用于对齐后的异常标记）。"""
+    from dualign.services.anomaly_detection import is_statistical_low_score
 
     return is_statistical_low_score(score, scores, k=k)
 

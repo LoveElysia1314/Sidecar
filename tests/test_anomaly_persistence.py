@@ -209,7 +209,7 @@ class TestOrphanPersistence:
 # LOW_SCORE 的 is_low_score 字段在 build_snap_states 中设置后，
 # refresh_snap_states 直接继承 states[si].is_low_score，不会重新计算。
 # 因此只要初始检测通过，持久化是自动保证的。
-# Z-score 检测本身（k=3.0 阈值）由 quality_gate 的 is_statistical_low_score 覆盖。
+# Z-score 检测本身由 anomaly_detection 的 is_statistical_low_score 覆盖。
 # ═══════════════════════════════════════════════════════════════
 
 

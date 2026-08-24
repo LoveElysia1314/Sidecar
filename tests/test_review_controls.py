@@ -1,4 +1,5 @@
 from collections import deque
+from types import SimpleNamespace
 
 from dualign.gui.window_actions import WindowActionsMixin
 from dualign.gui.window_table import WindowTableMixin
@@ -75,6 +76,21 @@ class _InitialFocusHarness:
         self._row_op_map = {0: 7, 1: 8}
 
 
+class _BottomPanelHarness:
+    def __init__(self, user_collapsed):
+        self._bottom_locked = False
+        self._preview_active = False
+        self._bottom_collapsed = True
+        self._bottom_user_collapsed = user_collapsed
+        self._repair_state = object()
+        self._review = SimpleNamespace(_pending_action_list=[object()])
+        self.toggle_origins = []
+
+    def _toggle_bottom_panel(self, *, user_initiated=True):
+        self.toggle_origins.append(user_initiated)
+        self._bottom_collapsed = not self._bottom_collapsed
+
+
 def test_auto_next_chapter_is_opt_in():
     assert DualignConfig.default_values()[KEY_AUTO_NEXT_CHAPTER] is False
 
@@ -96,6 +112,11 @@ def test_review_shortcuts_cover_every_direct_review_operation():
         "placeholder": "P",
         "reset": "Ctrl+R",
     }
+
+
+def test_auto_action_preview_uses_the_auto_repair_strategy_matrix():
+    assert ReviewController._predict_auto_action(1, 0, "src") == "placeholder"
+    assert ReviewController._predict_auto_action(1, 0, "minimal") == "delete"
 
 
 def test_handled_last_item_advances_when_enabled():
@@ -154,3 +175,64 @@ def test_empty_anomaly_only_view_has_no_synthetic_focus():
     window = _InitialFocusHarness([], set(), show_all=False)
 
     assert WindowTableMixin._initial_focus_target(window) is None
+
+
+def test_explicit_ai_selection_bypasses_anomaly_filter():
+    state = RepairState.from_ops([((0,), (0,), 0.99)], ["A"], ["B"])
+    review = SimpleNamespace(
+        _window=SimpleNamespace(
+            _repair_state=state,
+            _strategy="src",
+            _model=object(),
+        ),
+        _anomalies=[],
+    )
+
+    context = ReviewController._build_chapter_context(
+        review,
+        for_snaps=[0],
+        skip_auto_repair=True,
+    )
+
+    assert context is not None
+    assert context.reviewable_ids == [0]
+    assert not context.get_snap_info(0).is_reviewable
+
+
+def test_chapter_ai_still_requires_anomalies_without_explicit_selection():
+    state = RepairState.from_ops([((0,), (0,), 0.99)], ["A"], ["B"])
+    review = SimpleNamespace(
+        _window=SimpleNamespace(
+            _repair_state=state,
+            _strategy="src",
+            _model=object(),
+        ),
+        _anomalies=[],
+    )
+
+    context = ReviewController._build_chapter_context(
+        review,
+        skip_auto_repair=True,
+    )
+
+    assert context is None
+
+
+def test_user_collapsed_ai_panel_stays_closed_during_auto_sync(monkeypatch):
+    monkeypatch.setattr("dualign.providers.active_repair_agent", lambda: None)
+    window = _BottomPanelHarness(user_collapsed=True)
+
+    DualignWindow._sync_bottom_panel(window)
+
+    assert window._bottom_collapsed
+    assert window.toggle_origins == []
+
+
+def test_ai_panel_can_auto_expand_without_user_collapse(monkeypatch):
+    monkeypatch.setattr("dualign.providers.active_repair_agent", lambda: None)
+    window = _BottomPanelHarness(user_collapsed=False)
+
+    DualignWindow._sync_bottom_panel(window)
+
+    assert not window._bottom_collapsed
+    assert window.toggle_origins == [False]

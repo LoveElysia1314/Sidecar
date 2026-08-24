@@ -17,6 +17,7 @@ import numpy as np
 from PySide6.QtCore import QThread, Signal
 
 from dualign.core import (
+    ALGORITHM_MDL_V1,
     align,
     AlignConfig,
     AlignmentResult,
@@ -125,7 +126,7 @@ class EncodeThread(QThread):
             self.status_signal.emit(
                 f"正式对齐关系不可用：{self.formal_alignment_error}；将重新对齐…"
             )
-        self.status_signal.emit("未找到可用的对齐缓存，正在准备编码…")
+        self.status_signal.emit("未找到可复用的对齐报告，正在加载嵌入向量…")
         if self._stop_event.is_set():
             return
 
@@ -156,10 +157,12 @@ class EncodeThread(QThread):
             tgt_emb = cenc.encode(tgt_lines, stop_event=self._stop_event)
 
             self.time_s = time.time() - t0
+            total_vectors = cenc.hit_count + cenc.miss_count
             self.status_signal.emit(
-                f"✓ 嵌入编码完成 — {self.time_s:.1f}s "
-                f"({len(src_lines)}×{len(tgt_lines)} 行, "
-                f"缓存命中率 {cenc.cache_hit_rate:.0%})"
+                f"✓ 嵌入向量就绪 — {self.time_s:.1f}s "
+                f"({len(src_lines)}×{len(tgt_lines)} 相似度矩阵；"
+                f"向量缓存命中 {cenc.hit_count}/{total_vectors} "
+                f"({cenc.cache_hit_rate:.0%})，未命中 {cenc.miss_count})"
             )
         finally:
             cache.close()
@@ -201,6 +204,29 @@ class EncodeThread(QThread):
                     anchors=[],
                     anchor_op_indices={},
                     stats=dict(report.get("stats") or {}),
+                    status=str((report.get("alignment") or {}).get("status", "aligned")),
+                    reason=str((report.get("alignment") or {}).get("reason") or ""),
+                    gate=dict((report.get("alignment") or {}).get("gate") or {}),
+                    uncertain_regions=tuple(
+                        (
+                            (
+                                int(item["start"]["source"]),
+                                int(item["start"]["target"]),
+                            ),
+                            (
+                                int(item["end"]["source"]),
+                                int(item["end"]["target"]),
+                            ),
+                        )
+                        for item in (report.get("alignment") or {}).get(
+                            "uncertain_regions", []
+                        )
+                    ),
+                    algorithm=str(
+                        (report.get("alignment") or {}).get(
+                            "algorithm", "legacy-anchor-v1"
+                        )
+                    ),
                 )
                 result.stats["load_origin"] = "report"
                 return result
@@ -263,6 +289,7 @@ class AlignWorker(QThread):
         # ── CachedEncoder: 合并文本编码也走缓存 ──
         encode_fn = self.encode_fn
         _cache_to_close = None
+        model = None
         if encode_fn:
             cache = EmbeddingCache(get_embedding_cache_path())
             _cache_to_close = cache
@@ -274,6 +301,15 @@ class AlignWorker(QThread):
                 cenc = CachedEncoder(model, cache)
                 encode_fn = cenc.encode
 
+        from dualign.core.calibration import resolve_alignment_calibration
+
+        resolved = (
+            resolve_alignment_calibration(
+                model, calibration_id=getattr(self.config, "calibration_id", "")
+            )
+            if getattr(self.config, "algorithm", "") == ALGORITHM_MDL_V1
+            else None
+        )
         try:
             result = align(
                 self.src_lines,
@@ -282,18 +318,27 @@ class AlignWorker(QThread):
                 self.tgt_emb,
                 self.config,
                 encode_fn=encode_fn,
+                calibration=resolved.calibration if resolved is not None else None,
             )
         finally:
             if _cache_to_close is not None:
                 _cache_to_close.close()
         self.progress_signal.emit(100)
         s = result.stats
-        self.status_signal.emit(
-            f"✓ 对齐完成 — 真锚点 {s['n_true_anchors']}/{s['n_restricted_ops']}, "
-            f"{len(result.all_ops)} ops (μ{s['avg_similarity']:.3f}), "
-            f"矩阵 {s['sim_time_s']:.2f}s + 锚点 {s['anchor_time_s']:.2f}s "
-            f"+ DP {s['dp_time_s']:.2f}s = {s['align_time_s']:.2f}s"
-        )
+        if result.status == "rejected":
+            self.status_signal.emit(f"对齐已拒绝 — {result.reason}")
+        elif result.algorithm == ALGORITHM_MDL_V1:
+            self.status_signal.emit(
+                f"✓ MDL 对齐完成 — {result.status}, {len(result.all_ops)} ops, "
+                f"{s.get('total_seconds', 0.0):.2f}s"
+            )
+        else:
+            self.status_signal.emit(
+                f"✓ Legacy 对齐完成 — 真锚点 "
+                f"{s.get('n_true_anchors', 0)}/{s.get('n_restricted_ops', 0)}, "
+                f"{len(result.all_ops)} ops (μ{s.get('avg_similarity', 0.0):.3f}), "
+                f"{s.get('align_time_s', 0.0):.2f}s"
+            )
         self.finished_signal.emit(result)
 
 

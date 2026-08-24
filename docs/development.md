@@ -54,13 +54,21 @@ dualign/
 ├── src/dualign/                 # 核心源码
 │   ├── __init__.py              # 公共 API
 │   ├── version.py               # 从包元数据读取版本
-│   ├── __main__.py              # CLI 入口 (gui/align/check/models)
+│   ├── __main__.py              # CLI 入口 (gui/align/solidify/solidify-batch/check/models)
 │   ├── common.py                # 通用工具与兼容入口
 │   ├── config.py                # 配置常量 + 缓存路径
 │   ├── providers.py             # ProviderManager (Ollama/LM Studio/自定义)
 │   │
-│   ├── core/                    # 对齐引擎（纯函数）
-│   │   ├── aligner.py           # Phase 1→5 DP 对齐
+│   ├── algorithms/              # 正式生成算法实现
+│   │   └── mdl/                 # 统计门控、候选图、组合证据与局部 MDL
+│   │
+│   ├── experiments/             # 未被生产消费的隔离实验
+│   │   └── contextual_evidence.py # 上下文残差破局研究
+│   │
+│   ├── core/                    # 稳定公共门面与 legacy 归档
+│   │   ├── aligner.py           # mdl-v1 结果契约与算法选择
+│   │   ├── calibration.py       # embedding 身份绑定的门控校准
+│   │   ├── legacy_anchor_aligner.py # 冻结 benchmark
 │   │   ├── punctuation.py       # 标点分割 + 语言检测
 │   │   └── file_pair_matcher.py # 文件对发现
 │   │
@@ -77,7 +85,8 @@ dualign/
 │   │   ├── cached_encoder.py    # 缓存代理
 │   │   ├── similarity.py        # SimilarityScorer 评分器
 │   │   ├── ai_repair_agent.py   # AiRepairAgent (tool-calling)
-│   │   ├── quality_gate.py      # G1/G2/G3 质量门控
+│   │   ├── quality_gate.py      # 冻结的 legacy 报告诊断兼容层
+│   │   ├── anomaly_detection.py # 对齐后异常标记（不参与接受/拒绝）
 │   │   ├── cli_pipeline.py      # CLI 对齐流水线
 │   │   ├── score_manager.py     # 异步评分管理器
 │   │   └── prompts/             # Agent 提示词 + tools.json

@@ -4,12 +4,13 @@ Dualign — 对齐核心算法测试
 
 import numpy as np
 import pytest
-from dualign.core.aligner import (
+from dualign.core.legacy_anchor_aligner import (
     AlignConfig,
     AlignmentResult,
     align,
     op_type_str,
     _normalize,
+    _enumerate_merge_combos,
     ALIGN_CORE_VERSION,
 )
 
@@ -52,14 +53,50 @@ class TestAlignEmpty:
     def test_src_empty_tgt_nonempty(self):
         emb = np.eye(3)
         result = align([], ["a", "b", "c"], np.empty((0, 3)), emb)
-        for s, t, _ in result.all_ops:
-            assert len(s) == 0  # 全部是 0:1
+        assert result.all_ops == [
+            ((), (0,), 0.0),
+            ((), (1,), 0.0),
+            ((), (2,), 0.0),
+        ]
+        assert result.stats["n_insert"] == 3
 
     def test_tgt_empty_src_nonempty(self):
         emb = np.eye(3)
         result = align(["a", "b", "c"], [], emb, np.empty((0, 3)))
-        for s, t, _ in result.all_ops:
-            assert len(t) == 0  # 全部是 1:0
+        assert result.all_ops == [
+            ((0,), (), 0.0),
+            ((1,), (), 0.0),
+            ((2,), (), 0.0),
+        ]
+        assert result.stats["n_delete"] == 3
+
+    def test_empty_side_respects_disabled_gap_operation(self):
+        with pytest.raises(ValueError, match="无法完整覆盖"):
+            align(
+                ["a"],
+                [],
+                np.ones((1, 1)),
+                np.empty((0, 1)),
+                AlignConfig(allow_deletions=False),
+            )
+
+
+class TestMergeCombinationEnumeration:
+    def test_includes_free_lines_on_both_sides_of_one_baseline(self):
+        anchors = [((2,), (1,), 0.9)]
+
+        source, target = _enumerate_merge_combos(anchors, n=5, m=3)
+
+        assert ((1, 2, 3), (1,)) in source
+        assert ((2,), (0, 1, 2)) in target
+
+    def test_never_crosses_a_neighbouring_baseline(self):
+        anchors = [((1,), (1,), 0.9), ((3,), (3,), 0.9)]
+
+        source, target = _enumerate_merge_combos(anchors, n=5, m=5)
+
+        assert all(not ({1, 3} <= set(span)) for span, _ in source)
+        assert all(not ({1, 3} <= set(span)) for _, span in target)
 
 
 class TestAlignConfig:

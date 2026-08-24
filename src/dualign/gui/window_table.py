@@ -505,9 +505,10 @@ class WindowTableMixin:
 
         # ── AI 选项 ──
         menu.addSeparator()
-        a = menu.addAction("AI 分析此对")
-        a.triggered.connect(lambda: self._review.analyze_snaps([snap_i]))
-        if len(selected_snaps) > 1:
+        if len(selected_snaps) == 1:
+            a = menu.addAction("AI 分析此对")
+            a.triggered.connect(lambda: self._review.analyze_snaps([snap_i]))
+        else:
             a = menu.addAction(f"AI 批量分析 ({len(selected_snaps)} 对)")
             a.triggered.connect(lambda: self._review.analyze_snaps(selected_snaps))
 
@@ -634,6 +635,7 @@ class WindowTableMixin:
             return
         self._score_mgr.set_text_provider(self._get_subrow_text_for_score)
         for g in self._repair_state.current.groups:
+            text_changed = self._repair_state.text_changed_for_op(g.snap_i)
             action = self._repair_state.action_for_op(g.snap_i)
             split_scores = (
                 action.data.get("split_scores", [])
@@ -642,6 +644,12 @@ class WindowTableMixin:
             )
             for r in g.rows:
                 key = f"{g.snap_i}_{r.sub}"
+                if not text_changed:
+                    # 当前文本就是初始文本：两列评分必须共享同一事实。
+                    # 丢弃旧版曾为未修改行异步重算出的派生缓存。
+                    self._score_cache.pop(key, None)
+                    self._score_mgr.set_ready_score(g.snap_i, r.sub, r.orig_score)
+                    continue
                 score = (
                     split_scores[r.sub]
                     if r.sub < len(split_scores)

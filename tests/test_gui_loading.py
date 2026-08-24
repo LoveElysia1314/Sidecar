@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 
 from dualign.__main__ import _load_gui_entries
 from dualign.common import FilePair
@@ -9,6 +11,31 @@ from dualign.services.cli_pipeline import align_documents
 from dualign.services.report_io import load_report
 
 from test_cli_pipeline import MockEncoder
+
+
+def test_dialog_import_does_not_eagerly_load_main_window():
+    """嵌入宿主只导入对话框时，不应加载完整 GUI/repair 依赖图。"""
+    code = """
+import sys
+import dualign.services.repair as repair
+
+# 模拟宿主进程已缓存更新前的 repair 模块。
+del repair.SPLIT_FAILURE_REALIGN
+from dualign.gui.dialogs import SolidifyPolicyDialog
+
+assert SolidifyPolicyDialog is not None
+assert "dualign.gui.window" not in sys.modules
+assert "dualign.gui.window_actions" not in sys.modules
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 class _Signal:
@@ -137,6 +164,33 @@ def test_encode_thread_rejects_report_after_alignment_config_change(tmp_path):
 
     assert worker._load_cached_alignment("ignored", "ignored") is None
     assert "配置已变化" in worker.formal_alignment_error
+
+
+def test_encode_thread_distinguishes_report_miss_from_vector_cache_hit(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "one.source.md"
+    target = tmp_path / "one.target.md"
+    source.write_text("甲\n乙\n", encoding="utf-8")
+    target.write_text("A\nB\n", encoding="utf-8")
+    cache_path = tmp_path / "vectors.db"
+    monkeypatch.setattr(
+        "dualign.gui.workers.get_embedding_cache_path", lambda: cache_path
+    )
+    monkeypatch.setattr(
+        "dualign.gui.workers._try_lazy_load_model", lambda: MockEncoder()
+    )
+
+    first = EncodeThread(str(source), str(target))
+    first._run_impl()
+    statuses = []
+    second = EncodeThread(str(source), str(target))
+    second.status_signal.connect(statuses.append)
+    second._run_impl()
+
+    assert "未找到可复用的对齐报告" in statuses[0]
+    assert "向量缓存命中 4/4 (100%)，未命中 0" in statuses[-1]
+    assert "2×2 相似度矩阵" in statuses[-1]
 
 
 def test_cancel_retains_a_worker_that_has_not_stopped_yet():

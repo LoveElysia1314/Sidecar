@@ -506,10 +506,71 @@ class WindowActionsMixin:
             if generation != self._load_op_id:
                 return
 
+            if result.status == "rejected":
+                from dualign.core import alignment_payload
+                from dualign.core.calibration import resolve_alignment_calibration
+                from dualign.services.cli_pipeline import _provenance
+                from dualign.services.embedding import _try_lazy_load_model
+                from dualign.services.report_io import build_report, save_report
+
+                model = _try_lazy_load_model()
+                resolved = resolve_alignment_calibration(
+                    model,
+                    calibration_id=getattr(self._align_config, "calibration_id", ""),
+                )
+                calibration_id = (
+                    resolved.calibration_id if resolved is not None else ""
+                )
+                self._repair_state = None
+                self._alignment_snapshot = None
+                self._align_stats = result.stats
+                self._alignment_gate = dict(result.gate or {})
+                self._last_quality_assessment = {
+                    "quality": "diagnostic_only",
+                    "rejections": [],
+                    "indicators": {"alignment_status": "rejected"},
+                }
+                report_path = self._session_path()
+                report = build_report(
+                    chapter_id=self._current_entry_id,
+                    document_a_path=self._src_path,
+                    document_b_path=self._tgt_path,
+                    operations=[],
+                    stats=result.stats,
+                    quality={
+                        "level": "diagnostic_only",
+                        "rejections": [],
+                        "indicators": {"alignment_status": "rejected"},
+                    },
+                    alignment=alignment_payload(
+                        result, calibration_id=calibration_id
+                    ),
+                    provenance=_provenance(
+                        model, self._align_config, calibration_id
+                    ),
+                )
+                save_report(report, report_path)
+                self._alignment_file_hash = file_bytes_sha256(report_path)
+                self._alignment_file_present = True
+                reason_labels = {
+                    "no_correspondence": "未检测到足够的双语对应关系",
+                    "order_incompatible": "对应内容的顺序与单调对齐不兼容",
+                    "order_unidentifiable": "无法识别稳定的对应顺序",
+                    "calibration_unavailable": "当前嵌入模型没有匹配的校准资料",
+                    "empty_document": "至少一侧文档为空",
+                }
+                self._status(
+                    "对齐已拒绝：" + reason_labels.get(result.reason, result.reason),
+                    "warning",
+                )
+                self._update_feature_gating()
+                return
+
             self._alignment_snapshot = AlignmentSnapshot.from_alignment(
                 result.all_ops, self.src_lines, self.tgt_lines
             )
             self._align_stats = result.stats
+            self._alignment_gate = dict(result.gate or {})
             # 保持 _sim_matrix（.npy 恢复优先），仅新鲜对齐时覆盖
             if getattr(result, "sim_matrix", None) is not None:
                 self._sim_matrix = result.sim_matrix
@@ -524,59 +585,82 @@ class WindowActionsMixin:
                     result.all_ops, self.src_lines, self.tgt_lines
                 )
 
+            # Loading an existing report must respect flags the user has
+            # already edited or removed.  A freshly recomputed alignment gets
+            # flags for its current disagreement islands; existing user flags
+            # on the same operation take precedence over the generated note.
+            if (
+                result.status == "needs_review"
+                and result.stats.get("load_origin") != "report"
+            ):
+                from dualign.services.repair import (
+                    review_flags_for_uncertain_regions,
+                )
+
+                flagged_ops = {
+                    action.op_index
+                    for action in self._repair_state.repair_log
+                    if action.kind == "flag"
+                }
+                for action in review_flags_for_uncertain_regions(
+                    result.all_ops,
+                    result.uncertain_regions,
+                    alternative_operations=result.alternative_ops,
+                ):
+                    if action.op_index not in flagged_ops:
+                        self._repair_state = self._repair_state.apply(action)
+
             self._initialize_pair_editing_state(result)
 
             self._undo_stack.clear()
             self._redo_stack.clear()
-            self._strategy = "src"
+            # The combo box is the user-visible source of truth.  Loading a new
+            # pair must not silently reset the cached strategy while leaving the
+            # displayed selection unchanged.
+            self._on_strategy_changed(self._review.get_strategy_index())
 
-            # ── 质量评估（必须先于持久化，定义 quality/rejections/indicators）──
+            # ── 对齐决策与异常诊断分离；MDL 不再接受旧锚点质量门控 ──
             stats = result.stats
             n_src = stats.get("n_source", 0) or len(self.src_lines or [])
             n_tgt = stats.get("n_target", 0) or len(self.tgt_lines or [])
 
-            from dualign.services.quality_gate import (
-                QUALITY_OK,
-                QUALITY_UNRELIABLE,
-                assess_alignment_quality,
-                _gap_row_ratio,
-            )
+            from dualign.services.cli_pipeline import _quality_diagnostics
 
-            gap_ratio = _gap_row_ratio(result.all_ops, n_src, n_tgt)
-            n_overflow = stats.get("n_overflow_rows", 0)
+            diagnostic = _quality_diagnostics(result, n_src, n_tgt)
+            quality = diagnostic["level"]
+            rejections = diagnostic["rejections"]
+            indicators = diagnostic["indicators"]
 
-            assessment = assess_alignment_quality(
-                stats,
-                n_src,
-                n_tgt,
-                gap_row_ratio=gap_ratio,
-                n_overflow_rows=n_overflow,
-                config=getattr(self, "_quality_config", None),
-            )
-            quality = assessment["quality"]
-            rejections = assessment.get("rejections", [])
-            indicators = assessment["indicators"]
-
-            if quality == QUALITY_UNRELIABLE:
+            if result.status == "needs_review":
                 self._status(
-                    f"⚠ 真锚点覆盖不足 (密度={indicators['anchor_density']:.0%})",
+                    f"对齐完成，{len(result.uncertain_regions)} 个分歧区域已用 [F] 标记",
                     "warning",
                 )
-            elif "gap_dominated" in rejections:
-                self._status(
-                    f"⚠ 间隙行占比 {indicators['gap_row_ratio']:.0%}",
-                    "warning",
-                )
-            elif quality == QUALITY_OK:
+            else:
                 self._status("对齐完成", "success")
 
-            self._last_quality_assessment = assessment
+            self._last_quality_assessment = {
+                "quality": quality,
+                "rejections": rejections,
+                "indicators": indicators,
+            }
 
             _report_path = self._session_path()
             if stats.get("load_origin") != "report":
                 from dualign.services.cli_pipeline import _provenance
                 from dualign.services.embedding import _try_lazy_load_model
                 from dualign.services.report_io import build_report, save_report
+                from dualign.core import alignment_payload
+                from dualign.core.calibration import resolve_alignment_calibration
+
+                model = _try_lazy_load_model()
+                resolved = resolve_alignment_calibration(
+                    model,
+                    calibration_id=getattr(self._align_config, "calibration_id", ""),
+                )
+                calibration_id = (
+                    resolved.calibration_id if resolved is not None else ""
+                )
 
                 _report = build_report(
                     chapter_id=self._current_entry_id,
@@ -589,7 +673,12 @@ class WindowActionsMixin:
                         "rejections": rejections,
                         "indicators": indicators,
                     },
-                    provenance=_provenance(_try_lazy_load_model(), self._align_config),
+                    alignment=alignment_payload(
+                        result, calibration_id=calibration_id
+                    ),
+                    provenance=_provenance(
+                        model, self._align_config, calibration_id
+                    ),
                     repair_log=self._repair_state.repair_log,
                 )
                 save_report(_report, _report_path)
@@ -618,7 +707,7 @@ class WindowActionsMixin:
                 # 恢复底部 AI 面板（预览模式入口折叠的）
                 saved = getattr(self, "_preview_saved_bottom", None)
                 if saved and self._bottom_collapsed:
-                    self._toggle_bottom_panel()
+                    self._toggle_bottom_panel(user_initiated=False)
                 self._preview_saved_bottom = None
                 # 同步视图模式开关
                 self._status_bar.set_view_mode(False)
@@ -652,7 +741,7 @@ class WindowActionsMixin:
         from dualign.gui.workers import EncodeThread
         from dualign.services.cli_pipeline import _provenance
 
-        self._status("重新编码中…")
+        self._status("正在重新计算对齐…")
         QApplication.processEvents()
 
         src_path = getattr(self, "_src_path", "")
@@ -809,7 +898,8 @@ class WindowActionsMixin:
         finally:
             ec.close()
         if not attempt.succeeded:
-            note = f"拆分失败：{attempt.failure_reason}"
+            prefix = "拆分需复核" if attempt.needs_review else "拆分失败"
+            note = f"{prefix}：{attempt.failure_reason}"
             self._set_flags([snap_i], note)
             self._status(f"{note}，已标记 [F]", "warning")
             return
@@ -1278,63 +1368,18 @@ class WindowActionsMixin:
         if self._repair_state is None:
             return
 
-        # Run the cheap structural gate before loading a model or opening the
-        # embedding cache.  This is the resource boundary for non-parallel input.
-        stats = getattr(self, "_align_stats", None) or {}
-        n_containers = stats.get("n_containers", 0)
-        qa = getattr(self, "_last_quality_assessment", None)
-        from dualign.services.quality_gate import automatic_repair_blockers
-
-        if not qa:
-            n_src = stats.get("n_source", 0) or len(self.src_lines or [])
-            n_tgt = stats.get("n_target", 0) or len(self.tgt_lines or [])
-            from dualign.services.quality_gate import (
-                assess_alignment_quality,
-                _gap_row_ratio,
-            )
-
-            # 从 self._repair_state 获取 all_ops 用于计算 gap_ratio
-            if self._repair_state:
-                _ops = [
-                    (
-                        (tuple(o["s"]), tuple(o["t"]), float(o["sc"]))
-                        if isinstance(o, dict)
-                        else (o[0], o[1], o[2])
-                    )
-                    for o in self._repair_state.snapshot.original_ops
-                ]
-                gap_ratio = _gap_row_ratio(_ops, n_src, n_tgt)
-            else:
-                gap_ratio = 0.0
-            qa = assess_alignment_quality(
-                stats,
-                n_src,
-                n_tgt,
-                gap_row_ratio=gap_ratio,
-                n_overflow_rows=stats.get("n_overflow_rows", 0),
-            )
-
-        blockers = automatic_repair_blockers(qa)
-        if blockers:
-            indicators = qa.get("indicators", {})
-            if "merge_overflow" in blockers:
-                detail = f"合并触顶 {indicators.get('n_overflow_rows', 0)} 行"
-            elif "gap_dominated" in blockers:
-                detail = f"间隙行占比 {indicators.get('gap_row_ratio', 0):.0%}"
-            else:
-                detail = f"真锚点密度 {indicators.get('anchor_density', 0):.0%}"
-            self._safe_status(f"✗ 已拒绝自动修复 — {detail}")
-            return
+        # Re-read the visible selection at the execution boundary.  This keeps
+        # the strategy matrix correct even if a report reload or settings
+        # restore occurred without emitting currentIndexChanged.
+        self._on_strategy_changed(self._review.get_strategy_index())
 
         if self._strategy == "src" and not self._ensure_model():
             self._safe_status("该策略需要编码模型，请先完成一次对齐")
             return
 
-        # 容器操作提示
-        if n_containers > 0:
-            self._safe_status(f"一键修复中…（含 {n_containers} 个容器操作）")
-        else:
-            self._safe_status("一键修复中…")
+        # 文档适用性已由 mdl-v1 在生成路径前判断；自动修复不得再用
+        # legacy 锚点密度、gap 比例或合并上限推翻该决定。
+        self._safe_status("一键修复中…")
         QApplication.processEvents()
 
         from dualign.gui.workers import AutoRepairWorker
@@ -1503,6 +1548,7 @@ class WindowActionsMixin:
             PairSaveError,
             save_pair_transaction,
         )
+        from dualign.services.realignment import rebuild_alignment
         from dualign.services.report_io import load_report
 
         try:
@@ -1517,6 +1563,13 @@ class WindowActionsMixin:
                 remaining_repair_log=plan.remaining_actions,
                 solidification_policy=plan.policy.to_dict(),
                 applied_repairs=plan.applied,
+                operation_map=plan.operation_map,
+                changed_operations=plan.changed_operations,
+                alignment_runner=lambda document_a, document_b: rebuild_alignment(
+                    document_a,
+                    document_b,
+                    config=self._align_config,
+                ),
             )
         except (PairSaveError, ValueError) as exc:
             QMessageBox.critical(self, "固化修改失败", str(exc))
@@ -1528,13 +1581,11 @@ class WindowActionsMixin:
         # _reload_current_pair() 是异步加载，窗口期内任何 _save_session()
         # 都会用旧的 repair_log / ai_proposals 覆盖已清空的报告，导致
         # 已删除/已合并的行重新出现在 AI 建议列表中。
-        from dualign.models.action import AiProposalStore
-
-        self._repair_state = RepairState(
-            self._repair_state.snapshot,
-            list(plan.remaining_actions),
-            AiProposalStore(),
-        )
+        # The report now belongs to a rebuilt baseline.  Do not leave the old
+        # snapshot live during the asynchronous reload: an autosave in that
+        # window could otherwise write old anchors back into the new report.
+        self._repair_state = None
+        self._score_cache.clear()
         QMessageBox.information(
             self,
             "已固化修改",
@@ -1545,37 +1596,146 @@ class WindowActionsMixin:
         self._reload_current_pair()
 
     def _current_solidify_policy(self):
-        from dualign.services.solidify import SolidifyPolicy
+        from dualign.gui.settings import KEY_SOLIDIFY_TYPES
+        from dualign.services.solidify import DEFAULT_SOLIDIFY_TYPES, SolidifyPolicy
 
-        actions = getattr(self, "_solidify_type_actions", {})
-        enabled = {key for key, action in actions.items() if action.isChecked()}
+        enabled = DualignConfig.instance().get(
+            KEY_SOLIDIFY_TYPES, list(DEFAULT_SOLIDIFY_TYPES)
+        )
         return SolidifyPolicy(frozenset(enabled))
 
-    def _save_solidify_types(self, _checked=False):
+    def _on_solidify_settings(self):
+        from dualign.gui.dialogs import SolidifyPolicyDialog
         from dualign.gui.settings import KEY_SOLIDIFY_TYPES
 
-        policy = self._current_solidify_policy()
+        dialog = SolidifyPolicyDialog(self._current_solidify_policy(), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
         cfg = DualignConfig.instance()
-        cfg.set(KEY_SOLIDIFY_TYPES, list(policy.to_dict()["include"]))
+        cfg.set(KEY_SOLIDIFY_TYPES, dialog.policy.to_dict()["include"])
         cfg.save()
+        self._set_temp_status("固化修改设置已保存", "info")
 
-    def _set_solidify_preset(self, name: str):
-        from dualign.services.solidify import SolidifyPolicy
+    def _batch_solidify_targets(self):
+        from dualign.services.cli_pipeline import default_report_path
+        from dualign.services.solidify import SolidifyTarget
 
-        policy = SolidifyPolicy.from_preset(name)
-        for key, action in getattr(self, "_solidify_type_actions", {}).items():
-            action.blockSignals(True)
-            action.setChecked(key in policy.enabled)
-            action.blockSignals(False)
-        self._save_solidify_types()
-        labels = {
-            "edits": "仅校订文本",
-            "line-aligned": "行级兼容（全部）",
-            "document-a": "仅文档 A",
-            "document-b": "仅文档 B",
-            "none": "全部关闭",
+        entries = getattr(self, "_entries", None)
+        if isinstance(entries, list) and entries:
+            candidates = [
+                (
+                    getattr(entry, "label", ""),
+                    getattr(entry, "document_a_path", ""),
+                    getattr(entry, "document_b_path", ""),
+                    getattr(entry, "report_path", "")
+                    or getattr(entry, "alignment_path", ""),
+                )
+                for entry in entries
+            ]
+        else:
+            candidates = [
+                (item.label, item.src_path, item.tgt_path, "")
+                for item in self._workspace.queue_items()
+            ]
+
+        targets = []
+        for label, path_a, path_b, report in candidates:
+            if not path_a or not path_b:
+                continue
+            targets.append(
+                SolidifyTarget(
+                    label or Path(path_a).name,
+                    path_a,
+                    path_b,
+                    report or str(default_report_path(path_a)),
+                )
+            )
+        return targets
+
+    def _on_batch_solidify(self):
+        """Preview and solidify every file pair currently loaded in Dualign."""
+
+        from dualign.services.solidify import (
+            SOLIDIFY_TYPE_LABELS,
+            apply_batch_solidification,
+            plan_batch_solidification,
+        )
+
+        targets = self._batch_solidify_targets()
+        if not targets:
+            QMessageBox.information(self, "批量固化修改", "当前没有可处理的文件对。")
+            return
+        try:
+            if self._repair_state is not None:
+                self._save_session(raise_on_error=True)
+            batch = plan_batch_solidification(targets, self._current_solidify_policy())
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "批量固化计划失败", str(exc))
+            return
+
+        if not batch.ready:
+            errors = [issue for issue in batch.skipped if issue.error]
+            detail = ""
+            if errors:
+                detail = "\n\n" + "\n".join(
+                    f"{issue.target.label}: {issue.reason}" for issue in errors[:10]
+                )
+            QMessageBox.information(
+                self,
+                "没有可固化文件对",
+                f"检查 {len(targets)} 对，均无匹配修改或报告无效。{detail}",
+            )
+            return
+
+        labels = [
+            SOLIDIFY_TYPE_LABELS[key]
+            for key in SOLIDIFY_TYPE_LABELS
+            if key in batch.policy.enabled
+        ]
+        effects = "\n".join(
+            f"  · {SOLIDIFY_TYPE_LABELS[key]}：{count} 处"
+            for key, count in batch.effect_counts.items()
+            if count
+        )
+        reply = QMessageBox.question(
+            self,
+            "确认批量固化",
+            "即将修改初始文档并重建工作报告。每个文件对使用独立的可恢复事务。\n\n"
+            f"固化范围：{'、'.join(labels) or '无'}\n"
+            f"可固化：{len(batch.ready)} 对\n"
+            f"跳过：{len(batch.skipped)} 对\n"
+            f"修复动作：{batch.action_count} 条\n"
+            f"影响文档 A：{batch.document_a_count} 对\n"
+            f"影响文档 B：{batch.document_b_count} 对\n\n"
+            f"操作分布：\n{effects}\n\n是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        result = apply_batch_solidification(batch)
+        succeeded_reports = {
+            os.path.normcase(str(Path(target.report_path).resolve()))
+            for target in result.succeeded
         }
-        self._set_temp_status(f"固化范围已切换为：{labels[name]}", "info")
+        current_report = os.path.normcase(str(Path(self._alignment_path).resolve()))
+        if current_report in succeeded_reports:
+            self._repair_state = None
+            self._score_cache.clear()
+            self._reload_current_pair()
+
+        detail = ""
+        if result.failed:
+            detail = "\n\n失败：\n" + "\n".join(
+                f"{issue.target.label}: {issue.reason}" for issue in result.failed[:10]
+            )
+        QMessageBox.information(
+            self,
+            "批量固化完成",
+            f"成功 {len(result.succeeded)} 对；失败 {len(result.failed)} 对；"
+            f"跳过 {len(result.skipped)} 对。{detail}",
+        )
 
     def _on_undo(self):
         """撤销 — 恢复位置 + 同步 AiProposalStore。

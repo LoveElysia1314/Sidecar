@@ -15,7 +15,7 @@ uv run dualign
 
 在界面中打开文档 A 和文档 B。初次对齐会生成 `report.json`；后续校订、AI 建议和审核操作都会自动保存到同一报告。普通保存不会改写 Markdown。
 
-只有确定要写入当前校订时，才使用“文件 → 固化修改”。可先在“固化范围”选择文档 A/B 的合并、拆分、校订和双侧文本对删除，或使用预设；系统会先显示差异，再同时更新两份文档和报告。占位不会被写入正文。
+只有确定要写入当前校订时，才使用“文件 → 固化修改”。固化范围在“设置 → 固化修改设置”中配置，可选择文档 A/B 的合并、拆分、校订和双侧文本对删除，或使用预设；系统会先显示差异，再同时更新两份文档和报告。文件列表包含多对文档时，也可使用“文件 → 批量固化修改”。占位不会被写入正文。
 
 ## 体验 Demo
 
@@ -38,6 +38,12 @@ uv run dualign align \
 uv run dualign solidify \
   -a document-a.md -b document-b.md -r chapter.report.json \
   --preset line-aligned
+```
+
+批量清单与 GUI 的 `--entries-file` 格式相同；命令仍需追加 `--apply` 才写入：
+
+```bash
+uv run dualign solidify-batch --entries-file chapters.json --preset edits
 ```
 
 配置文件支持 JSON 或 TOML。例如 `policy.toml`：
