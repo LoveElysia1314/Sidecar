@@ -33,7 +33,9 @@ def _operations(report: dict):
 
 
 def _signature(operations):
-    return tuple((tuple(source), tuple(target)) for source, target, _score in operations)
+    return tuple(
+        (tuple(source), tuple(target)) for source, target, _score in operations
+    )
 
 
 def _serialize(operations, lines_a, lines_b):
@@ -70,7 +72,9 @@ def _difference_islands(old_operations, new_operations, lines_a, lines_b):
     new_vertices = {new_edges[0][0] if new_edges else (0, 0), new_end}
     old_vertices.update(edge[1] for edge in old_edges)
     new_vertices.update(edge[1] for edge in new_edges)
-    common = sorted(old_vertices & new_vertices, key=lambda item: (item[0] + item[1], item[0]))
+    common = sorted(
+        old_vertices & new_vertices, key=lambda item: (item[0] + item[1], item[0])
+    )
     islands = []
     for start, end in zip(common, common[1:]):
         old_segment = [
@@ -109,7 +113,9 @@ def _difference_islands(old_operations, new_operations, lines_a, lines_b):
 def _operation_counts(operations):
     return dict(
         sorted(
-            Counter(f"{len(source)}:{len(target)}" for source, target, _ in operations).items()
+            Counter(
+                f"{len(source)}:{len(target)}" for source, target, _ in operations
+            ).items()
         )
     )
 
@@ -221,9 +227,13 @@ def main() -> int:
                     result.all_ops, result.alternative_ops, lines_a, lines_b
                 )
                 total_islands += len(islands)
-                atomic_changed = _signature(old_operations) != _signature(result.atomic_ops)
+                atomic_changed = _signature(old_operations) != _signature(
+                    result.atomic_ops
+                )
                 final_changed = _signature(old_operations) != _signature(result.all_ops)
-                atomic_vs_final = _signature(result.atomic_ops) != _signature(result.all_ops)
+                atomic_vs_final = _signature(result.atomic_ops) != _signature(
+                    result.all_ops
+                )
             else:
                 islands = []
                 composition_islands = []

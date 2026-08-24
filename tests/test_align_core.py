@@ -5,14 +5,13 @@ Dualign — 对齐核心算法测试
 import numpy as np
 import pytest
 from dualign.core.legacy_anchor_aligner import (
-    AlignConfig,
+    LegacyAnchorConfig,
     AlignmentResult,
     align,
-    op_type_str,
-    _normalize,
     _enumerate_merge_combos,
     ALIGN_CORE_VERSION,
 )
+from dualign.core.text import op_type_str
 
 
 class TestOpTypeStr:
@@ -24,6 +23,9 @@ class TestOpTypeStr:
 
     def test_1to3(self):
         assert op_type_str((0,), (0, 1, 2)) == "1:3"
+
+    def test_general_many_to_many(self):
+        assert op_type_str((0, 1), (0, 1, 2)) == "2:3"
 
     def test_delete(self):
         assert op_type_str((0,), ()) == "1:0"
@@ -77,7 +79,7 @@ class TestAlignEmpty:
                 [],
                 np.ones((1, 1)),
                 np.empty((0, 1)),
-                AlignConfig(allow_deletions=False),
+                LegacyAnchorConfig(allow_deletions=False),
             )
 
 
@@ -101,12 +103,12 @@ class TestMergeCombinationEnumeration:
 
 class TestAlignConfig:
     def test_default_config(self):
-        cfg = AlignConfig()
+        cfg = LegacyAnchorConfig()
         assert cfg.allow_insertions is True
         assert cfg.allow_deletions is True
 
     def test_custom_config(self):
-        cfg = AlignConfig(allow_insertions=False, allow_deletions=False)
+        cfg = LegacyAnchorConfig(allow_insertions=False, allow_deletions=False)
         assert cfg.allow_insertions is False
         assert cfg.allow_deletions is False
 
@@ -146,14 +148,3 @@ class TestAlignStats:
         assert result.stats["max_anchor_gap"] == 100
         assert result.stats["merge_scoring_skipped"] is True
         assert "large_anchor_gap" in result.stats["merge_skip_reasons"]
-
-
-class TestNormalize:
-    def test_unit_length(self):
-        v = np.array([3.0, 4.0])
-        n = _normalize(v)
-        assert abs(np.linalg.norm(n) - 1.0) < 1e-10
-
-    def test_zero_vector(self):
-        n = _normalize(np.array([0.0, 0.0]))
-        assert np.linalg.norm(n) == 0.0

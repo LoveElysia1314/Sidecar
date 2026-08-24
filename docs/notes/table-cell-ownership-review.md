@@ -175,8 +175,8 @@ CLI、AI proposal store、solidify/pair_save 和 GUI 一起切换，并对部分
 
 核心回放对象也已收敛为 `RelationRow/RelationGroup`。关系组同时携带稳定 `relation_id` 和
 当前 `ordinal`，替换、删除与 GUI 评分投影显式使用 ordinal；旧 `SnapGroup.snap_i` 接口和
-兼容别名均已删除。主表 `RelationRow/TableRow`、AI 建议行和通用表格基类现统一暴露
-`ordinal`，`TableRow.op_index` 重复别名也已删除。选择、异常与 AI 外部短地址仍可使用数字，
+兼容别名均已删除。主表关系行、AI 建议行和通用表格基类现统一暴露
+`ordinal`；选择、异常与 AI 外部短地址仍可使用数字，
 但进入单元格归属投影后只有一种当前位置字段，不再出现 `snap_index/index/op_index` 混称。
 
 跨关系动作的位置表示也已收敛：`RepairAction.operation_indices` 是唯一显式位置投影，
@@ -259,3 +259,111 @@ GUI、编码线程和 `create_alignment_pair()` 对唯一工作报告的称呼�
 并只维护 `_report_path/_report_file_hash/_report_file_present`。`FilePair` 中无人使用的
 `source_path/target_path/alignment_path` 只读别名已删除。历史批量固化清单中的
 `alignment_path` 仍只在其读取边界作为旧键接受。
+
+筛选投影现名为 `RelationFilter`，工作区面板的空 `set_gating()` 已删除。表格层原先重复的
+`compute_text_colors()` 与 `has_snap_text_changed()` 已拆成唯一事实函数
+`relation_text_changes()` 和一层纯视觉着色规则：edit/split 的正文比较只实现一次，而
+merge/marker 的强调色不会被误当成正文确实发生变化。Snap 列宽/列索引接口也改为 relation。
+
+主题颜色不再复制成模块级静态别名，所有 GUI 消费者统一读取动态 `ThemeManager`，避免主题
+切换后一部分控件仍持有旧色。设置读写也从 `_load_history/_save_history` 收敛为配置快照和
+`_schedule_settings_save/_save_settings`，调用方不再直接访问 `DualignConfig._data`。
+
+标记组合规则也只保留一份：生产回放原先私有的 `_combine_meta()` 已下沉为
+`marker.combine()`，统一处理 `[OK]/[F]` 互斥、去重和 `[AI]` 来源保留。静态未使用代码审计
+随后清除了回放中的多余导入，80% 置信度以上不再报告未使用的生产符号。
+
+同一轮审计还删除了从未接入界面的折叠容器与分数渐变图例、失去入口的单关系自动修复
+分派、被 `report_matches_alignment()` 覆盖的 provenance 比较函数，以及已无消费者的内容行
+分段辅助函数。这些符号既没有运行时引用，也没有承担文件格式兼容职责；保留它们只会让人
+误以为项目仍有第二套界面或报告判定路径。兼容代码仍严格保留在旧报告和旧批处理清单的读取
+边界，没有用“清理未引用代码”为由删除可读取历史数据的能力。
+
+GUI 控制层现在也只用 ordinal 表示关系的会话位置：审阅控制器公开
+`_current_ordinal/_selected_ordinals/analyze_relations`，评分失效、批量删除、撤销焦点与关系
+导航均采用同一术语。原 `SnapIndicator` 已改为 `RelationIndicator`。这里没有改名
+`AlignmentSnapshot`，因为它仍准确表示报告所绑定的不可变输入快照；也没有改 AI 工具向模型
+展示的 `snap N`，它是一次 Agent 会话内的人类可读短地址，不是第二套持久身份。
+
+公开 GUI 组件也缩减到实际接线的界面：删除了空壳 `ConfigDialog`、已被当前文件队列取代的
+`FileListPanel`、旧 change-set 专用的 `ChangeReviewDialog`，以及没有挂入主窗口的
+`ActivityBar/ActivityButton`。现有 `AgentConfigDialog`、固化预览和 `DockPanelHelper` 分别仍有
+明确入口，因此保留。这样 `dualign.gui` 的惰性公开 API 不再宣称支持已经不存在的交互流程。
+
+审阅领域模型中旧的 `auto_note` 字符串生成/解析和独立关系预览也已删除。当前状态由
+`project_relation_statuses()` 一次性投影为结构化字段，正文预览由 RepairState/表格行投影负责；
+继续保留可往返解析的说明字符串会形成第二套状态协议。配置模块中三个无消费者的旧模型名、
+报告版本号和 UI session 路径同样移除；实际嵌入配置兼容仍留在 embedding 服务的输入边界。
+
+Marker 模块也不再同时提供“解析成布尔字典”“逐项语义查询”和“测试专用中文显示”三套
+读取方式。生产代码统一使用 `has_tag/is_*` 语义查询，组合仍只有 `combine()`；无人消费的
+`parse/get_tags/get_source/get_display_text/is_from_ai/is_ai_reviewed` 及其自证式测试已删除。
+`[AI]` 是否存在与是否位于前缀不再由两个近义函数给出可能不同的答案。
+
+表格数据路径最终只保留 `RelationRow`。原 `TableRow` 逐字段复制相同数据，合并“重建”只是
+再复制一次，删除分支则重复执行 `with_marker()` 已完成的分数归零。`make_table_view()` 现在
+直接展平不可变 `ChapterState` 关系行并计算单元格投影，不再制造第二种可变行对象；GUI 也
+直接标注并消费 `RelationRow`。
+
+info-full edit/split 的行构造也已统一调用 `RelationGroup.with_text()`，删除 repair 服务中的
+逐字段复刻。收敛时同时发现该旧修改器会把多行的 `sub` 全部写成 0；现已改为连续子序号并
+增加多行断言。无人读取的 `RelationRow.is_divider` 与同名 marker 转发函数一并移除，虚线
+归属继续由统一单元格投影决定。
+
+正文落盘也只保留固化事务。`RepairService.render_to_files()` 会绕过报告重锚、哈希冲突检查
+与双文件原子保存，只有一个已经使用旧 `op_index` API 的 AI demo 和自证式单元测试调用；
+该方法、过时 demo 及无人调用的 `apply_ai_actions/is_dirty/undo` 便利接口现已删除。
+`render_rows()` 仍作为报告物化的纯投影保留，但不再自行写文件。
+
+单元格投影的可选首列参数也从 `snap_col` 改为 `relation_col`。它的 owner 本来就是当前关系，
+且与 `ordinal` 一起决定跨行范围；旧名会错误暗示该列由不可变快照对象拥有。初始列仍按显式
+初始关系片段投影，因此跨关系合并的“多个初始片段、一个当前关系”语义未变。
+
+`compute_spans()` 的薄包装也已移除。跨度、covered cells 与虚线边界必须来自同一次
+`project_table_cells()` 所有权投影；单独暴露只返回 spans 的入口容易让调用方重新绕开另外
+两种投影结果。`make_table_view()` 现在直接读取这一个投影函数。
+
+AI 章节上下文内部现存储 `relation_statuses/relation_infos`，并通过
+`get_relation_status/get_relation_info` 查询。模型工具继续用整数 `target` 作为会话内短地址，
+但提示、回复和 Python 对象均称“关系/ordinal”；`snap_range/snap_id/pair_spec` 只在工具输入
+边界作为旧参数别名接受。GUI 的筛选、框选、悬停、评分和复制输出也已统一到同一套关系术语。
+
+最后一轮 GUI 状态审计删除了只写不读的“焦点行”、AI 焦点丢失、hover 来源/坐标、文件多选
+集合和选择重入字段。高亮现在只有 `_selected_rows` 一个视觉事实；状态灯只缓存实际绘制颜色。
+对齐结果的 `_sim_matrix` 也不再挂到窗口后闲置，旧 `.sim.npy` 的删除兼容仍保留在清理边界。
+
+其余只写状态也已清除：FocusManager 不再重复保存 ReviewController 已拥有的动作焦点和异常
+序号，Agent 面板不再保存未展示的 turn 计数，摘要链接依赖 Qt 传入 href 而不私挂 `_path`。
+无人调用的 dock 最小宽度估算和手动主题切换捷径也删除；主题继续由系统色彩方案唯一驱动。
+SolidificationPlan 与 RelationStatus 中两个只构造不读取的审计字段同样不再占用模型表面。
+
+环境检测结果不再生成欢迎页从未展示的 provider 标签；文件匹配规则也移除了声明却从未参与
+排序的 `sort_key`。这两处尤其避免出现“配置看似可控、实际求解完全忽略”的假参数。
+
+冻结锚点算法的隔离也补完：删除其 `AlignConfig` 别名与 `dualign.core` 对锚点/余量/归一化
+内部函数的转发。生产真正共用的 `op_type_str/smart_join_lines` 提取到 `core.text`，所有生产
+调用直接依赖该纯工具模块。提取同时修复旧 `op_type_str` 把一般 N:M 错写成 N:1/1:M 的问题，
+并增加 `2:3` 回归断言；legacy CLI 和 benchmark 仍显式使用 `LegacyAnchorConfig`。
+
+固化后的全文重建也不再接受或判断 `LegacyAnchorConfig`，并移除了只为旧质量门控存在的
+`quality_config` 分支。`rebuild_alignment()` 现在严格调用生产 `AlignConfig` 与统计校准；因此
+legacy 只剩 CLI 管线中的惰性显式分支和 benchmark，两条生产重对齐路径均不会意外进入旧算法。
+
+聚合包边界也同步收紧：`LegacyAnchorConfig` 不再从 `dualign.core` 导出，冻结的 quality-gate
+函数不再从 `dualign.services` 导出。最终又移除了 `core.aligner` 对 legacy 配置的导入、适配和
+分派，以及聚合包中的 legacy 算法常量。CLI 与回归测试必须显式导入归档模块，使普通库调用方
+不会把旧阈值配置、旧拒绝指标或算法选择器误认成生产 API。
+
+正式 `AlignmentResult` 也不再复刻 legacy 的 `anchors/anchor_op_indices/sim_matrix`。这些字段在
+GUI、报告和生产求解中均无人消费；尤其保留完整相似度矩阵会让显式 legacy CLI 在返回前额外
+占用 `O(nm)` 内存。归档求解器自己的 benchmark 结果仍保留这些诊断，跨入正式报告管线时只
+适配共同需要的关系、统计和决策状态。
+
+GUI 中最后一层旧拒绝投影也已删除：`_last_quality_assessment` 只可能得到
+`diagnostic_only`，却仍保留 `unreliable` 自动预览分支。现在正式 `result.status == rejected`
+直接写决策报告、进入只读预览并禁用关系操作；接受或需审阅的 MDL 结果只写不参与决策的
+诊断载荷。GUI 不再解释 legacy 的 anchor/gap/overflow 状态词。
+
+旧 GUI `quality_gate` 设置也只在载入时删除，不再把其中的固定最低分或 Z-score 参数迁移到
+新异常显示设置。这样淘汰算法的调参不会以“兼容迁移”名义继续影响新版本；用户明确保存过的
+独立 `anomaly_detection` 显示设置仍照常保留。

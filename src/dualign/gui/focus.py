@@ -20,8 +20,6 @@ class FocusManager(QObject):
     集中管理：
       - focused_ordinal:     对齐表的焦点关系序号（同步到预览表和定位器）
       - selected_ordinals:   对齐表的选中关系序号集合（Ctrl/Shift 选择）
-      - focused_action:      AI 建议的焦点操作
-      - anomaly_index:       异常导航索引（◀▶）
       - force_show_ordinals: 跨筛选强制显示的关系序号集合（AI 跨区建议）
       - source:              最后一次焦点来源 ("table"|"review"|"ai")
 
@@ -39,8 +37,6 @@ class FocusManager(QObject):
         super().__init__(parent)
         self.focused_ordinal: Optional[int] = None
         self.selected_ordinals: Set[int] = set()
-        self.focused_action: Optional[RepairAction] = None
-        self.anomaly_index: int = -1
         self.force_show_ordinals: Set[int] = set()
         self.source: str = "table"  # "table" | "review" | "ai"
         self._sync_lock: bool = False
@@ -84,14 +80,13 @@ class FocusManager(QObject):
     def focus_action(self, action: Optional[RepairAction]):
         """聚焦一条 AI 建议。
 
-        设置 focused_action + force_show_ordinals，
+        设置 force_show_ordinals 并发出动作焦点，
         以便 _apply_filter 能强制显示涉及的所有关系。
         """
         if self._sync_lock:
             return
         self._sync_lock = True
         try:
-            self.focused_action = action
             if action is not None:
                 self.source = "ai"
                 self.force_show_ordinals = set(action.operation_indices)
@@ -101,10 +96,6 @@ class FocusManager(QObject):
         finally:
             self._sync_lock = False
 
-    def navigate_anomaly(self, idx: int):
-        """异常导航：设置 anomaly_index；关系焦点由调用方设置。"""
-        self.anomaly_index = idx
-
     def clear_force_show(self):
         """清除跨筛选强制显示标记。"""
         self.force_show_ordinals = set()
@@ -113,6 +104,5 @@ class FocusManager(QObject):
         """清除所有焦点状态。"""
         self.focused_ordinal = None
         self.selected_ordinals = set()
-        self.anomaly_index = -1
         self.clear_force_show()
         self.focus_action(None)

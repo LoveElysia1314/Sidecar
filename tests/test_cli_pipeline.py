@@ -4,7 +4,8 @@ import json
 
 import numpy as np
 
-from dualign.core import AlignmentResult, LegacyAnchorConfig
+from dualign.core import AlignmentResult
+from dualign.core.legacy_anchor_aligner import LegacyAnchorConfig
 from dualign.models.action import RepairAction
 from dualign.services.cli_pipeline import align_documents as _align_documents
 from dualign.services.report_io import load_report, materialize_reader_rows, save_report
@@ -244,8 +245,6 @@ def test_review_disagreement_is_persisted_as_annotated_flags(tmp_path, monkeypat
     ops = [((0,), (0,), 0.9), ((1,), (), 0.0), ((), (1,), 0.0)]
     result = AlignmentResult(
         all_ops=ops,
-        anchors=[],
-        anchor_op_indices={},
         stats={"n_source": 2, "n_target": 2},
         status="needs_review",
         uncertain_regions=(((0, 0), (2, 1)),),
@@ -253,7 +252,7 @@ def test_review_disagreement_is_persisted_as_annotated_flags(tmp_path, monkeypat
     )
     monkeypatch.setattr("dualign.services.cli_pipeline.align", lambda *_a, **_k: result)
 
-    saved = align_documents(str(source), str(target), str(report), model=MockEncoder())
+    saved = _align_documents(str(source), str(target), str(report), model=MockEncoder())
 
     assert saved["status"] == "needs_review"
     actions = load_report(report)["repair_log"]
@@ -264,7 +263,7 @@ def test_review_disagreement_is_persisted_as_annotated_flags(tmp_path, monkeypat
     assert actions[0]["data"]["current_structure"] == "1:1+1:0"
     assert actions[0]["data"]["alternative_structure"] == "2:1"
 
-    reset = align_documents(
+    reset = _align_documents(
         str(source),
         str(target),
         str(report),

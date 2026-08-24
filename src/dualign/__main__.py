@@ -114,7 +114,8 @@ def main_align(
     algorithm: str = "mdl-v1",
 ):
     """Create a replayable work report without rewriting either document."""
-    from dualign.core import AlignConfig, LegacyAnchorConfig
+    from dualign.core import AlignConfig
+    from dualign.core.legacy_anchor_aligner import LegacyAnchorConfig
     from dualign.services.cli_pipeline import align_documents, default_report_path
 
     output_path = Path(output) if output else default_report_path(document_a)
@@ -122,11 +123,7 @@ def main_align(
         output_path = output_path / default_report_path(document_a).name
     print(f"文档 A: {document_a}")
     print(f"文档 B: {document_b}")
-    config = (
-        LegacyAnchorConfig()
-        if algorithm == "legacy-anchor-v1"
-        else AlignConfig(algorithm=algorithm)
-    )
+    config = LegacyAnchorConfig() if algorithm == "legacy-anchor-v1" else AlignConfig()
     result = align_documents(document_a, document_b, str(output_path), config=config)
     if not result.get("success"):
         print(f"对齐失败: {result.get('error', '未知错误')}")

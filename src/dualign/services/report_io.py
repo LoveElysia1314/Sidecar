@@ -310,14 +310,6 @@ def report_matches_documents(
         return False
 
 
-def report_matches_provenance(
-    report: Mapping[str, Any], provenance: Mapping[str, Any]
-) -> bool:
-    return _semantic_provenance(report.get("provenance") or {}) == _semantic_provenance(
-        provenance
-    )
-
-
 def report_alignment_key(report: Mapping[str, Any]) -> AlignmentKey | None:
     documents = report.get("documents") or {}
     try:

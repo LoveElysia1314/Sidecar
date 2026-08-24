@@ -131,7 +131,7 @@ def test_known_split_scores_replace_stale_persisted_subrow_scores(tmp_path):
         ("L000001", "L000002"),
     )
 
-    harness._set_known_snap_scores(0, [0.73, 0.76])
+    harness._set_known_relation_scores(0, [0.73, 0.76])
 
     assert harness._score_mgr.invalidated == [0]
     assert harness._score_mgr.ready == {(0, 0): 0.73, (0, 1): 0.76}

@@ -12,7 +12,7 @@ class _Harness(WindowActionsMixin):
 
 def test_stale_load_callbacks_cannot_mutate_current_document():
     window = _Harness()
-    stale_result = AlignmentResult([], [], {}, {})
+    stale_result = AlignmentResult(all_ops=[], stats={})
 
     window._on_text_ready(1, "old-a", "old-b", ["old"], ["old"])
     window._on_encoded(1, "old-embedding", None, ["old"], ["old"], "a", "b")

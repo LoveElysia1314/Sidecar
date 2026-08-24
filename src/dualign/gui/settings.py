@@ -2,7 +2,7 @@
 Dualign — GUI 配置持久化管理
 
 集中管理所有用户配置项的读写、序列化/反序列化。
-替代原本散布在 DualignWindow 中的 _load_history/_save_history 逻辑。
+替代原本散布在 DualignWindow 中的设置文件读写逻辑。
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ ALL_APPROVAL_STATES = [
     "user",
 ]
 
-# 对齐后的异常诊断（旧 quality_gate 键仅在 load 时迁移）
+# 对齐后的异常诊断
 KEY_ANOMALY_DETECTION = "anomaly_detection"
 KEY_SOLIDIFY_TYPES = "solidify_types"
 
@@ -101,15 +101,8 @@ class DualignConfig:
                     self._data = json.load(f)
         except Exception:
             self._data = {}
-        legacy = self._data.pop("quality_gate", None)
-        migrated = legacy is not None
-        if isinstance(legacy, dict) and KEY_ANOMALY_DETECTION not in self._data:
-            self._data[KEY_ANOMALY_DETECTION] = {
-                "zscore_k": legacy.get("zscore_k", 3.0),
-                "zscore_min_score": legacy.get("zscore_min_score", 0.6),
-            }
-        self._dirty = migrated
-        return self._data
+        self._dirty = self._data.pop("quality_gate", None) is not None
+        return self.snapshot()
 
     def save(self) -> None:
         """保存到磁盘。"""
@@ -132,6 +125,11 @@ class DualignConfig:
     def set(self, key: str, value: Any) -> None:
         self._data[key] = value
         self._dirty = True
+
+    def snapshot(self) -> Dict[str, Any]:
+        """返回当前配置的浅拷贝，避免调用方依赖内部存储。"""
+
+        return dict(self._data)
 
     # ── 恢复默认 ──
 

@@ -5,7 +5,6 @@ from dualign.services.repair import (
     RepairService,
     replay,
     make_table_view,
-    TableRow,
     TableViewModel,
 )
 from dualign.services.ai_repair_agent import (
@@ -30,12 +29,6 @@ from dualign.services.pair_save import (
     save_pair_transaction,
 )
 from dualign.services.realignment import RebuiltAlignment, rebuild_alignment
-from dualign.services.quality_gate import (
-    assess_alignment_quality,
-    automatic_repair_blockers,
-    QualityGateConfig,
-    _gap_row_ratio,
-)
 from dualign.services.report_io import (
     AlignmentKey,
     ReportError,
@@ -67,7 +60,6 @@ __all__ = [
     "RepairService",
     "replay",
     "make_table_view",
-    "TableRow",
     "TableViewModel",
     # ai_repair_agent
     "AiRepairAgent",
@@ -94,11 +86,6 @@ __all__ = [
     "save_pair_transaction",
     "RebuiltAlignment",
     "rebuild_alignment",
-    # quality_gate
-    "assess_alignment_quality",
-    "automatic_repair_blockers",
-    "QualityGateConfig",
-    "_gap_row_ratio",
     # report_io
     "save_report",
     "load_report",

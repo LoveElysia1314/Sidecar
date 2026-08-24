@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 import json
-from typing import List, Tuple, Optional, Set
+from typing import List, Tuple, Optional
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QSize
@@ -75,7 +75,6 @@ class WorkspacePanel(QWidget):
         super().__init__(parent)
         self._queue: List[FileQueueItem] = []
         self._selected: Optional[FileQueueItem] = None
-        self._selected_set: Set[FileQueueItem] = set()
         self._recent_pairs: List[Tuple[str, str, str]] = self._load_recent()
         self._build_ui()
         self._rrc()
@@ -174,9 +173,6 @@ class WorkspacePanel(QWidget):
         r = self.layout()
         if r is not None:
             r.addWidget(g, 1)
-
-    def set_gating(self, **kwargs):
-        pass
 
     def _on_browse_src(self):
         p, _ = QFileDialog.getOpenFileName(

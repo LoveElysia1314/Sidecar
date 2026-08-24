@@ -1,15 +1,8 @@
-"""
-Dualign — 面板管理（ActivityBar + DockPanelHelper）
-
-合并自 activity_bar.py 与 dock_panel.py，两者都负责面板管理基础设施。
-"""
+"""Dualign panel layout and relation navigation helpers."""
 
 from __future__ import annotations
 
-from typing import List, Optional
-
-from PySide6.QtCore import Qt, Signal, QPoint, QMimeData
-from PySide6.QtGui import QDrag
+from PySide6.QtCore import Qt, Signal, QPoint
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -17,217 +10,18 @@ from PySide6.QtWidgets import (
     QPushButton,
     QDockWidget,
     QMenu,
-    QLabel,
-    QComboBox,
-    QCheckBox,
-    QSpinBox,
-    QLineEdit,
     QScrollArea,
     QFrame,
     QSizePolicy,
 )
-from dualign.gui.theme import FG_SECONDARY, BLUE, BG_HOVER, BG_INPUT
-
-# ═══════════════════════════════════════════════════════════════
-# ActivityBar — VS Code 风格活动栏
-# ═══════════════════════════════════════════════════════════════
-
-
-class ActivityButton(QPushButton):
-    """活动栏按钮 — 30×30，选中时蓝色高亮，支持拖拽到对面活动栏。"""
-
-    def __init__(self, icon: str, tooltip: str, panel_id: str, parent=None):
-        super().__init__(icon, parent)
-        self._panel_id = panel_id
-        self._drag_start = QPoint()
-        self.setToolTip(tooltip)
-        self.setFixedSize(30, 30)
-        self.setCheckable(True)
-        self.setStyleSheet(
-            f"QPushButton{{color:{FG_SECONDARY};background:transparent;"
-            f"border:none;border-radius:4px;font-size:16px;}}"
-            f"QPushButton:hover{{background:{BG_HOVER};}}"
-            f"QPushButton:checked{{color:{BLUE};background:{BG_INPUT};}}"
-        )
-
-    # ── 拖拽支持 ──
-
-    def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            self._drag_start = e.position().toPoint()
-        super().mousePressEvent(e)
-
-    def contextMenuEvent(self, event):
-        """右键菜单 — 面板管理（与 dock 右键菜单一致）。"""
-        parent_window = self.window()
-        from PySide6.QtWidgets import QMainWindow
-
-        if isinstance(parent_window, QMainWindow):
-            dock = parent_window.findChild(QDockWidget, f"dock_{self._panel_id}")
-            if dock:
-                from dualign.gui.panels import DockPanelHelper
-
-                DockPanelHelper.build_panel_context_menu(
-                    dock,
-                    self._panel_id,
-                    parent_window,
-                    getattr(parent_window, "_dock_map", {}),
-                    event.globalPos(),
-                )
-        event.accept()
-
-    def mouseMoveEvent(self, e):
-        if e.buttons() != Qt.MouseButton.LeftButton:
-            return
-        if (e.position().toPoint() - self._drag_start).manhattanLength() < 8:
-            return
-        drag = QDrag(self)
-        drag.setMimeData(QMimeData())
-        pix = self.grab()
-        drag.setPixmap(
-            pix.scaled(
-                30,
-                30,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        )
-        drag.setHotSpot(QPoint(15, 15))
-        drag.exec(Qt.DropAction.MoveAction)
-
-    @property
-    def panel_id(self) -> str:
-        return self._panel_id
-
-
-class ActivityBar(QWidget):
-    """竖直活动栏，分组管理。支持拖拽按钮到另一侧活动栏。"""
-
-    button_toggled = Signal(str, bool)  # panel_id, checked
-    button_moved_to_other_bar = Signal(str, object)  # panel_id, target_bar
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._btns: List[ActivityButton] = []
-        self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(0, 0, 0, 0)
-        self._layout.setSpacing(2)
-        self._layout.setAlignment(Qt.AlignTop)
-        self.setAcceptDrops(True)
-        self._drag_btn: Optional[ActivityButton] = None
-        self._drag_start = QPoint()
-
-    # ── 拖拽接收 ──
-
-    def dragEnterEvent(self, event):
-        if isinstance(event.source(), ActivityButton):
-            event.acceptProposedAction()
-
-    def dropEvent(self, event):
-        btn = event.source()
-        if not isinstance(btn, ActivityButton):
-            return
-        self.button_moved_to_other_bar.emit(btn.panel_id, self)
-        event.acceptProposedAction()
-
-    # ── 拖拽发起：支持在活动栏空白区域按下拖动（不限于按钮本身上）──
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start = event.position().toPoint()
-            for btn in self._btns:
-                if btn.geometry().contains(event.position().toPoint()):
-                    self._drag_btn = btn
-                    break
-            else:
-                self._drag_btn = None
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.MouseButton.LeftButton and self._drag_btn is not None:
-            if (event.position().toPoint() - self._drag_start).manhattanLength() >= 8:
-                btn = self._drag_btn
-                self._drag_btn = None
-                drag = QDrag(self)
-                drag.setMimeData(QMimeData())
-                pix = btn.grab()
-                drag.setPixmap(
-                    pix.scaled(
-                        30,
-                        30,
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                )
-                drag.setHotSpot(QPoint(15, 15))
-                drag.exec(Qt.DropAction.MoveAction)
-                return
-        super().mouseMoveEvent(event)
-
-    def is_active(self, panel_id: str) -> bool:
-        for btn in self._btns:
-            if btn.panel_id == panel_id and btn.isChecked():
-                return True
-        return False
-
-    @property
-    def buttons(self) -> List[ActivityButton]:
-        return self._btns[:]
-
 
 # ═══════════════════════════════════════════════════════════════
 # DockPanelHelper — 面板管理工具函数
 # ═══════════════════════════════════════════════════════════════
 
-_WIDGET_PAD: dict[type, int] = {
-    QPushButton: 16,
-    QLabel: 4,
-    QComboBox: 10,
-    QCheckBox: 4,
-    QSpinBox: 8,
-    QLineEdit: 8,
-}
-_LEAF_TYPES = (QPushButton, QLabel, QComboBox, QCheckBox, QSpinBox, QLineEdit)
-
 
 class DockPanelHelper:
     """静态工具函数集合，用于面板管理操作。"""
-
-    @staticmethod
-    def _compute_min_width(widget: QWidget, padding: int = 18) -> int:
-        """递归计算 widget 子树中叶子控件实际需要的最小视觉宽度。"""
-        max_w = 0
-
-        def _walk(w: QWidget):
-            nonlocal max_w
-            if isinstance(w, QScrollArea):
-                inner = w.widget()
-                if inner is not None:
-                    _walk(inner)
-                return
-            direct = [c for c in w.children() if isinstance(c, QWidget)]
-            if direct and not isinstance(w, _LEAF_TYPES):
-                for child in direct:
-                    _walk(child)
-                return
-            hint = w.minimumSizeHint()
-            pw = hint.width()
-            if isinstance(w, QComboBox):
-                pw = max(
-                    w.fontMetrics().horizontalAdvance(
-                        w.itemText(0) if w.count() > 0 else ""
-                    )
-                    + 40,
-                    80,
-                )
-            if pw > 0:
-                pad = _WIDGET_PAD.get(type(w), 0)
-                candidate = pw + pad
-                if candidate > max_w:
-                    max_w = candidate
-
-        _walk(widget)
-        return max(max_w + padding, 60)
 
     @staticmethod
     def move_to_opposite_side(dock: QDockWidget, main_window):
@@ -355,7 +149,7 @@ class DockPanelHelper:
             main_window._single_column_container = splitter
             main_window._single_column_active = True
 
-        main_window._debounce_save_history()
+        main_window._schedule_settings_save()
 
     @staticmethod
     def build_panel_context_menu(
@@ -391,11 +185,11 @@ class DockPanelHelper:
 
 
 # ═══════════════════════════════════════════════════════════════
-# SnapIndicator — 导航组（章节 + 文本对）
+# RelationIndicator — 导航组（章节 + 文本对）
 # ═══════════════════════════════════════════════════════════════
 
 
-class SnapIndicator(QWidget):
+class RelationIndicator(QWidget):
     """四按钮导航组件：◀◀上一章 ◀上一条 下一条▶ 下一章▶▶"""
 
     # 章节导航

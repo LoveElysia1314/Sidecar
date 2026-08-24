@@ -215,4 +215,5 @@ token/短语覆盖码：
 - 收敛双模型输出：`.artifacts/research-converged-all.json`
 
 本文记录形成时这些改动仍在 experiments；收敛版本现已提升到
-`dualign.algorithms.mdl` 并接入生产。未收敛的上下文残差仍留在 experiments。
+`dualign.algorithms.mdl` 并接入生产。未采用的上下文残差实现已经删除，其实验定义、
+收益和反例归档在 `local-split-realignment-study.md`。

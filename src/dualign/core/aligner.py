@@ -1,34 +1,17 @@
-"""Public alignment API and algorithm selection.
-
-``mdl-v1`` is the production algorithm.  The retired anchor implementation is
-available only through the explicit ``legacy-anchor-v1`` selector; rejection
-by MDL never falls back to it.
-"""
+"""Public API for the production MDL alignment algorithm."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
 from dualign.version import __version__
-from dualign.core.legacy_anchor_aligner import (
-    LegacyAnchorConfig,
-    _normalize,
-    _smart_join_lines,
-    bilateral_trust_margin,
-    count_punct_info,
-    find_bilateral_anchors,
-    op_type_str,
-    pair_score,
-    select_monotonic_anchors_weighted,
-)
 
 Operation = Tuple[Tuple[int, ...], Tuple[int, ...], float]
 
 ALGORITHM_MDL_V1 = "mdl-v1"
-ALGORITHM_LEGACY_ANCHOR_V1 = "legacy-anchor-v1"
 ALIGN_CORE_VERSION = __version__
 ALIGN_CACHE_REVISION = "mdl-gated-composition.2"
 
@@ -42,7 +25,6 @@ class AlignConfig:
     an empty value asks the registry for the unique matching calibration.
     """
 
-    algorithm: str = ALGORITHM_MDL_V1
     calibration_id: str = ""
 
 
@@ -51,28 +33,13 @@ class AlignmentResult:
     """Uniform result contract for accepted, review and abstention outcomes."""
 
     all_ops: List[Operation]
-    anchors: List[Operation]
-    anchor_op_indices: Dict[int, str]
     stats: dict
-    sim_matrix: Optional[np.ndarray] = None
     status: str = "aligned"
     reason: str = ""
     gate: Optional[dict] = None
     uncertain_regions: tuple = ()
     alternative_ops: Optional[List[Operation]] = None
     algorithm: str = ALGORITHM_MDL_V1
-
-
-def _adapt_legacy(result) -> AlignmentResult:
-    return AlignmentResult(
-        all_ops=list(result.all_ops),
-        anchors=list(result.anchors),
-        anchor_op_indices=dict(result.anchor_op_indices),
-        stats=dict(result.stats),
-        sim_matrix=result.sim_matrix,
-        status="aligned",
-        algorithm=ALGORITHM_LEGACY_ANCHOR_V1,
-    )
 
 
 def _gate_payload(gate) -> dict:
@@ -92,50 +59,21 @@ def align(
     lines_b: List[str],
     embeddings_a: np.ndarray,
     embeddings_b: np.ndarray,
-    config: AlignConfig | LegacyAnchorConfig | None = None,
+    config: AlignConfig | None = None,
     encode_fn: Optional[Callable[[List[str]], np.ndarray]] = None,
     *,
     calibration=None,
     silent: bool = False,
 ) -> AlignmentResult:
-    """Align a document pair using the selected algorithm.
-
-    ``legacy-anchor-v1`` must be selected explicitly.  ``mdl-v1`` abstains
-    when calibration is absent or the statistical applicability gate rejects
-    the pair; it never manufactures a legacy result as a fallback.
-    """
+    """Align a document pair, abstaining when MDL is not applicable."""
 
     cfg = config or AlignConfig()
-    if isinstance(cfg, LegacyAnchorConfig):
-        algorithm = ALGORITHM_LEGACY_ANCHOR_V1
-    else:
-        algorithm = cfg.algorithm
-
-    if algorithm == ALGORITHM_LEGACY_ANCHOR_V1:
-        from dualign.core.legacy_anchor_aligner import align as legacy_align
-
-        legacy_cfg = (
-            cfg if isinstance(cfg, LegacyAnchorConfig) else LegacyAnchorConfig()
-        )
-        return _adapt_legacy(
-            legacy_align(
-                lines_a,
-                lines_b,
-                embeddings_a,
-                embeddings_b,
-                legacy_cfg,
-                encode_fn=encode_fn,
-                silent=silent,
-            )
-        )
-    if algorithm != ALGORITHM_MDL_V1:
-        raise ValueError(f"未知对齐算法: {algorithm}")
+    if not isinstance(cfg, AlignConfig):
+        raise TypeError("正式对齐 API 只接受 AlignConfig")
 
     if not lines_a or not lines_b:
         return AlignmentResult(
             all_ops=[],
-            anchors=[],
-            anchor_op_indices={},
             stats={"n_source": len(lines_a), "n_target": len(lines_b), "n_ops": 0},
             status="rejected",
             reason="empty_document",
@@ -144,8 +82,6 @@ def align(
     if calibration is None:
         return AlignmentResult(
             all_ops=[],
-            anchors=[],
-            anchor_op_indices={},
             stats={"n_source": len(lines_a), "n_target": len(lines_b), "n_ops": 0},
             status="rejected",
             reason="calibration_unavailable",
@@ -169,8 +105,6 @@ def align(
     if candidate.status.startswith("rejected_"):
         return AlignmentResult(
             all_ops=[],
-            anchors=[],
-            anchor_op_indices={},
             stats={
                 "n_source": len(lines_a),
                 "n_target": len(lines_b),
@@ -195,8 +129,6 @@ def align(
     }
     return AlignmentResult(
         all_ops=operations,
-        anchors=list(candidate.scaffold),
-        anchor_op_indices={},
         stats=stats,
         status=candidate.status,
         gate=gate,

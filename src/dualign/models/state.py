@@ -21,7 +21,7 @@ from dualign.models.marker import (
     is_resolved_to_11,
     needs_zero_score,
 )
-from dualign.core import op_type_str
+from dualign.core.text import op_type_str
 from dualign.models.relation_identity import normalize_relation_ids
 
 # ═══════════════════════════════════════════════════════════════
@@ -142,16 +142,6 @@ class RelationRow:
     marker: str = ""
     init_score_text: str = ""  # 捆绑编辑时多行分数文本
 
-    @property
-    def is_divider(self) -> bool:
-        """仅合并 [M] 的行之间需要虚线分隔。
-
-        委托给 marker.py 的 is_divider() 统一管理。
-        """
-        from dualign.models.marker import is_divider as _is_divider
-
-        return _is_divider(self.marker, self.sub)
-
 
 # ═══════════════════════════════════════════════════════════════
 # RelationGroup — 一个初始关系的当前状态
@@ -211,7 +201,7 @@ class RelationGroup:
         """
         new_cur = "1:1" if is_resolved_to_11(marker) else self.rows[0].cur_type
         zero_score = needs_zero_score(marker)
-        # [M]: 保留原始 n_src/n_tgt，让 _compute_spans 能正确判断少行侧的列跨行合并。
+        # [M]: 保留原始 n_src/n_tgt，让单元格投影能判断少行侧的列跨行合并。
         #      例如 2:1 → 译文列跨行，第 2 行继承译文文本。
         # [S]/[P]/[OK]: 逻辑上变为 1:1，各子行独立显示。
         if is_merge(marker):
@@ -257,12 +247,12 @@ class RelationGroup:
             rows=tuple(
                 RelationRow(
                     ordinal=self.ordinal,
-                    sub=0,
+                    sub=k,
                     init_type=it if k == 0 else "",
                     cur_type="1:1",
                     src_text=texts[k][0],
                     tgt_text=texts[k][1],
-                    score=(
+                    score=float(
                         scores[k] if k < len(scores) else (scores[0] if scores else osc)
                     ),
                     orig_score=osc,

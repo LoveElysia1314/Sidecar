@@ -21,7 +21,7 @@ def test_projection_separates_initial_segments_from_current_bundle():
         Row(0, 1, "snap 1\n1:0", 2, 1, "[M]"),
     ]
 
-    projection = project_table_cells(rows, col_offset=1, snap_col=0)
+    projection = project_table_cells(rows, col_offset=1, relation_col=0)
 
     assert (0, 1) not in projection.spans
     assert (0, 2) not in projection.spans
@@ -38,7 +38,7 @@ def test_projection_preserves_independent_current_edit_rows():
         Row(0, 1, "", 2, 2, "[E]"),
     ]
 
-    projection = project_table_cells(rows, col_offset=1, snap_col=0)
+    projection = project_table_cells(rows, col_offset=1, relation_col=0)
 
     assert projection.spans[(0, 0)] == (2, 1)
     assert projection.spans[(0, 1)] == (2, 1)
@@ -54,7 +54,7 @@ def test_identical_initial_labels_do_not_fuse_explicit_segments():
         Row(0, 1, "snap 0\n1:1", 2, 2, "[M]"),
     ]
 
-    projection = project_table_cells(rows, col_offset=1, snap_col=0)
+    projection = project_table_cells(rows, col_offset=1, relation_col=0)
 
     assert (0, 1) not in projection.spans
     assert (0, 2) not in projection.spans
@@ -67,7 +67,7 @@ def test_two_suggestions_for_same_snap_remain_separate_display_groups():
         Row(3, 0, "1:1", 1, 1, "[E]", (3, "proposal-b")),
     ]
 
-    projection = project_table_cells(rows, col_offset=1, snap_col=0)
+    projection = project_table_cells(rows, col_offset=1, relation_col=0)
 
     assert projection.spans[(0, 0)] == (2, 1)
     assert (0, 0) not in projection.covered_cells

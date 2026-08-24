@@ -1,4 +1,4 @@
-"""Counterfactual composition evidence for isolated MDL experiments.
+"""Counterfactual composition evidence for the production MDL solver.
 
 For a proposed N:1 or 1:N relation, encode the full multi-line block and its
 leave-one-line-out ablations.  The composition diagnostic asks whether the
@@ -8,8 +8,8 @@ atomic lines on the same document side.
 The diagnostic is converted to a finite Zipf rank code and used as a
 normalized change of measure over the existing atomic distribution.  This
 produces an additive bit correction without a score threshold or an arbitrary
-numeric multiplier.  Nothing in this module is wired into the production
-aligner.
+numeric multiplier.  The pipeline compares two defensible codes and exposes
+their path disagreements for review instead of hiding model uncertainty.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from typing import Callable
 
 import numpy as np
 
-from dualign.core import _smart_join_lines
+from dualign.core.text import smart_join_lines as _smart_join_lines
 from dualign.algorithms.mdl.mdl_aligner import (
     Operation,
     _elias_delta_length,

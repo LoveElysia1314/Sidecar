@@ -45,7 +45,7 @@ def current_relation_is_group_scoped(rows: Iterable) -> bool:
 
 
 def _initial_segments(rows, start: int, end: int) -> list[tuple[int, int]]:
-    """Recover original-snap segments from their explicit anchor labels."""
+    """Recover initial relation segments from their explicit anchor labels."""
     result: list[tuple[int, int]] = []
     cursor = start
     while cursor < end:
@@ -74,12 +74,12 @@ def project_table_cells(
     rows: list,
     *,
     col_offset: int = 0,
-    snap_col: int | None = None,
+    relation_col: int | None = None,
 ) -> TableCellProjection:
     """Project row data to cell owners, spans, coverage and merge boundaries."""
     column_count = 6 + col_offset
-    if snap_col is not None:
-        column_count = max(column_count, snap_col + 1)
+    if relation_col is not None:
+        column_count = max(column_count, relation_col + 1)
 
     # A unique default owner keeps unrelated row cells independent even when
     # their displayed values happen to be identical.
@@ -94,10 +94,10 @@ def project_table_cells(
         while j < len(rows) and _display_group_key(rows[j]) == group_key:
             j += 1
 
-        if snap_col is not None:
+        if relation_col is not None:
             owner = ("relation", i)
             for row in range(i, j):
-                owners[row][snap_col] = owner
+                owners[row][relation_col] = owner
 
         for segment_start, segment_end in _initial_segments(rows, i, j):
             for semantic_col in (INITIAL_TYPE, INITIAL_SCORE):

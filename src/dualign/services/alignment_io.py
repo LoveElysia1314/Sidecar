@@ -22,11 +22,6 @@ def document_sha256(path: str | Path) -> str:
     return document_sha256_from_text(Path(path).read_text(encoding="utf-8-sig"))
 
 
-def segment_content_lines(text: str) -> tuple[str, ...]:
-    normalized = normalize_document_text(text)
-    return tuple(line for line in normalized.split("\n") if line.strip())
-
-
 def relative_document_path(document_path: Path, report_path: Path) -> str:
     try:
         relative = os.path.relpath(

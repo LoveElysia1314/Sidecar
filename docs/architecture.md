@@ -24,7 +24,7 @@ chapter.report.json
 - 两份源文档的规范化 SHA-256；
 - 对齐模型、算法和非敏感配置来源；
 - 带稳定关系 ID 的不可变初始关系 `ops`；
-- 以稳定关系 ID 为身份、保留位置字段兼容旧实现的 `repair_log`；
+- 只以稳定关系 ID 持久化身份的 `repair_log`；
 - AI 建议、人工审核状态、评分和固化历史。
 
 报告不复制完整正文。每条 `ops` 关系保存 `id/s/t/sc`；旧报告缺少 `id` 时按原顺序派生兼容 ID。新报告中的修复动作只持久化 `relation_ids`；`op_index/operation_indices/data.orig_snaps` 只在读取旧报告时用于恢复身份，写回时删除。运行期 `operation_indices` 是由当前关系顺序派生的临时投影。回放层使用 `RelationGroup(relation_id, ordinal, rows)`：ID 是身份，ordinal 只是当前快照地址。`RepairState` 总是从原始关系重放操作，因此编辑、撤销和重新编辑不会造成后续关系身份漂移。源文档哈希或模型配置不匹配时，报告失效并要求重新对齐。
@@ -33,6 +33,23 @@ chapter.report.json
 
 报告序列化只由 `report_io` 负责。运行期 `AlignmentSnapshot/RepairState` 不提供另一套
 `to_dict/from_dict` 快照格式，避免内部撤销状态和正式报告演变成两个可持久化权威来源。
+
+“snap”不再是关系、表格或 AI 工具的领域概念。持久身份统一称 `relation_id`，当前顺序统一称
+`ordinal`，界面和 Agent 均显示“关系 N”。`AlignmentSnapshot` 只表示对齐完成时不可变的正文与
+关系基线；底部面板的 snap point 只表示物理吸附档位。旧报告中的 `orig_snaps`、旧评分键和旧
+Agent 参数名仅在各自读取边界接受，进入运行状态后立即投影成关系身份或序号。
+
+## 算法包边界
+
+`dualign.algorithms.mdl` 是生产求解器；`dualign.core.aligner` 只负责正式结果契约与统计门控，
+不再导入、适配或导出 legacy 算法。冻结的 `legacy_anchor_aligner` 仅由显式
+`legacy-anchor-v1` CLI/benchmark 分支惰性加载，
+不会作为 MDL 拒绝后的回退，也不再向 `dualign.core` 公开锚点阈值、归一化或候选内部函数。
+生产与归档算法共用的关系类型标签和文本拼接位于 `dualign.core.text`，因此生产运行期不依赖
+legacy 实现细节。
+`LegacyAnchorConfig` 和旧质量诊断也不从 `dualign.core` / `dualign.services` 聚合 API 导出；需要
+回归旧算法的代码必须显式导入归档模块；正式 `AlignConfig` 不再含算法选择字段，`align()`
+传入其他配置类型会直接报错。
 
 ## 保存与固化
 

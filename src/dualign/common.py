@@ -6,7 +6,7 @@ import hashlib
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any
 
 
 def content_hash(lines: list) -> str:
@@ -71,11 +71,6 @@ class FilePair:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class FileListProvider:
-    def list_entries(self) -> List[FilePair]:
-        raise NotImplementedError
-
-
 def load_text_lines(path: str) -> list[str]:
     """Load non-empty content lines, matching content-line segmentation."""
 
@@ -90,25 +85,3 @@ def format_markdown_output(lines: list[str]) -> str:
     """Serialize logical reader rows with unambiguous blank separators."""
 
     return "\n\n".join(lines) + ("\n" if lines else "")
-
-
-def save_report(report_data: dict, path: str) -> None:
-    from dualign.services.report_io import save_report as _save_report
-
-    _save_report(report_data, path)
-
-
-def load_report(path: str) -> Optional[dict]:
-    if not os.path.isfile(path):
-        return None
-    from dualign.services.report_io import load_report as _load_report
-
-    return _load_report(path)
-
-
-def set_ai_review(path: str, status: str, note: str = ""):
-    if not os.path.isfile(path):
-        return None
-    from dualign.services.report_io import set_ai_review as _set_ai_review
-
-    return _set_ai_review(path, status, note)

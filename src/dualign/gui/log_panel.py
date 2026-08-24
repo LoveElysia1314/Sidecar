@@ -147,7 +147,7 @@ class LogPanel(QWidget):
     # ── 公开接口 ──
 
     def log(self, message: str, role: str = "info"):
-        """追加一条旧版日志（兼容现有调用）。
+        """追加一条面向用户的状态日志。
 
         Args:
             message: 纯文本消息（自动 HTML 转义）

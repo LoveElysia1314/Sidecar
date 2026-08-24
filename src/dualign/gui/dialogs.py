@@ -1,12 +1,8 @@
-"""
-Dualign — 对话框组件
-
-ConfigDialog, BlockEditDialog, FileListPanel and solidification dialogs.
-"""
+"""Dualign editing, configuration, and solidification dialogs."""
 
 from __future__ import annotations
 
-from typing import List, Optional, Any
+from typing import List, Optional
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QEvent, QRect, QSize, Signal
@@ -24,10 +20,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QWidget,
     QDoubleSpinBox,
-    QTreeWidget,
-    QTreeWidgetItem,
     QListWidget,
-    QListWidgetItem,
     QFormLayout,
     QLineEdit,
     QComboBox,
@@ -37,44 +30,6 @@ from PySide6.QtWidgets import (
 _DEFAULT_EMBEDDING_INSTRUCTION = (
     "Instruct: Identify parallel sentences across languages\nQuery: "
 )
-
-# ═══════════════════════════════════════════════════════════════
-# ConfigDialog — 对齐参数设置
-# ═══════════════════════════════════════════════════════════════
-
-
-class ConfigDialog(QDialog):
-    """对齐参数设置对话框。"""
-
-    config_applied = Signal(object)  # 发出新的 AlignConfig
-
-    def __init__(self, current_config=None, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("对齐参数设置")
-        self.setMinimumWidth(300)
-        self._build_ui(current_config)
-
-    def _build_ui(self, config):
-        layout = QVBoxLayout(self)
-
-        form = QFormLayout()
-
-        layout.addLayout(form)
-
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        btns.accepted.connect(self._on_accept)
-        btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
-
-    def _on_accept(self):
-        from dualign.core import AlignConfig
-
-        cfg = AlignConfig()
-        self.config_applied.emit(cfg)
-        self.accept()
-
 
 # ═══════════════════════════════════════════════════════════════
 # AgentConfigDialog — 嵌入模型 + AI 修复 Agent 配置
@@ -985,48 +940,6 @@ class BlockEditDialog(QDialog):
         self.accept()
 
 
-class ChangeReviewDialog(QDialog):
-    """Preview document/relation diffs before applying canonical changes."""
-
-    def __init__(self, changes, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("审查并应用已确认更改")
-        self.resize(980, 680)
-
-        layout = QVBoxLayout(self)
-        summary = (
-            f"正文变更 {changes.content_action_count} 项，关系操作 "
-            f"{changes.relation_action_count} 项。"
-        )
-        label = QLabel(summary)
-        label.setWordWrap(True)
-        label.setStyleSheet("font-weight:600;color:#2E7D32;")
-        layout.addWidget(label)
-
-        tabs = QTabWidget()
-        for title, content in (
-            ("文档 A", changes.document_a_diff()),
-            ("文档 B", changes.document_b_diff()),
-            ("对齐关系", changes.relation_diff()),
-        ):
-            editor = QPlainTextEdit(content or "（无变化）")
-            editor.setReadOnly(True)
-            editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-            tabs.addTab(editor, title)
-        layout.addWidget(tabs, 1)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save
-            | QDialogButtonBox.StandardButton.Cancel
-        )
-        apply_button = buttons.button(QDialogButtonBox.StandardButton.Save)
-        apply_button.setText("应用已确认更改")
-        apply_button.setEnabled(changes.can_apply)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-
 class SolidifyPolicyDialog(QDialog):
     """Shared solidification policy editor for Dualign and integrating apps."""
 
@@ -1163,148 +1076,6 @@ class SolidifyReviewDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-
-
-# ═══════════════════════════════════════════════════════════════
-# FileListPanel — 文件列表（树状/平铺，无文件时显示提示）
-# ═══════════════════════════════════════════════════════════════
-
-
-class FileListPanel(QWidget):
-    """文件列表面板：包裹在"文件列表"组中，支持树状/平铺切换。"""
-
-    entry_selected = Signal(object)  # 发出 ChapterEntry
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._entries: List[Any] = []
-        self._mode: str = "single"  # "single" | "tree" | "list"
-        self._build_ui()
-
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self._group = QGroupBox("文件列表")
-        gl = QVBoxLayout(self._group)
-        gl.setContentsMargins(4, 10, 4, 4)
-        gl.setSpacing(3)
-
-        # 视图模式切换 + 标题栏
-        top_row = QHBoxLayout()
-        top_row.setSpacing(4)
-        self._mode_combo = QComboBox()
-        self._mode_combo.addItems(["文档列表", "树状视图"])
-        self._mode_combo.setCurrentIndex(0)
-        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
-        top_row.addWidget(QLabel("模式:"))
-        top_row.addWidget(self._mode_combo, 1)
-        self._pos_lbl = QLabel("")
-        top_row.addWidget(self._pos_lbl)
-        gl.addLayout(top_row)
-
-        # 树状视图
-        self._tree = QTreeWidget()
-        self._tree.setHeaderHidden(True)
-        self._tree.itemClicked.connect(self._on_item_clicked)
-        gl.addWidget(self._tree)
-
-        # 列表视图
-        self._list = QListWidget()
-        self._list.itemClicked.connect(self._on_list_item_clicked)
-        gl.addWidget(self._list)
-
-        # 单文件提示
-        self._single_lbl = QLabel("仅加载了单文档对，未传递文件列表。")
-        self._single_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._single_lbl.setWordWrap(True)
-        gl.addWidget(self._single_lbl)
-
-        layout.addWidget(self._group)
-
-        # 初始状态：无条目时显示提示
-        self._refresh_view()
-
-    def _refresh_view(self):
-        """根据 _entries 和 _mode 显示对应视图。"""
-        has_entries = bool(self._entries)
-        is_tree = self._mode_combo.currentIndex() == 1
-
-        self._tree.setVisible(has_entries and is_tree)
-        self._list.setVisible(has_entries and not is_tree)
-        self._single_lbl.setVisible(not has_entries)
-
-        # 更新位置标签
-        self._pos_lbl.setVisible(has_entries)
-
-    def set_entries(self, entries: List[Any]):
-        """设置文件列表。空列表则进入单文件模式。"""
-        self._entries = entries
-        self._tree.clear()
-        self._list.clear()
-
-        for entry in entries:
-            label = getattr(entry, "label", str(entry))
-            # 树状
-            ti = QTreeWidgetItem([label])
-            ti.setData(0, Qt.ItemDataRole.UserRole, entry)
-            self._tree.addTopLevelItem(ti)
-            # 列表
-            li = QListWidgetItem(label)
-            li.setData(Qt.ItemDataRole.UserRole, entry)
-            self._list.addItem(li)
-
-        self._refresh_view()
-
-    def set_current(self, entry: Any):
-        """高亮当前条目。"""
-        self._tree.clearSelection()
-        self._list.clearSelection()
-
-        if entry is None or not self._entries:
-            self._pos_lbl.setText("")
-            return
-
-        # 找索引
-        try:
-            idx = self._entries.index(entry)
-        except ValueError:
-            idx = -1
-
-        if idx >= 0:
-            # 树状
-            for i in range(self._tree.topLevelItemCount()):
-                item = self._tree.topLevelItem(i)
-                if item is not None and item.data(0, Qt.ItemDataRole.UserRole) == entry:
-                    self._tree.setCurrentItem(item)
-                    break
-            # 列表
-            for i in range(self._list.count()):
-                item = self._list.item(i)
-                if item is not None and item.data(Qt.ItemDataRole.UserRole) == entry:
-                    self._list.setCurrentItem(item)
-                    break
-            # 位置标签
-            self._pos_lbl.setText(f"{idx + 1}/{len(self._entries)}")
-
-    def _on_mode_changed(self, idx: int):
-        """平铺/树状切换。"""
-        self._refresh_view()
-        # 当前选中条目在新视图中高亮
-        if self._entries and hasattr(self, "_current_entry"):
-            self.set_current(self._current_entry)
-
-    def _on_item_clicked(self, item: QTreeWidgetItem, col: int):
-        entry = item.data(0, Qt.ItemDataRole.UserRole)
-        if entry is not None:
-            self._current_entry = entry
-            self.entry_selected.emit(entry)
-
-    def _on_list_item_clicked(self, item: QListWidgetItem):
-        entry = item.data(Qt.ItemDataRole.UserRole)
-        if entry is not None:
-            self._current_entry = entry
-            self.entry_selected.emit(entry)
 
 
 # ═══════════════════════════════════════════════════════════════

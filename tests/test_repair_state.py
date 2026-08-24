@@ -14,11 +14,11 @@ from dualign.services.repair import (
     SPLIT_FAILURE_UNSPLITTABLE,
     normalize_repair_log,
     review_flags_for_uncertain_regions,
-    compute_spans,
     current_score_slot_exists,
     current_score_texts,
     make_table_view,
 )
+from dualign.services.table_projection import project_table_cells
 
 
 @pytest.fixture
@@ -317,8 +317,9 @@ class TestRelationGroup:
 
     def test_with_text_immutable(self, simple_snapshot):
         g = RelationGroup.from_snapshot(0, simple_snapshot)
-        g2 = g.with_text([("new_src", "new_tgt")], [0.99], "[E]")
+        g2 = g.with_text([("new_src", "new_tgt"), ("second", "第二")], [0.99], "[E]")
         assert g2.rows[0].src_text == "new_src"
+        assert [row.sub for row in g2.rows] == [0, 1]
 
     def test_row_frozen(self):
         row = RelationRow(
@@ -464,7 +465,7 @@ class TestRenderRows:
 
     def test_native_asymmetric_relation_uses_one_current_score(self, multi_state):
         view = make_table_view(multi_state)
-        spans = compute_spans(view.rows, col_offset=1, snap_col=0)
+        spans = project_table_cells(view.rows, col_offset=1, relation_col=0).spans
 
         # snap1 starts at table row 1 and is a native 2:1 relation.
         assert spans[(1, 3)] == (2, 1)
@@ -486,7 +487,7 @@ class TestRenderRows:
         )
         repaired = RepairService.repair_bundle_relations(RepairState(snapshot), [0, 1])
         view = make_table_view(repaired)
-        spans = compute_spans(view.rows, col_offset=1, snap_col=0)
+        spans = project_table_cells(view.rows, col_offset=1, relation_col=0).spans
 
         assert [(r.n_src, r.n_tgt) for r in view.rows] == [(2, 1), (2, 1)]
         assert (0, 1) not in spans  # 两个独立的初始类型
@@ -508,7 +509,7 @@ class TestRenderRows:
         )
         view = make_table_view(repaired)
         bundle_rows = [r for r in view.rows if r.ordinal == 0]
-        spans = compute_spans(bundle_rows, col_offset=1, snap_col=0)
+        spans = project_table_cells(bundle_rows, col_offset=1, relation_col=0).spans
 
         assert (0, 3) not in spans
         assert (0, 4) not in spans
@@ -601,21 +602,6 @@ class TestRenderRows:
         # [D]skip snap0 + bundle snap1+snap2=1行 + snap3(2) = 3
         assert len(src) == 3, f"expect 3 rows, got {len(src)}"
         assert src[0] == "B C D", f"delete+merge src mismatch: {src[0]!r}"
-
-    def test_render_rows_to_files(self, multi_state, tmp_path):
-        """render_to_files 将文本写入文件。"""
-        import os
-
-        spath = os.path.join(tmp_path, "test.src.md")
-        tpath = os.path.join(tmp_path, "test.tgt.md")
-        repaired = RepairService.repair_merge(multi_state, 1)
-        RepairService.render_to_files(repaired, spath, tpath)
-        assert os.path.isfile(spath)
-        assert os.path.isfile(tpath)
-        with open(spath) as f:
-            content = f.read()
-        assert "A" in content
-        assert "B C" in content
 
     def test_render_after_full_reset(self, multi_state):
         """重置所有操作后文本恢复原始。"""

@@ -64,7 +64,7 @@ from dualign.services.ai_repair_agent import (
     AgentEvent,
     MaxTurnsExceeded,
 )
-from dualign.gui.theme import T, FG_SECONDARY, disabled_fg
+from dualign.gui.theme import T, disabled_fg
 
 if TYPE_CHECKING:
     from dualign.gui.window import DualignWindow
@@ -180,7 +180,7 @@ class AgentRunThread(QThread):
 class ReviewController(QWidget):
     """审校面板 + AI 校订控制器。
 
-    定位器以初始文本对（snap_indices）为单元。
+    定位器以初始对齐关系（ordinals）为单元。
     操作按钮根据 valid_operations 动态启用/禁用。
     """
 
@@ -188,7 +188,6 @@ class ReviewController(QWidget):
     next_chapter_requested = Signal()
     prev_chapter_requested = Signal()
     action_requested = Signal(object)  # RepairAction — AI 建议被采纳
-    batch_progress = Signal(str, str)  # (role, text)
     batch_finished = Signal()
     ai_error = Signal(str)  # AI 校订错误 → 窗口写入 ai_review
     actions_updated = Signal()
@@ -214,12 +213,10 @@ class ReviewController(QWidget):
         self._backend = "deepseek"
         self._auto_approve_enabled = False
         self._batch_mode = False
-        self._agent_turn = 0
         self._active_threads: list = []
         # 焦点跟踪：当前聚焦的 AI 建议
         self._focused_action: Optional[RepairAction] = None
         self._suggestions: list[AiSuggestionItem] = []
-        self._clearing_focus = False  # 防重入标志
         # ── 内嵌筛选面板（不再从外部注入）──
         self._filter_panel = FilterPanel()
         self._filter_panel.filter_changed.connect(self._on_filter_changed)
@@ -253,7 +250,7 @@ class ReviewController(QWidget):
         w = self._window
         if w is not None:
             w._apply_filter()
-            w._debounce_save_history()
+            w._schedule_settings_save()
 
     @property
     def filter_panel(self) -> FilterPanel:
@@ -307,7 +304,7 @@ class ReviewController(QWidget):
         self._ai_empty_lbl = QLabel("")
         self._ai_empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._ai_empty_lbl.setStyleSheet(
-            f"color:{FG_SECONDARY}; font-size:12px; padding:20px;"
+            f"color:{T.FG_SECONDARY}; font-size:12px; padding:20px;"
         )
         self._ai_empty_lbl.setVisible(False)
         layout.addWidget(self._ai_empty_lbl)
@@ -315,7 +312,7 @@ class ReviewController(QWidget):
         return panel
 
     def _on_ai_table_row_clicked(self, item):
-        """预览表行点击 → 展开未显示的 snap 后定位。"""
+        """预览表行点击 → 展开未显示的关系后定位。"""
         row = item.row()
         items = getattr(self._preview_table, "_items", [])
         if row < len(items):
@@ -351,7 +348,6 @@ class ReviewController(QWidget):
                 f'text-decoration:none;">{src_name}</a>'
             )
             self._summary_src.setToolTip(src_path)
-            self._summary_src._path = src_path
         if hasattr(self, "_summary_tgt"):
             self._summary_tgt.setText(
                 '<span style="color:palette(text);">文档 B：</span>'
@@ -359,7 +355,6 @@ class ReviewController(QWidget):
                 f'text-decoration:none;">{tgt_name}</a>'
             )
             self._summary_tgt.setToolTip(tgt_path)
-            self._summary_tgt._path = tgt_path
 
     def set_summary_cells(self, *cells):
         """设置 6 格摘要文本，按 (row0col0, row0col1, row0col2, row1col0, row1col1, row1col2) 顺序。
@@ -417,7 +412,6 @@ class ReviewController(QWidget):
         self._summary_src.setStyleSheet(
             "font-size:11px;border:none;background:transparent;font-weight:600;"
         )
-        self._summary_src._path = ""
         self._summary_src.linkActivated.connect(self._on_summary_link)
         sg.addWidget(self._summary_src, 0, 0, 1, 3)
 
@@ -430,7 +424,6 @@ class ReviewController(QWidget):
         self._summary_tgt.setStyleSheet(
             "font-size:11px;border:none;background:transparent;font-weight:600;"
         )
-        self._summary_tgt._path = ""
         self._summary_tgt.linkActivated.connect(self._on_summary_link)
         sg.addWidget(self._summary_tgt, 1, 0, 1, 3)
 
@@ -527,14 +520,14 @@ class ReviewController(QWidget):
         nl = QVBoxLayout(g_nav)
         nl.setContentsMargins(4, 4, 4, 4)
 
-        from dualign.gui.panels import SnapIndicator
+        from dualign.gui.panels import RelationIndicator
 
-        self._snap_indicator = SnapIndicator()
-        self._snap_indicator.go_prev.connect(self._go_prev)
-        self._snap_indicator.go_next.connect(self._go_next)
-        self._snap_indicator.prev_chapter.connect(self.prev_chapter_requested.emit)
-        self._snap_indicator.next_chapter.connect(self.next_chapter_requested.emit)
-        nl.addWidget(self._snap_indicator)
+        self._relation_indicator = RelationIndicator()
+        self._relation_indicator.go_prev.connect(self._go_prev)
+        self._relation_indicator.go_next.connect(self._go_next)
+        self._relation_indicator.prev_chapter.connect(self.prev_chapter_requested.emit)
+        self._relation_indicator.next_chapter.connect(self.next_chapter_requested.emit)
+        nl.addWidget(self._relation_indicator)
         layout.addWidget(g_nav)
 
         # ── 校订操作（4 列网格，2 行，按钮带彩色操作标记）──
@@ -730,9 +723,9 @@ class ReviewController(QWidget):
     # ── 预览模式 ──
 
     def set_preview_mode(self, active: bool):
-        """预览模式：禁用依赖 snap 的控件组（灰显），不隐藏。
+        """预览模式：禁用依赖关系投影的控件组（灰显），不隐藏。
 
-        预览模式按原始行平坦排列，无 snap 概念，
+        预览模式按原始行平坦排列，无关系投影，
         校订操作 / AI 审校 / 导航 / 筛选全部不可用。
         """
         enabled = not active
@@ -750,9 +743,9 @@ class ReviewController(QWidget):
             btn = self._btn_refs.get(key)
             if btn:
                 btn.setEnabled(enabled)
-        # 章节和文本对导航（文本对按钮在 SnapIndicator 内已处理）
-        if hasattr(self, "_snap_indicator"):
-            self._snap_indicator.set_preview_mode(active)
+        # 章节和文本对导航（文本对按钮在 RelationIndicator 内已处理）
+        if hasattr(self, "_relation_indicator"):
+            self._relation_indicator.set_preview_mode(active)
         # AI 审校组
         for ref in (
             "_ai_review_btn",
@@ -788,12 +781,12 @@ class ReviewController(QWidget):
     def set_anomalies(
         self, anomalies: List[RelationAnomaly], preserve_position: bool = True
     ):
-        old_snap = self._cur_snap_i()
+        old_ordinal = self._current_ordinal()
         self._anomalies = anomalies
 
-        if preserve_position and old_snap is not None:
+        if preserve_position and old_ordinal is not None:
             for i, anomaly in enumerate(anomalies):
-                if old_snap in anomaly.ordinals:
+                if old_ordinal in anomaly.ordinals:
                     self._current_idx = i
                     break
             else:
@@ -803,19 +796,19 @@ class ReviewController(QWidget):
 
         self._update_display()
 
-    def show_browsing(self, snap_indices: List[int]):
-        """进入浏览模式：更新 StatusBar snap/位置，不触发表格滚动。"""
+    def show_browsing(self, ordinals: List[int]):
+        """进入浏览模式：更新关系位置，不触发表格滚动。"""
         self._current_idx = -1
         sb = getattr(self._window, "_status_bar", None) if self._window else None
         if sb:
             pos_text = (
                 "—"
-                if not snap_indices
+                if not ordinals
                 else "-/" + str(len(self._anomalies) if self._anomalies else 0)
             )
             sb.set_pos(pos_text)
-        if snap_indices:
-            self._update_browse_button_states(snap_indices[0])
+        if ordinals:
+            self._update_browse_button_states(ordinals[0])
 
     # ═══════════════════════════════════════════════════════════
     # 撤销/恢复（委托给主窗口）
@@ -831,37 +824,37 @@ class ReviewController(QWidget):
 
     # ── 浏览模式按钮状态 ──
 
-    def _update_browse_button_states(self, snap_i: int):
-        """浏览模式下基于 snap 内容动态启用操作按钮。"""
+    def _update_browse_button_states(self, ordinal: int):
+        """浏览模式下基于关系内容动态启用操作按钮。"""
         w = self._window
         if w is None or w._repair_state is None:
             self._disable_all_buttons()
             return
-        snap = w._repair_state.snapshot
-        if snap_i >= len(snap.original_ops):
+        snapshot = w._repair_state.snapshot
+        if ordinal >= len(snapshot.original_ops):
             self._disable_all_buttons()
             return
-        s_idx, t_idx, _ = snap.original_ops[snap_i]
+        s_idx, t_idx, _ = snapshot.original_ops[ordinal]
         ls, lt = len(s_idx), len(t_idx)
 
         # 从 valid_operations 获取基础可用性
         from dualign.services.repair import RepairService
 
-        ops = RepairService.valid_operations(w._repair_state, snap_i)
+        ops = RepairService.valid_operations(w._repair_state, ordinal)
 
         predicted = self._predict_auto_action(ls, lt, getattr(w, "_strategy", "src"))
 
         for key, btn in self._btn_refs.items():
             if key == "merge":
                 # 多选始终可用；单选由 valid_operations 决定
-                sel = self._sel_snaps()
+                sel = self._selected_ordinals()
                 enabled = ops.get(key, False) or len(sel) > 1
             elif key == "split":
                 enabled = ops.get("split_tgt", False) or ops.get("split_src", False)
             elif key == "edit":
                 enabled = ops.get("edit", False)
             elif key == "ok":
-                sel = self._sel_snaps()
+                sel = self._selected_ordinals()
                 enabled = ops.get("ok", False) or any(
                     RepairService.valid_operations(w._repair_state, si).get("ok", False)
                     for si in sel
@@ -869,10 +862,10 @@ class ReviewController(QWidget):
             elif key == "flag":
                 enabled = True  # 始终可标记
             elif key == "delete":
-                sel = self._sel_snaps()
+                sel = self._selected_ordinals()
                 enabled = ops.get("delete", False) or len(sel) > 1
             elif key == "placeholder":
-                sel = self._sel_snaps()
+                sel = self._selected_ordinals()
                 enabled = ops.get("placeholder", False) or any(
                     RepairService.valid_operations(w._repair_state, si).get(
                         "placeholder", False
@@ -907,16 +900,16 @@ class ReviewController(QWidget):
             return self._anomalies[self._current_idx]
         return None
 
-    def _cur_snap_indices(self) -> List[int]:
+    def _current_ordinals(self) -> List[int]:
         a = self._cur_anomaly()
         if a is None:
             return []
         return list(a.ordinals)
 
-    def _cur_snap_i(self) -> Optional[int]:
-        snaps = self._cur_snap_indices()
-        if snaps:
-            return snaps[0]
+    def _current_ordinal(self) -> Optional[int]:
+        ordinals = self._current_ordinals()
+        if ordinals:
+            return ordinals[0]
         # 异常列表无对应行时回退到表格选中
         w = self._window
         if w is not None:
@@ -924,42 +917,26 @@ class ReviewController(QWidget):
             return sel[0] if sel else None
         return None
 
-    def _sel_snaps(self) -> List[int]:
-        """表格选中的 snap 索引（从 window 的统一选中管理读取）。"""
+    def _selected_ordinals(self) -> List[int]:
+        """读取窗口统一选择管理器中的关系序号。"""
         w = self._window
         if w is None:
             return []
         return sorted(w.selected_ordinals)
-
-    def _cur_op(self):
-        """返回 (snap_indices, total_n_src, total_n_tgt)。"""
-        w = self._window
-        if w is None or w._repair_state is None:
-            return [], -1, -1
-        snaps = self._cur_snap_indices()
-        if not snaps:
-            return [], -1, -1
-        snap = w._repair_state.snapshot
-        total_src, total_tgt = 0, 0
-        for si in snaps:
-            s_idx, t_idx, _ = snap.original_ops[si]
-            total_src += len(s_idx)
-            total_tgt += len(t_idx)
-        return snaps, total_src, total_tgt
 
     # ── StatusBar 更新助手 ──
 
     def _update_status_bar(self):
         """将当前状态推送到 StatusBar。
 
-        文件名和章节进度已移至文档摘要，此处仅更新定位区和 snap 区。
+        文件名和章节进度已移至文档摘要，此处仅更新关系定位区。
         """
         w = self._window
         if w is None or w._status_bar is None:
             return
         sb = w._status_bar
 
-        # snap + 位置
+        # 当前关系 + 异常位置
         a = self._cur_anomaly()
         if a:
             sb.set_pos(f"{self._current_idx+1}/{len(self._anomalies)}")
@@ -969,15 +946,15 @@ class ReviewController(QWidget):
     def _update_display(self):
         a = self._cur_anomaly()
         if a is None:
-            self._snap_indicator.set_enabled(False, False)
+            self._relation_indicator.set_enabled(False, False)
             self._disable_all_buttons()
             self._update_status_bar()
             return
 
         total = len(self._anomalies)
 
-        # ── SnapIndicator: 仅控制按钮启用 ──
-        self._snap_indicator.set_enabled(
+        # ── RelationIndicator: 仅控制按钮启用 ──
+        self._relation_indicator.set_enabled(
             self._current_idx > 0, self._current_idx < total - 1
         )
 
@@ -988,20 +965,20 @@ class ReviewController(QWidget):
         self._update_button_states()
 
     # ═══════════════════════════════════════════════════════════
-    # _compute_star — 委托给 table.py has_snap_text_changed
+    # _compute_star — 委托给 base_table.relation_text_changes
     # ═══════════════════════════════════════════════════════════
 
     @staticmethod
     def _compute_star(action, snapshot) -> tuple[bool, bool]:
         """计算该 action 的 src/tgt 侧是否应当标星。
 
-        委托给 base_table 的 has_snap_text_changed，统一逻辑。
+        委托给 base_table 的 relation_text_changes，统一逻辑。
         """
         if action is None or snapshot is None:
             return False, False
-        from dualign.gui.base_table import has_snap_text_changed
+        from dualign.gui.base_table import relation_text_changes
 
-        return has_snap_text_changed(action.ordinal, action, snapshot)
+        return relation_text_changes(action.ordinal, action, snapshot)
 
     def _rebuild_ai_suggestions(self):
         """重建 AI 建议表格。每条建议通过 replay 引擎计算执行后预览文本。"""
@@ -1094,7 +1071,7 @@ class ReviewController(QWidget):
                         init_tgt_text=ini_tgt,
                     )
                 )
-            # ── 计算星标：与主表 has_snap_text_changed 统一逻辑 ──
+            # ── 计算星标：与主表 relation_text_changes 统一逻辑 ──
             star_src, star_tgt = self._compute_star(action, snapshot)
             for si in sub_items:
                 si.star_src = star_src
@@ -1157,7 +1134,7 @@ class ReviewController(QWidget):
         self._suggestions = items
 
         # 重建后恢复高亮：从 FocusManager.focused_ordinal 恢复，
-        # 而非 self._focused_action（后者可能来自旧建议而非当前点击的 snap）。
+        # 而非 self._focused_action（后者可能来自旧建议而非当前点击的关系）。
         w = self._window
         if w and hasattr(w, "_focus") and w._focus.focused_ordinal is not None:
             self.focus_relation_ai(w._focus.focused_ordinal)
@@ -1191,8 +1168,8 @@ class ReviewController(QWidget):
         base = repair_state if repair_state else RepairState(snapshot)
         temp_state = base.apply(action)
         view = make_table_view(temp_state)
-        snap_rows = [r for r in view.rows if r.ordinal == action.ordinal]
-        if not snap_rows:
+        relation_rows = [r for r in view.rows if r.ordinal == action.ordinal]
+        if not relation_rows:
             return None
         return [
             (
@@ -1205,7 +1182,7 @@ class ReviewController(QWidget):
                 r.n_src,
                 r.n_tgt,
             )
-            for r in snap_rows
+            for r in relation_rows
         ]
 
     @staticmethod
@@ -1229,14 +1206,14 @@ class ReviewController(QWidget):
         if w is None or w._repair_state is None:
             self._disable_all_buttons()
             return
-        snap_i = self._cur_snap_i()
-        if snap_i is None:
+        ordinal = self._current_ordinal()
+        if ordinal is None:
             self._disable_all_buttons()
             return
 
         from dualign.services.repair import RepairService
 
-        ops = RepairService.valid_operations(w._repair_state, snap_i)
+        ops = RepairService.valid_operations(w._repair_state, ordinal)
 
         for key, btn in self._btn_refs.items():
             if key == "split":
@@ -1244,7 +1221,7 @@ class ReviewController(QWidget):
             elif key == "suggest":
                 enabled = True
             elif key == "merge":
-                sel = self._sel_snaps()
+                sel = self._selected_ordinals()
                 enabled = ops.get(key, False) or len(sel) > 1
             else:
                 enabled = ops.get(key, False)
@@ -1284,97 +1261,97 @@ class ReviewController(QWidget):
 
     def _do_and_advance(self, action_fn):
         """执行操作，若勾选了修复后跳转则移至下一处。"""
-        old_snap = self._cur_snap_i()
+        old_ordinal = self._current_ordinal()
         action_fn()
-        # 操作可能刷新了 _anomalies，检查当前 snap 是否还在
+        # 操作可能刷新了 _anomalies，检查当前关系是否还在
         if (
             self._window
             and self._window._status_bar.is_auto_advance()
             and self._anomalies
         ):
-            cur = self._cur_snap_i()
-            if cur is not None and cur == old_snap:
+            cur = self._current_ordinal()
+            if cur is not None and cur == old_ordinal:
                 # 未自动跳转，手动推进
                 QTimer.singleShot(0, self._go_next)
 
-    def _snap_or_sel(self) -> Optional[int]:
-        """取当前异常导航的 snap，无对应时回退到表格选中项。"""
-        snap_i = self._cur_snap_i()
-        if snap_i is not None:
-            return snap_i
-        sel = self._sel_snaps()
+    def _current_or_selected_ordinal(self) -> Optional[int]:
+        """取当前异常关系，无对应时回退到表格选中项。"""
+        ordinal = self._current_ordinal()
+        if ordinal is not None:
+            return ordinal
+        sel = self._selected_ordinals()
         return sel[0] if sel else None
 
     def _on_merge(self):
-        sel = self._sel_snaps()
+        sel = self._selected_ordinals()
         if len(sel) > 1:
             if self._window:
                 self._do_and_advance(lambda: self._window.do_bundle_relations(sel))
             return
-        snap_i = self._snap_or_sel()
-        if snap_i is not None and self._window:
-            self._do_and_advance(lambda: self._window.do_merge(snap_i))
+        ordinal = self._current_or_selected_ordinal()
+        if ordinal is not None and self._window:
+            self._do_and_advance(lambda: self._window.do_merge(ordinal))
 
     def _on_split(self):
-        snap_i = self._snap_or_sel()
-        if snap_i is not None and self._window:
-            self._do_and_advance(lambda: self._window.do_split(snap_i))
+        ordinal = self._current_or_selected_ordinal()
+        if ordinal is not None and self._window:
+            self._do_and_advance(lambda: self._window.do_split(ordinal))
 
     def _on_edit(self):
-        sel = self._sel_snaps()
+        sel = self._selected_ordinals()
         if len(sel) > 1:
             self._window.do_edit_selected(sel)
             return
-        snap_i = self._snap_or_sel()
-        if snap_i is not None and self._window:
-            self._do_and_advance(lambda: self._window.do_edit_single(snap_i))
+        ordinal = self._current_or_selected_ordinal()
+        if ordinal is not None and self._window:
+            self._do_and_advance(lambda: self._window.do_edit_single(ordinal))
 
     def _on_ok(self):
-        sel = self._sel_snaps()
+        sel = self._selected_ordinals()
         if len(sel) > 1 and self._window:
             self._do_and_advance(lambda: [self._window.do_ok(si) for si in sel])
             return
-        snap_i = self._snap_or_sel()
-        if snap_i is not None and self._window:
-            self._do_and_advance(lambda: self._window.do_ok(snap_i))
+        ordinal = self._current_or_selected_ordinal()
+        if ordinal is not None and self._window:
+            self._do_and_advance(lambda: self._window.do_ok(ordinal))
 
     def _on_flag(self):
-        sel = self._sel_snaps()
+        sel = self._selected_ordinals()
         if len(sel) > 1 and self._window:
             self._do_and_advance(lambda: self._window.do_flag_selected(sel))
             return
-        snap_i = self._snap_or_sel()
-        if snap_i is not None and self._window:
-            self._do_and_advance(lambda: self._window.do_flag(snap_i))
+        ordinal = self._current_or_selected_ordinal()
+        if ordinal is not None and self._window:
+            self._do_and_advance(lambda: self._window.do_flag(ordinal))
 
     def _on_delete(self):
-        sel = self._sel_snaps()
+        sel = self._selected_ordinals()
         if len(sel) > 1 and self._window:
-            self._window._delete_selected_snaps(sel)
+            self._window._delete_selected_relations(sel)
             return
-        snap_i = self._snap_or_sel()
-        if snap_i is not None and self._window:
-            self._do_and_advance(lambda: self._window.do_delete(snap_i))
+        ordinal = self._current_or_selected_ordinal()
+        if ordinal is not None and self._window:
+            self._do_and_advance(lambda: self._window.do_delete(ordinal))
 
     def _on_placeholder(self):
-        sel = self._sel_snaps()
+        sel = self._selected_ordinals()
         if len(sel) > 1 and self._window:
             self._do_and_advance(
                 lambda: [self._window.do_placeholder(si) for si in sel]
             )
             return
-        snap_i = self._snap_or_sel()
-        if snap_i is not None and self._window:
-            self._do_and_advance(lambda: self._window.do_placeholder(snap_i))
+        ordinal = self._current_or_selected_ordinal()
+        if ordinal is not None and self._window:
+            self._do_and_advance(lambda: self._window.do_placeholder(ordinal))
 
     def _on_reset_current(self):
-        sel = self._sel_snaps()
+        sel = self._selected_ordinals()
         if not sel:
-            si = self._snap_or_sel()
+            si = self._current_or_selected_ordinal()
             sel = [si] if si is not None else []
         if not sel or not self._window:
             return
-        # 找出所有涉及选中 snap 的 actions（包括跨 snap 合并/编辑）
+        # 找出所有涉及选中关系的 actions（包括跨关系合并/编辑）
         state = self._window._repair_state
         target_ops = set()
         for a in state._repair_log:
@@ -1386,13 +1363,13 @@ class ReviewController(QWidget):
 
     def _on_ai_analyze(self):
         """AI 分析当前选中的文本对（支持多选）。"""
-        snaps = self._sel_snaps()
-        if not snaps:
-            snap_i = self._cur_snap_i()
-            if snap_i is not None:
-                snaps = [snap_i]
-        if snaps:
-            self.analyze_snaps(snaps)
+        ordinals = self._selected_ordinals()
+        if not ordinals:
+            ordinal = self._current_ordinal()
+            if ordinal is not None:
+                ordinals = [ordinal]
+        if ordinals:
+            self.analyze_relations(ordinals)
 
     def _emit_log(self, message: str, role: str = "info"):
         """通过信号将日志消息路由到全局 LogPanel。"""
@@ -1602,7 +1579,7 @@ class ReviewController(QWidget):
     # AI 校订 — Agent 模式
     # ═══════════════════════════════════════════════════════════
 
-    def analyze_snaps(self, snap_indices: List[int]):
+    def analyze_relations(self, ordinals: List[int]):
         """使用 AiRepairAgent 分析用户显式选中的文本对。
 
         拟修复在 AgentRunThread 的异步线程内自动构造。
@@ -1610,7 +1587,7 @@ class ReviewController(QWidget):
         显式选择是权威待审集合，不受异常检测或当前筛选条件限制。
         """
         ctx = self._build_chapter_context(
-            for_snaps=snap_indices,
+            for_ordinals=ordinals,
             skip_auto_repair=True,
         )
         if ctx is None:
@@ -1683,11 +1660,11 @@ class ReviewController(QWidget):
         self.actions_updated.emit()
 
     def _build_chapter_context(
-        self, for_snaps: List[int] | None = None, skip_auto_repair: bool = False
+        self, for_ordinals: List[int] | None = None, skip_auto_repair: bool = False
     ):
         """从当前 RepairState 构造 ChapterContext。
 
-        未指定 ``for_snaps`` 时，使用 GUI 的异常列表构建全章待审集合；
+        未指定 ``for_ordinals`` 时，使用 GUI 的异常列表构建全章待审集合；
         指定后则以用户显式选择为准，正常文本对也必须传入 AI。
 
         Args:
@@ -1700,15 +1677,15 @@ class ReviewController(QWidget):
         # 获取用户偏好的修复策略
         strategy = getattr(w, "_strategy", "src")
 
-        explicitly_selected = for_snaps is not None
+        explicitly_selected = for_ordinals is not None
         if explicitly_selected:
-            target_snaps = set(for_snaps)
+            target_ordinals = set(for_ordinals)
         else:
-            target_snaps = set()
+            target_ordinals = set()
             for anomaly in self._anomalies:
-                target_snaps.update(anomaly.ordinals)
+                target_ordinals.update(anomaly.ordinals)
 
-        if not target_snaps:
+        if not target_ordinals:
             return None
 
         ctx = build_chapter_context(
@@ -1716,15 +1693,15 @@ class ReviewController(QWidget):
             strategy=strategy,
             model=getattr(w, "_model", None),
             skip_auto_repair=skip_auto_repair,
-            reviewable_ids=target_snaps if explicitly_selected else None,
+            reviewable_ids=target_ordinals if explicitly_selected else None,
         )
 
-        # 保留完整 snap_infos（供 _build_initial_user_message 的 ±3 上下文用索引查找），
+        # 保留完整 relation_infos（供初始消息的 ±3 上下文按序号查找），
         # 全章审校只裁剪天然异常；显式选择已由构造器直接设为待审集合。
         # initial_* 已在 from_repair_state 中统一填充。
         if not explicitly_selected:
             ctx.reviewable_ids = [
-                snap_i for snap_i in ctx.reviewable_ids if snap_i in target_snaps
+                ordinal for ordinal in ctx.reviewable_ids if ordinal in target_ordinals
             ]
 
         if not ctx.reviewable_ids:
@@ -1734,7 +1711,6 @@ class ReviewController(QWidget):
     def _start_agent(self, ctx: ChapterContext, max_turns: int = 20):
         """启动 AgentRunThread 并连接信号。"""
         self._disable_ai_buttons(True)
-        self._agent_turn = 0
 
         w = self._window
         # 传递嵌入模型引用 + 策略偏好
@@ -1796,7 +1772,6 @@ class ReviewController(QWidget):
         if evt.type == "error":
             self._on_agent_error(evt.error or "未知错误")
         elif evt.type == "llm_call":
-            self._agent_turn = evt.turn
             ai_logger.debug(f"Turn {evt.turn}: LLM 调用中")
         elif evt.type == "tool_start":
             # 工具调用详情 → DEBUG，避免刷屏
@@ -1844,7 +1819,7 @@ class ReviewController(QWidget):
         """Agent 完成 → 处理 actions。
 
         拟修复在 AgentRunThread 中已构造，w._repair_state 已包含 auto-repair 操作。
-        对存在拟修复的 snap，AI 的 "ok" 应转换为等效操作（如 split/merge）显示在建议表中。
+        对存在拟修复的关系，AI 的 "ok" 应转换为等效操作（如 split/merge）显示在建议表中。
         """
         self._disable_ai_buttons(False)
 

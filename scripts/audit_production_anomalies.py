@@ -75,8 +75,10 @@ def _anomaly_types(operation, scores_11, lines_b) -> list[str]:
     result = []
     if len(source) != 1 or len(target) != 1:
         result.append("NON_1TO1")
-    if len(source) == 1 and len(target) == 1 and is_statistical_low_score(
-        score, scores_11
+    if (
+        len(source) == 1
+        and len(target) == 1
+        and is_statistical_low_score(score, scores_11)
     ):
         result.append("LOW_SCORE")
     if any(

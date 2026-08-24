@@ -62,13 +62,11 @@ dualign/
 │   ├── algorithms/              # 正式生成算法实现
 │   │   └── mdl/                 # 统计门控、候选图、组合证据与局部 MDL
 │   │
-│   ├── experiments/             # 未被生产消费的隔离实验
-│   │   └── contextual_evidence.py # 上下文残差破局研究
-│   │
 │   ├── core/                    # 稳定公共门面与 legacy 归档
-│   │   ├── aligner.py           # mdl-v1 结果契约与算法选择
+│   │   ├── aligner.py           # mdl-v1 正式结果契约
 │   │   ├── calibration.py       # embedding 身份绑定的门控校准
 │   │   ├── legacy_anchor_aligner.py # 冻结 benchmark
+│   │   ├── legacy_anchor_quality.py # 冻结的旧报告诊断
 │   │   ├── punctuation.py       # 标点分割 + 语言检测
 │   │   └── file_pair_matcher.py # 文件对发现
 │   │
@@ -85,7 +83,6 @@ dualign/
 │   │   ├── cached_encoder.py    # 缓存代理
 │   │   ├── similarity.py        # SimilarityScorer 评分器
 │   │   ├── ai_repair_agent.py   # AiRepairAgent (tool-calling)
-│   │   ├── quality_gate.py      # 冻结的 legacy 报告诊断兼容层
 │   │   ├── anomaly_detection.py # 对齐后异常标记（不参与接受/拒绝）
 │   │   ├── cli_pipeline.py      # CLI 对齐流水线
 │   │   ├── score_manager.py     # 异步评分管理器

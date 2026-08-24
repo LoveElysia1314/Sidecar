@@ -4,10 +4,12 @@ from types import SimpleNamespace
 from dualign.gui.window_actions import WindowActionsMixin
 from dualign.gui.window_table import WindowTableMixin
 from dualign.gui.review import REVIEW_SHORTCUTS, ReviewController
+from dualign.gui.base_table import compute_text_colors, relation_text_changes
 from dualign.gui.settings import DualignConfig, KEY_AUTO_NEXT_CHAPTER
 from dualign.gui.window import DualignWindow
 from dualign.models.action import RepairAction
 from dualign.models.relation_status import RelationAnomaly
+from dualign.models.state import AlignmentSnapshot
 from dualign.services.repair import RepairState
 
 
@@ -17,6 +19,19 @@ class _Emitter:
 
     def emit(self):
         self.count += 1
+
+
+def test_relation_text_changes_are_shared_but_marker_coloring_stays_visual():
+    snapshot = AlignmentSnapshot.from_alignment([((0,), (0,), 0.9)], ["A"], ["B"])
+    edit = RepairAction.make_edit(0, new_src_lines=["A+"], new_tgt_lines=["B"])
+    placeholder = RepairAction.make_placeholder_src(0)
+    merge = RepairAction.make_merge(0)
+
+    assert relation_text_changes(0, edit, snapshot) == (True, False)
+    assert relation_text_changes(0, placeholder, snapshot) == (True, False)
+    assert relation_text_changes(0, merge, snapshot) == (False, False)
+    assert compute_text_colors(0, placeholder, snapshot) == (True, True)
+    assert compute_text_colors(0, merge, snapshot) == (True, True)
 
 
 class _ReviewNavigationHarness:
@@ -72,7 +87,7 @@ class _FlagHarness(WindowActionsMixin):
 class _InitialFocusHarness:
     def __init__(self, anomalies, all_anomalies, show_all=True):
         self._anomalies = anomalies
-        self._all_anomaly_snaps = set(all_anomalies)
+        self._all_anomaly_ordinals = set(all_anomalies)
         self._filter_panel = type("Filter", (), {"show_all": show_all})()
         self._row_op_map = {0: 7, 1: 8}
 
@@ -196,13 +211,13 @@ def test_explicit_ai_selection_bypasses_anomaly_filter():
 
     context = ReviewController._build_chapter_context(
         review,
-        for_snaps=[0],
+        for_ordinals=[0],
         skip_auto_repair=True,
     )
 
     assert context is not None
     assert context.reviewable_ids == [0]
-    assert not context.get_snap_info(0).is_reviewable
+    assert not context.get_relation_info(0).is_reviewable
 
 
 def test_chapter_ai_still_requires_anomalies_without_explicit_selection():

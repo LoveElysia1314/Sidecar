@@ -15,7 +15,7 @@ from typing import List, Optional, Tuple
 from dualign.models.state import AlignmentSnapshot, MISSING
 from dualign.models.action import RepairAction
 from dualign.models.marker import is_merge
-from dualign.core import detect_language_mix, _smart_join_lines
+from dualign.core import detect_language_mix
 
 # ── approval 四态管线 ──
 # none → proposed → agent → user（递进，flag 不推进管线）
@@ -43,150 +43,6 @@ APPROVAL_LABELS = {
 
 
 # ═══════════════════════════════════════════════════════════════
-# auto_repair_note — 生成 AI 可见的 auto_note 文本
-# ═══════════════════════════════════════════════════════════════
-
-
-def auto_repair_note(n_src: int, n_tgt: int, strategy: str, approval: str = "") -> str:
-    """返回结构化 auto_note：`策略名 | 机器动作 | 补充`
-
-    strategy: "minimal" | "src" | "tgt"
-    当 snap 已自动修复 (approval=auto_repaired) 时动作表示已完成的操作；
-    当 snap 未处理时动作为 would_*，表示「如果自动修复会怎么做」。
-
-    输出示例:
-      "src-first | merged | 合并3行原文→1行"
-      "src-first | would_merge | 可合并3行原文→1行（待确认）"
-    """
-    strategy_name = {"minimal": "minimal", "src": "src-first", "tgt": "tgt-first"}.get(
-        strategy, "src-first"
-    )
-    is_repaired = approval == APPROVAL_PROPOSED
-
-    if n_src == 1 and n_tgt == 1:
-        return ""
-
-    if n_src > 1 and n_tgt == 1:
-        # N:1 → src: split tgt, tgt: merge src
-        if is_repaired:
-            if strategy == "tgt":
-                return f"{strategy_name} | merged | 合并{n_src}行原文→1行"
-            return f"{strategy_name} | split | 拆分1行译文为{n_src}行匹配原文"
-        if strategy == "minimal":
-            return f"{strategy_name} | unrepaired | {n_src}:1 未自动处理（minimal 不自动合并）"
-        if strategy == "tgt":
-            return f"{strategy_name} | would_merge | 可合并{n_src}行原文→1行（语义优先，不强制）"
-        return (
-            f"{strategy_name} | would_split | 语义优先，拆分或合并均可（使用edit操作）"
-        )
-
-    if n_src == 1 and n_tgt > 1:
-        # 1:M → src: merge tgt, tgt: split src
-        if is_repaired:
-            if strategy == "tgt":
-                return f"{strategy_name} | split | 拆分1行原文为{n_tgt}行匹配译文"
-            return f"{strategy_name} | merged | 合并{n_tgt}行译文→1行"
-        if strategy == "minimal":
-            return f"{strategy_name} | unrepaired | 1:{n_tgt} 未自动处理（minimal 不自动合并）"
-        if strategy == "tgt":
-            return f"{strategy_name} | would_split | 语义优先，拆分或合并均可（使用edit操作）"
-        return f"{strategy_name} | would_merge | 可合并{n_tgt}行译文→1行（语义优先，不强制）"
-
-    if n_src == 0 and n_tgt > 0:
-        if is_repaired:
-            action = "deleted" if strategy == "minimal" else "placeholder"
-            return f"{strategy_name} | {action} | 已处理"
-        if strategy == "minimal":
-            return f"{strategy_name} | unrepaired | {n_tgt}行译文无对应原文（minimal 建议view后delete）"
-        return f"{strategy_name} | would_delete | {n_tgt}行译文无对应原文（建议view确认后delete或保留）"
-
-    if n_src > 0 and n_tgt == 0:
-        if is_repaired:
-            action = "deleted" if strategy == "minimal" else "placeholder"
-            return f"{strategy_name} | {action} | 已处理"
-        if strategy == "minimal":
-            return f"{strategy_name} | unrepaired | {n_src}行原文无译文（minimal 建议edit补译）"
-        return f"{strategy_name} | would_placeholder | 保留{n_src}行原文，译文需补⟢MISSING⟣"
-
-    action = "processed" if is_repaired else "unrepaired"
-    return f"{strategy_name} | {action} | {n_src}:{n_tgt} 未自动处理"
-
-
-# ═══════════════════════════════════════════════════════════════
-# parse_auto_note — 解析 auto_note 结构化字段（集中化入口）
-# ═══════════════════════════════════════════════════════════════
-
-WOULD_ACTIONS = frozenset(
-    {"would_merge", "would_split", "would_delete", "would_placeholder"}
-)
-
-
-def parse_auto_note(auto_note: str) -> tuple[str, str, str]:
-    """解析 auto_note 返回 (strategy, action, detail)。
-
-    格式: `策略名 | 机器动作 | 补充说明`
-    例如: `"src-first | would_split | 语义优先，拆分或合并均可"`
-
-    返回:
-      strategy: "src-first" / "tgt-first" / "minimal" / ""
-      action:   "merged" / "split" / "would_merge" / "would_split" / "unrepaired" / "" 等
-      detail:   补充文本
-    """
-    if not auto_note:
-        return "", "", ""
-    parts = auto_note.split("|", 2)
-    strategy = parts[0].strip() if len(parts) > 0 else ""
-    action = parts[1].strip() if len(parts) > 1 else ""
-    detail = parts[2].strip() if len(parts) > 2 else ""
-    return strategy, action, detail
-
-
-def is_would_action(action: str) -> bool:
-    """判断是否为 would_* 建议动作。"""
-    return action in WOULD_ACTIONS
-
-
-# ═══════════════════════════════════════════════════════════════
-# compute_relation_preview — 为非 1:1 关系计算合并/修复预览
-# ═══════════════════════════════════════════════════════════════
-
-
-def compute_relation_preview(snapshot: AlignmentSnapshot, ordinal: int) -> str:
-    """为非 1:1 关系计算将全部行连接为 1:1 后的文本预览。
-
-    展示所有 src 行和所有 tgt 行分别拼接的结果。
-    不修改任何实际状态。
-    """
-    s_idx, t_idx, _sc = snapshot.original_ops[ordinal]
-    ls, lt = len(s_idx), len(t_idx)
-
-    if ls == 0 and lt > 0:
-        tgt_texts = [snapshot.tgt_text(j) for j in t_idx]
-        merged_tgt = (
-            _smart_join_lines(tgt_texts)
-            if len(tgt_texts) > 1
-            else (tgt_texts[0] if tgt_texts else "")
-        )
-        return f"0:{lt} 无原文 | 译文: {merged_tgt}"
-    if ls > 0 and lt == 0:
-        src_texts = [snapshot.src_text(i) for i in s_idx]
-        merged_src = (
-            _smart_join_lines(src_texts)
-            if len(src_texts) > 1
-            else (src_texts[0] if src_texts else "")
-        )
-        return f"{ls}:0 无译文 | 原文: {merged_src} | {MISSING}"
-    if ls == 1 and lt == 1:
-        return ""
-    # N:1 / 1:M / N:M → 展示全部行拼接为 1:1 后的文本
-    src_texts = [snapshot.src_text(i) for i in s_idx]
-    tgt_texts = [snapshot.tgt_text(j) for j in t_idx]
-    merged_src = _smart_join_lines([t for t in src_texts if t])
-    merged_tgt = _smart_join_lines([t for t in tgt_texts if t])
-    return f"1:1 预览\nsrc: {merged_src}\ntgt: {merged_tgt}"
-
-
-# ═══════════════════════════════════════════════════════════════
 # build_context_windows — 构建上下文窗口（集中化入口）
 # ═══════════════════════════════════════════════════════════════
 
@@ -200,8 +56,8 @@ def build_context_windows(
     """构建上下文窗口，相邻间距 ≤ merge_gap_threshold 时合并。
 
     Args:
-        reviewable_ids: 待审的 snap 索引列表
-        total: 总 snap 数
+        reviewable_ids: 待审的关系序号列表
+        total: 总关系数
         window_size: 每侧上下文行数
         merge_gap_threshold: 窗口间距 ≤ 此值时合并。
                              默认 1：窗口间最多空 1 行时合并。
@@ -273,7 +129,6 @@ class RelationStatus:
     # ── Layer 3: 处理历史 ──
     approval: str = APPROVAL_NONE
     repair_count: int = 0
-    last_source: str = ""  # "" / "auto" / "ai" / "user"
     last_operation: str = ""  # merge / split / edit / delete / ok / flag
     is_flagged: bool = False  # 用户手动标记需关注（异常类型 FLAGGED 的持久化状态）
     # ── 派生属性 ──
@@ -345,7 +200,7 @@ class RelationStatus:
 
 @dataclass
 class RelationReviewInfo:
-    """AI 看到的 snap——不包含任何原始对齐事实。
+    """AI 看到的关系——不包含任何原始对齐事实。
 
     从 RelationStatus 的 Layer 2 + Layer 3 构建，供 AI Agent 使用。
     用 n_src_rows/n_tgt_rows 替代旧 cur_type 字符串。
@@ -581,7 +436,6 @@ def project_relation_statuses(repair_state, k: float = 3.0) -> List[RelationStat
                 or (last_action is not None and last_action.kind == "delete"),
                 approval=_derive_approval(last_action),
                 repair_count=repair_count,
-                last_source=last_action.source if last_action else "",
                 last_operation=last_action.kind if last_action else "",
                 is_flagged=is_flagged,
             )

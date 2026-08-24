@@ -55,7 +55,7 @@ class AiSuggestionItem:
     ):
         self.ordinal = ordinal
         self.action = action
-        # 同一 snap 可以同时存在多条 AI 建议；每条建议必须拥有独立的单元格组。
+        # 同一关系可以同时存在多条 AI 建议；每条建议必须拥有独立的单元格组。
         self.display_group_id = (ordinal, id(action))
         self.status = status
         self.sub = sub
@@ -104,11 +104,11 @@ class SuggestionPreviewTable(BaseTextTable):
     def _configure_table(self):
         super()._configure_table()
         hdr = self.table.horizontalHeader()
-        from dualign.gui.base_table import calc_snap_width as _csw
+        from dualign.gui.base_table import calc_relation_width
 
         for ci in range(5):
             hdr.setSectionResizeMode(ci, QHeaderView.ResizeMode.Fixed)
-        hdr.resizeSection(0, _csw(0))
+        hdr.resizeSection(0, calc_relation_width(0))
         hdr.resizeSection(1, 64)
         hdr.resizeSection(2, 60)
         hdr.resizeSection(3, 64)
@@ -132,8 +132,8 @@ class SuggestionPreviewTable(BaseTextTable):
         """第 0 列是 Snap，span 从第 1 列开始。"""
         return 1
 
-    def _get_snap_col(self) -> int | None:
-        """预览表也有 Snap 列 (col 0)。"""
+    def _get_relation_col(self) -> int | None:
+        """预览表也有关系列 (col 0)。"""
         return 0
 
     def _apply_table_spans(self, spans: dict):
@@ -154,7 +154,7 @@ class SuggestionPreviewTable(BaseTextTable):
             供 HighlightDelegate 绘制 5px 竖条色带
           - 明细模式 (_show_scores): 评分列显示，文本本身用 score_to_color 着色
 
-        星标：与主对齐表统一使用 has_snap_text_changed 语义，
+        星标：与主对齐表统一使用 relation_text_changes 语义，
         比较 init_src_text/init_tgt_text 与当前预览文本。
         """
         marker = item.marker
@@ -166,8 +166,8 @@ class SuggestionPreviewTable(BaseTextTable):
         # 统一方案下 [AI] 前缀仅与操作标记结合出现（如 [AI][OK]），
         # 剥离前缀后自然显示为 [OK]，无需独立转译。
 
-        snap_text = str(item.ordinal) if is_first else ""
-        self._set_cell(row, 0, snap_text, align=Qt.AlignCenter)
+        relation_text = str(item.ordinal) if is_first else ""
+        self._set_cell(row, 0, relation_text, align=Qt.AlignCenter)
 
         # Col 1: 初始类型
         init_text = item.init_type

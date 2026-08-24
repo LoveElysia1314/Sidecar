@@ -7,7 +7,7 @@ from typing import Callable
 
 import numpy as np
 
-from dualign.core import _smart_join_lines
+from dualign.core.text import smart_join_lines as _smart_join_lines
 from dualign.algorithms.mdl.local_recursive_mdl import (
     align_local_recursive_mdl,
     select_path_conditioned_composition,

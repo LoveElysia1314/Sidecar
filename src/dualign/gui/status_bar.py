@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
 )
-from dualign.gui.theme import T, BORDER_DIM
+from dualign.gui.theme import T
 
 # ═══════════════════════════════════════════════════════════════
 # 常量
@@ -53,13 +53,11 @@ class StatusDot(QFrame):
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
         self._text = text
-        self._ok: Optional[bool] = None
         self._dot_color: QColor = QColor(T.FG_MUTED)
         self.setFixedHeight(22)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def set_ok(self, ok: Optional[bool]):
-        self._ok = ok
         self._dot_color = QColor(_dot_color(ok))
         self.update()
 
@@ -163,7 +161,7 @@ class ScoreBar(QWidget):
         grad.setColorAt(0.5, QColor(220, 220, 50))
         grad.setColorAt(1.0, QColor(30, 200, 50))
 
-        p.setPen(QPen(QColor(BORDER_DIM), 1))
+        p.setPen(QPen(QColor(T.BORDER_DIM), 1))
         p.setBrush(grad)
         p.drawRoundedRect(bar_rect, 2, 2)
         p.end()

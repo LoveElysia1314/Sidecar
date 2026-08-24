@@ -12,13 +12,10 @@ from importlib import import_module
 
 _EXPORTS = {
     "DualignWindow": ("dualign.gui.window", "DualignWindow"),
-    "ConfigDialog": ("dualign.gui.dialogs", "ConfigDialog"),
     "BlockEditDialog": ("dualign.gui.dialogs", "BlockEditDialog"),
-    "ChangeReviewDialog": ("dualign.gui.dialogs", "ChangeReviewDialog"),
-    "FileListPanel": ("dualign.gui.dialogs", "FileListPanel"),
     "ReviewController": ("dualign.gui.review", "ReviewController"),
     "FilterPanel": ("dualign.gui.filter", "FilterPanel"),
-    "SnapIndicator": ("dualign.gui.panels", "SnapIndicator"),
+    "RelationIndicator": ("dualign.gui.panels", "RelationIndicator"),
     "DockPanelHelper": ("dualign.gui.panels", "DockPanelHelper"),
     "LogPanel": ("dualign.gui.log_panel", "LogPanel"),
     "HighlightDelegate": ("dualign.gui.base_table", "HighlightDelegate"),

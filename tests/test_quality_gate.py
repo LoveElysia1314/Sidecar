@@ -1,4 +1,4 @@
-from dualign.services.quality_gate import (
+from dualign.core.legacy_anchor_quality import (
     assess_alignment_quality,
     automatic_repair_blockers,
 )

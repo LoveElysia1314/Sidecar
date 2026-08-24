@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 from dualign.common import file_bytes_sha256
-from dualign.core import _smart_join_lines
+from dualign.core.text import smart_join_lines as _smart_join_lines
 from dualign.models.action import RepairAction, project_action_to_relation_order
 from dualign.models.pair_editing import PairEditingState
 from dualign.services._text_diff import unified_text_diff
@@ -182,7 +182,6 @@ class SolidificationPlan:
     baseline: PairEditingState
     solidified: PairEditingState
     policy: SolidifyPolicy
-    original_actions: tuple[RepairAction, ...]
     remaining_actions: tuple[RepairAction, ...]
     applied: tuple[dict, ...]
     changed_relation_ids: frozenset[str]
@@ -520,7 +519,6 @@ def build_solidification_plan(
         baseline=baseline,
         solidified=state,
         policy=policy,
-        original_actions=actions,
         remaining_actions=tuple(remaining),
         applied=tuple(applied),
         changed_relation_ids=changed_relation_ids,

@@ -1,14 +1,4 @@
-"""Frozen legacy-anchor quality diagnostics.
-
-文档级质量评估（G1/G2/G3）+ 文本对级异常检测。
-所有阈值可配置，消费端可通过 QualityGateConfig 覆写。
-
-G1 → anchor_density 不足 → 对齐不可靠
-G2 → gap_row_ratio 过高 → 间隙行占比异常（孤行 1:0 + 0:1）
-G3 → n_overflow_rows > 0 → 合并编码触顶
-New MDL alignment decisions do not consume this module.  It remains only for
-legacy reports and benchmarks during the retirement window.
-"""
+"""Frozen quality diagnostics for the archived anchor aligner."""
 
 from __future__ import annotations
 
@@ -17,37 +7,31 @@ from dataclasses import dataclass
 
 @dataclass
 class QualityGateConfig:
-    """质量门控配置 — 所有阈值可被消费端覆写。"""
+    """Thresholds retained only for explicit legacy reports and benchmarks."""
 
-    # G1: 锚点密度
     anchor_density_min: float = 0.60
-
-    # G2: 孤行比例阈值
     gap_row_ratio_max: float = 0.10
-
-    # 离群低分
     zscore_k: float = 3.0
     zscore_min_score: float = 0.6
 
 
-# ── 文档级质量等级 ──
 QUALITY_OK = "ok"
 QUALITY_UNRELIABLE = "unreliable"
 QUALITY_GAP_DOMINATED = "gap_dominated"
 
-# ── 拒绝理由（可多项叠加）──
 REJECTION_LOW_ANCHOR_DENSITY = "low_anchor_density"
 REJECTION_GAP_DOMINATED = "gap_dominated"
 REJECTION_MERGE_OVERFLOW = "merge_overflow"
 
 
 def _gap_row_ratio(all_ops, n_src: int, n_tgt: int) -> float:
-    """纯间隙行（孤立行 1:0 + 0:1）占总行数比例。"""
-    n_orphan = sum(len(s) for s, t, _ in all_ops if not t) + sum(
-        len(t) for s, t, _ in all_ops if not s
+    """Return the fraction of source and target rows assigned to gaps."""
+
+    n_orphan = sum(len(source) for source, target, _ in all_ops if not target) + sum(
+        len(target) for source, target, _ in all_ops if not source
     )
-    denom = n_src + n_tgt
-    return n_orphan / denom if denom > 0 else 0.0
+    denominator = n_src + n_tgt
+    return n_orphan / denominator if denominator > 0 else 0.0
 
 
 def assess_alignment_quality(
@@ -58,26 +42,13 @@ def assess_alignment_quality(
     n_overflow_rows: int = 0,
     config: QualityGateConfig | None = None,
 ) -> dict:
-    """G1/G2/G3 质量门控。
+    """Reproduce the archived G1/G2/G3 report classification."""
 
-    G1 → anchor_density 不足，直接返回 unreliable。
-    G2 → gap_row_ratio 超阈值。
-    G3 → merge overflow 独立检测，始终写入，不与 G2 冲突。
-
-    Returns:
-        {
-            "quality": str,
-            "rejections": list[str],
-            "indicators": { "anchor_density", "gap_row_ratio", "n_overflow_rows", "n_src", "n_tgt" }
-        }
-    """
     cfg = config or QualityGateConfig()
     anchor_density = stats.get("anchor_density")
     if anchor_density is None:
         n_true = stats.get("n_true_anchors", 0)
         n_total = n_src + n_tgt
-        # A true anchor covers one row on each side.  Keep the fallback on the
-        # same scale as the aligner's native ``anchor_density`` statistic.
         anchor_density = 2 * n_true / n_total if n_total > 0 else 0.0
 
     indicators = {
@@ -87,17 +58,11 @@ def assess_alignment_quality(
         "n_src": n_src,
         "n_tgt": n_tgt,
     }
-
     rejections = []
-
-    # G1/G2/G3 are independent evidence.  Preserve every reason so callers
-    # can make one resource-safety decision without reconstructing metrics.
     if anchor_density < cfg.anchor_density_min:
         rejections.append(REJECTION_LOW_ANCHOR_DENSITY)
-
     if gap_row_ratio >= cfg.gap_row_ratio_max:
         rejections.append(REJECTION_GAP_DOMINATED)
-
     if n_overflow_rows > 0:
         rejections.append(REJECTION_MERGE_OVERFLOW)
 
@@ -107,7 +72,6 @@ def assess_alignment_quality(
         quality = QUALITY_GAP_DOMINATED
     else:
         quality = QUALITY_OK
-
     return {
         "quality": quality,
         "rejections": rejections,
@@ -116,7 +80,8 @@ def assess_alignment_quality(
 
 
 def automatic_repair_blockers(assessment: dict | None) -> list[str]:
-    """Return structural risks that make automatic repair unsafe or wasteful."""
+    """Return archived structural risks that block automatic repair."""
+
     if not assessment:
         return []
     known = {

@@ -14,15 +14,9 @@ from typing import Optional
 # 1. 全局常量
 # ═══════════════════════════════════════════════════════════════
 
-_DEFAULT_OLLAMA_MODEL = "leoipulsar/harrier-0.6b"
-
-MODEL_NAME = os.environ.get("DUALIGN_MODEL", f"ollama:{_DEFAULT_OLLAMA_MODEL}")
-
 _DEFAULT_INSTRUCTION = "Instruct: Identify parallel sentences across languages\nQuery: "
 
 INSTRUCTION_TEXT = os.environ.get("DUALIGN_INSTRUCTION", _DEFAULT_INSTRUCTION)
-
-REPORT_FORMAT_VERSION = 1
 
 APP_DATA_DIR = os.path.join(os.path.expanduser("~"), ".dualign")
 
@@ -67,13 +61,6 @@ def get_embedding_cache_path() -> str:
     cache_dir = os.path.join(get_cache_root(), "emb")
     os.makedirs(cache_dir, exist_ok=True)
     return os.path.join(cache_dir, "vecs.db")
-
-
-def _ui_session_cache_path(entry_id: str = "") -> str:
-    """返回 UI 状态缓存路径。"""
-    root = get_cache_root()
-    os.makedirs(os.path.join(root, "session"), exist_ok=True)
-    return os.path.join(root, "session", f"{entry_id}.json")
 
 
 def get_report_cache_dir() -> str:

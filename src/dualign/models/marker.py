@@ -22,7 +22,7 @@ Marker 格式:
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict
 
 # ═══════════════════════════════════════════════════════════════
 # 常量 — kind → marker 映射（唯一来源）
@@ -45,19 +45,6 @@ _RESOLVE_TO_11_TAGS = frozenset({"[M]", "[S]", "[P]", "[OK]"})
 
 # ── 需要 score=0 的操作标记 ──
 _ZERO_SCORE_TAGS = frozenset({"[D]", "[P]"})
-
-# ── 有效操作标记集合 ──
-_VALID_TAGS = frozenset(KIND_MAP.values())
-
-_DISPLAY_MAP = {
-    "[M]": "合并",
-    "[S]": "拆分",
-    "[E]": "校订",
-    "[D]": "删除",
-    "[P]": "占位",
-    "[F]": "异常",
-    "[OK]": "通过",
-}
 
 # 来源前缀
 AI_PREFIX = "[AI]"
@@ -82,42 +69,6 @@ def from_kind(kind: str, source: str = "") -> str:
     if source == "ai":
         return f"{AI_PREFIX}{base}"
     return base
-
-
-# ═══════════════════════════════════════════════════════════════
-# 解析
-# ═══════════════════════════════════════════════════════════════
-
-
-def parse(marker: str) -> Dict[str, bool]:
-    """解析 marker 字符串 → 标记是否存在字典。
-
-    例如 `[AI][M] [OK]` → {"[AI]": True, "[M]": True, "[OK]": True}
-    """
-    result: Dict[str, bool] = {}
-    for tag in _VALID_TAGS:
-        result[tag] = tag in marker
-    result[AI_PREFIX] = AI_PREFIX in marker
-    return result
-
-
-def get_source(marker: str) -> str:
-    """提取来源前缀。"""
-    if not marker:
-        return ""
-    if marker.startswith(AI_PREFIX):
-        return "ai"
-    return ""
-
-
-def get_tags(marker: str) -> List[str]:
-    """提取 marker 中的所有操作标记（不含来源前缀），按出现顺序。
-
-    例如 `[AI][M] [OK]` → ["[M]", "[OK]"]
-    """
-    if not marker:
-        return []
-    return [t for t in _VALID_TAGS if t in marker]
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -168,31 +119,6 @@ def is_approved(marker: str) -> bool:
     return has_tag(marker, "[OK]")
 
 
-def is_from_ai(marker: str) -> bool:
-    """是否来自 AI Agent。"""
-    return has_tag(marker, AI_PREFIX)
-
-
-def is_ai_reviewed(marker: str) -> bool:
-    """AI 是否已审阅（marker 以 [AI] 开头）。"""
-    if not marker:
-        return False
-    return marker.startswith(AI_PREFIX)
-
-
-def get_display_text(marker: str) -> str:
-    """获取中文显示文本（用于报告等）。"""
-    if not marker:
-        return ""
-    tags = get_tags(marker)
-    parts = []
-    if AI_PREFIX in marker:
-        parts.append("AI")
-    for t in tags:
-        parts.append(_DISPLAY_MAP.get(t, t))
-    return " ".join(parts)
-
-
 # ═══════════════════════════════════════════════════════════════
 # 复合语义
 # ═══════════════════════════════════════════════════════════════
@@ -217,41 +143,31 @@ def needs_zero_score(marker: str) -> bool:
     return any(t in marker for t in _ZERO_SCORE_TAGS)
 
 
-def is_divider(marker: str, sub: int) -> bool:
-    """合并 [M] 的子行之间是否需要虚线分隔。"""
-    return sub > 0 and is_merge(marker)
-
-
 # ═══════════════════════════════════════════════════════════════
 # 组合
 # ═══════════════════════════════════════════════════════════════
 
 
 def combine(existing: str, new_tag: str) -> str:
-    """向现有 marker 叠加元标记（[OK] / [F]）。
+    """向现有 marker 叠加标记，保留每个标记自身的来源前缀。
 
     规则:
       - [OK] 与 [F] 互斥：叠加 [OK] 时移除 [F]，叠加 [F] 时移除 [OK]
       - 去重：如果 existing 中已有相同的标记，先移除旧的
       - 叠加：追加到末尾，空格分隔
-
-    替代 `_apply_info_free` 中的 [OK]/[F] 组合逻辑。
     """
     if not existing:
         return new_tag
-    # [OK] 与 [F] 互斥，叠加一个时另一个也被移除
-    tags_to_remove = {new_tag}
-    if new_tag == "[OK]":
+    is_ok = is_approved(new_tag)
+    is_flag = is_flagged(new_tag)
+    base = "[OK]" if is_ok else "[F]" if is_flag else new_tag
+    tags_to_remove = {base}
+    if is_ok:
         tags_to_remove.add("[F]")
-        # 用户审核通过时覆盖 [AI] 来源标记
-        # [AI] 前缀紧贴操作标记（如 [AI][M]），不能用简单 in 判断移除
-    elif new_tag == "[F]":
+    elif is_flag:
         tags_to_remove.add("[OK]")
     parts = [p for p in existing.split(" ") if not any(t in p for t in tags_to_remove)]
     clean = " ".join(p for p in parts if p).strip()
-    # [OK] / [F] 都是人类操作，叠加时剥离 [AI] 前缀
-    if new_tag in ("[OK]", "[F]"):
-        clean = clean.replace(AI_PREFIX, "")
     return f"{clean} {new_tag}" if clean else new_tag
 
 

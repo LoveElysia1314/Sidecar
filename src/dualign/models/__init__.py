@@ -34,9 +34,6 @@ from dualign.models.relation_status import (
     APPROVAL_LABELS,
 )
 
-# 文件 I/O
-from dualign.common import save_report, load_report
-
 __all__ = [
     "AlignmentSnapshot",
     "OpT",
@@ -65,6 +62,4 @@ __all__ = [
     "APPROVAL_USER",
     "ALL_APPROVAL_STATES",
     "APPROVAL_LABELS",
-    "save_report",
-    "load_report",
 ]

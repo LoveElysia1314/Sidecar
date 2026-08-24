@@ -16,12 +16,7 @@ import traceback
 import numpy as np
 from PySide6.QtCore import QThread, Signal
 
-from dualign.core import (
-    ALGORITHM_MDL_V1,
-    align,
-    AlignConfig,
-    AlignmentResult,
-)
+from dualign.core import align, AlignConfig, AlignmentResult
 from dualign.common import (
     load_text_lines,
     content_hash as _content_hash,
@@ -201,8 +196,6 @@ class EncodeThread(QThread):
                     raise ValueError("对齐模型或算法配置已变化")
                 result = AlignmentResult(
                     all_ops=operations_from_report(report),
-                    anchors=[],
-                    anchor_op_indices={},
                     stats=dict(report.get("stats") or {}),
                     status=str(
                         (report.get("alignment") or {}).get("status", "aligned")
@@ -305,12 +298,8 @@ class AlignWorker(QThread):
 
         from dualign.core.calibration import resolve_alignment_calibration
 
-        resolved = (
-            resolve_alignment_calibration(
-                model, calibration_id=getattr(self.config, "calibration_id", "")
-            )
-            if getattr(self.config, "algorithm", "") == ALGORITHM_MDL_V1
-            else None
+        resolved = resolve_alignment_calibration(
+            model, calibration_id=self.config.calibration_id
         )
         try:
             result = align(
@@ -329,17 +318,10 @@ class AlignWorker(QThread):
         s = result.stats
         if result.status == "rejected":
             self.status_signal.emit(f"对齐已拒绝 — {result.reason}")
-        elif result.algorithm == ALGORITHM_MDL_V1:
+        else:
             self.status_signal.emit(
                 f"✓ MDL 对齐完成 — {result.status}, {len(result.all_ops)} ops, "
                 f"{s.get('total_seconds', 0.0):.2f}s"
-            )
-        else:
-            self.status_signal.emit(
-                f"✓ Legacy 对齐完成 — 真锚点 "
-                f"{s.get('n_true_anchors', 0)}/{s.get('n_restricted_ops', 0)}, "
-                f"{len(result.all_ops)} ops (μ{s.get('avg_similarity', 0.0):.3f}), "
-                f"{s.get('align_time_s', 0.0):.2f}s"
             )
         self.finished_signal.emit(result)
 
@@ -421,20 +403,17 @@ class EnvCheckThread(QThread):
                 ok, detail, models = ProviderManager.health_check(active)
                 result["embed_ok"] = ok
                 result["embed_detail"] = detail
-                result["embed_provider"] = active.label
                 result["embed_model"] = active.model_name
                 result["models_available"] = models
             else:
                 result["embed_ok"] = False
                 result["embed_detail"] = "未配置嵌入提供方"
-                result["embed_provider"] = ""
                 result["embed_model"] = ""
                 result["models_available"] = []
         except Exception as e:
             traceback.print_exc()
             result["embed_ok"] = False
             result["embed_detail"] = f"检测失败: {e}"
-            result["embed_provider"] = ""
             result["embed_model"] = ""
             result["models_available"] = []
 

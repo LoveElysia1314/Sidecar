@@ -41,12 +41,12 @@ from dualign.gui.theme import T
 CHANGED_FLAG_ROLE = Qt.ItemDataRole.UserRole + 100
 
 
-def calc_snap_width(max_snap: int) -> int:
-    """根据最大 snap 索引计算 Snap 列固定宽度。
+def calc_relation_width(max_ordinal: int) -> int:
+    """根据最大关系序号计算关系列固定宽度。
 
     < 10000 (4 位): 40px, 此后每多一位 +8px
     """
-    digits = len(str(max_snap))
+    digits = len(str(max_ordinal))
     return 40 + max(0, digits - 4) * 8
 
 
@@ -125,7 +125,7 @@ def type_cl(init_type: str) -> QColor:
     """初始/当前类型 → 颜色。"""
     if not init_type:
         return TYPE_CL_11
-    # 跨 snap 行的展示标签还包含 ``snap N`` 和 ``---``。颜色应取其中的
+    # 跨关系行的展示标签还可能包含旧 ``snap N`` 和 ``---``。颜色应取其中的
     # 关系事实，而不是因为展示字符串不再等于纯 ``N:M`` 就退回灰色。
     relation_types = [
         (int(match.group(1)), int(match.group(2)))
@@ -178,63 +178,28 @@ def anomaly_cl(atype: str) -> QColor:
 
 
 def compute_text_colors(
-    snap_index: int,
-    marker: str,
-    atypes: set,
+    ordinal: int,
     action: Any,
     snapshot: Any,
 ) -> tuple[bool, bool]:
-    """判断该 Snap 的 src/tgt 侧是否有变化，供文本列着色使用。"""
+    """返回供文本着色使用的两侧变化标志。"""
     if action is None:
         return False, False
-
-    src_changed = False
-    tgt_changed = False
-    s_idx, t_idx, _ = snapshot.original_ops[snap_index]
-
-    if action.kind == "edit":
-        d = action.data
-        new_src = d.get("new_src_lines")
-        new_tgt = d.get("new_tgt_lines")
-        edit_side = d.get("edit_side")
-        orig_src = [snapshot.src_text(i) for i in s_idx]
-        orig_tgt = [snapshot.tgt_text(j) for j in t_idx]
-        if new_src is not None:
-            src_changed = new_src != orig_src
-        if new_tgt is not None:
-            tgt_changed = new_tgt != orig_tgt
-        if edit_side == "src" and src_changed:
-            tgt_changed = False
-        elif edit_side == "tgt" and tgt_changed:
-            src_changed = False
-    elif action.kind == "merge":
-        src_changed = True
-        tgt_changed = True
-    elif action.kind == "split":
-        d = action.data
-        new_src = d.get("new_src_lines")
-        new_tgt = d.get("new_tgt_lines")
-        orig_src = [snapshot.src_text(i) for i in s_idx]
-        orig_tgt = [snapshot.tgt_text(j) for j in t_idx]
-        src_changed = (new_src is not None) and (new_src != orig_src)
-        tgt_changed = (new_tgt is not None) and (new_tgt != orig_tgt)
-    elif action.kind in ("ok", "flag", "placeholder_src", "placeholder_tgt"):
-        src_changed = True
-        tgt_changed = True
-
-    return src_changed, tgt_changed
+    if action.kind in ("merge", "ok", "flag", "placeholder_src", "placeholder_tgt"):
+        return True, True
+    return relation_text_changes(ordinal, action, snapshot)
 
 
-def has_snap_text_changed(
-    snap_index: int,
+def relation_text_changes(
+    ordinal: int,
     action: Any,
     snapshot: Any,
 ) -> tuple[bool, bool]:
-    """判断该 Snap 的文本内容是否与初始对齐输出不同（用于星标）。"""
+    """判断该关系的文本内容是否与初始对齐输出不同。"""
     if action is None:
         return False, False
 
-    s_idx, t_idx, _ = snapshot.original_ops[snap_index]
+    s_idx, t_idx, _ = snapshot.original_ops[ordinal]
 
     if action.kind == "edit":
         d = action.data
@@ -308,14 +273,10 @@ class HighlightDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._selected_rows: Set[int] = set()
-        self._focused_row: Optional[int] = None
         self._divider_cells: Set[Tuple[int, int]] = set()  # {(row, col), ...}
 
     def set_selected_rows(self, rows: Set[int]):
         self._selected_rows = rows
-
-    def set_focused_row(self, row: Optional[int]):
-        self._focused_row = row
 
     def set_divider_cells(self, cells: Set[Tuple[int, int]]):
         """设置需要底部虚线的单元格集合。{(row, col), ...}"""
@@ -652,8 +613,8 @@ class BaseTextTable(QWidget):
         """
         return 0
 
-    def _get_snap_col(self) -> int | None:
-        """Snap 列索引。有 Snap 列时返回列号，无时返回 None。
+    def _get_relation_col(self) -> int | None:
+        """关系列索引。有关系列时返回列号，无时返回 None。
 
         基类返回 None（无 Snap 列），子类（如主对齐表）可重写返回 0。
         """
@@ -664,7 +625,7 @@ class BaseTextTable(QWidget):
         return project_table_cells(
             self._items,
             col_offset=self._get_span_col_offset(),
-            snap_col=self._get_snap_col(),
+            relation_col=self._get_relation_col(),
         )
 
     def _apply_table_spans(self, spans: dict):
@@ -795,9 +756,9 @@ class BaseTextTable(QWidget):
             cell.setToolTip(tooltip)
         # 设置 UserRole 供焦点/highlight 查找使用
         if row < len(self._items):
-            snap_i = getattr(self._items[row], "ordinal", None)
-            if snap_i is not None:
-                cell.setData(Qt.ItemDataRole.UserRole, snap_i)
+            ordinal = getattr(self._items[row], "ordinal", None)
+            if ordinal is not None:
+                cell.setData(Qt.ItemDataRole.UserRole, ordinal)
         self.table.setItem(row, col, cell)
         return cell
 
@@ -823,7 +784,6 @@ class BaseTextTable(QWidget):
         delegate = getattr(self, "_divider_delegate", None)
         if delegate is not None:
             delegate.set_selected_rows(set(matched_indices))
-            delegate.set_focused_row(matched_indices[0])
             self.table.viewport().update()
 
         # 滚动到首行

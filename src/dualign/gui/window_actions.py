@@ -43,7 +43,7 @@ from dualign.gui.settings import (
     DualignConfig,
     KEY_LAST_OPEN_DIR,
 )
-from dualign.core import _smart_join_lines as _join
+from dualign.core.text import smart_join_lines as _join
 
 # ═══════════════════════════════════════════════════════════════
 # DualignWindow — 方法实现（被 dualign.gui.window 采纳为方法）
@@ -53,29 +53,29 @@ from dualign.core import _smart_join_lines as _join
 class WindowActionsMixin:
     """WindowActionsMixin — 通过多重继承为 DualignWindow 提供方法。"""
 
-    def _invalidate_snap_scores(self, snap_indices) -> None:
+    def _invalidate_relation_scores(self, ordinals) -> None:
         """Invalidate runtime scores and remove persisted values for changed rows."""
-        snaps = {int(snap_i) for snap_i in snap_indices}
+        relation_ordinals = {int(ordinal) for ordinal in ordinals}
         score_manager = getattr(self, "_score_mgr", None)
         if score_manager is not None:
-            score_manager.invalidate_ordinals(sorted(snaps))
+            score_manager.invalidate_ordinals(sorted(relation_ordinals))
         score_cache = getattr(self, "_score_cache", None)
         if score_cache is not None and self._repair_state is not None:
-            for snap_i in snaps:
-                score_cache.discard(self._repair_state.snapshot.relation_id(snap_i))
+            for ordinal in relation_ordinals:
+                score_cache.discard(self._repair_state.snapshot.relation_id(ordinal))
 
-    def _set_known_snap_scores(self, snap_i: int, scores) -> None:
+    def _set_known_relation_scores(self, ordinal: int, scores) -> None:
         """Seed scores already computed by split instead of scheduling them again."""
-        self._invalidate_snap_scores([snap_i])
+        self._invalidate_relation_scores([ordinal])
         score_manager = getattr(self, "_score_mgr", None)
         score_cache = getattr(self, "_score_cache", None)
         for sub, raw_score in enumerate(scores):
             score = float(raw_score)
             if score_manager is not None:
-                score_manager.set_ready_score(snap_i, sub, score)
+                score_manager.set_ready_score(ordinal, sub, score)
             if score_cache is not None:
                 score_cache.set(
-                    self._repair_state.snapshot.relation_id(snap_i), sub, score
+                    self._repair_state.snapshot.relation_id(ordinal), sub, score
                 )
 
     def _on_open_demo(self):
@@ -136,22 +136,22 @@ class WindowActionsMixin:
         else:
             self._workspace._nav_next()
 
-    def _on_reset_current_snap(self):
+    def _on_reset_current_relation(self):
         """重置当前选中文本对的修复。"""
         if self._repair_state is None:
             return
-        snap_i = self._review._cur_snap_i()
-        if snap_i is None or snap_i < 0:
+        ordinal = self._review._current_ordinal()
+        if ordinal is None or ordinal < 0:
             self._safe_status("请先在审校面板中选中一个文本对")
             return
         self._undo_stack.append(self._repair_state)
-        relation_id = self._repair_state.snapshot.relation_id(snap_i)
+        relation_id = self._repair_state.snapshot.relation_id(ordinal)
         self._repair_state = self._repair_state.reset_relation(relation_id)
-        self._invalidate_snap_scores([snap_i])
-        self._reset_accepted_proposals([snap_i])
+        self._invalidate_relation_scores([ordinal])
+        self._reset_accepted_proposals([ordinal])
         self._refresh()
         self._save_session()
-        self._set_temp_status(f"已重置 snap[{snap_i}] 的修复", "info")
+        self._set_temp_status(f"已重置关系[{ordinal}] 的修复", "info")
 
     def load_file_pair(
         self,
@@ -300,7 +300,7 @@ class WindowActionsMixin:
         self._status_bar.set_preview_active(True, phase=phase)
 
     def load_from_provider(self, entries: List[Any]):
-        """从 FileListProvider 加载章节列表。"""
+        """从外部条目序列加载章节列表。"""
         self._entries = entries
         # 构建文件队列
         items = []
@@ -524,11 +524,6 @@ class WindowActionsMixin:
                 self._alignment_snapshot = None
                 self._align_stats = result.stats
                 self._alignment_gate = dict(result.gate or {})
-                self._last_quality_assessment = {
-                    "quality": "diagnostic_only",
-                    "rejections": [],
-                    "indicators": {"alignment_status": "rejected"},
-                }
                 report_path = self._session_path()
                 report = build_report(
                     chapter_id=self._current_entry_id,
@@ -558,6 +553,8 @@ class WindowActionsMixin:
                     "对齐已拒绝：" + reason_labels.get(result.reason, result.reason),
                     "warning",
                 )
+                if not self._preview_active:
+                    self._on_view_mode_toggled(True)
                 self._update_feature_gating()
                 return
 
@@ -566,10 +563,6 @@ class WindowActionsMixin:
             )
             self._align_stats = result.stats
             self._alignment_gate = dict(result.gate or {})
-            # 保持 _sim_matrix（.npy 恢复优先），仅新鲜对齐时覆盖
-            if getattr(result, "sim_matrix", None) is not None:
-                self._sim_matrix = result.sim_matrix
-
             if hasattr(self, "_score_cache"):
                 self._score_cache.clear()
 
@@ -617,17 +610,12 @@ class WindowActionsMixin:
             # displayed selection unchanged.
             self._on_strategy_changed(self._review.get_strategy_index())
 
-            # ── 对齐决策与异常诊断分离；MDL 不再接受旧锚点质量门控 ──
             stats = result.stats
-            n_src = stats.get("n_source", 0) or len(self.src_lines or [])
-            n_tgt = stats.get("n_target", 0) or len(self.tgt_lines or [])
-
-            from dualign.services.cli_pipeline import _quality_diagnostics
-
-            diagnostic = _quality_diagnostics(result, n_src, n_tgt)
-            quality = diagnostic["level"]
-            rejections = diagnostic["rejections"]
-            indicators = diagnostic["indicators"]
+            quality_payload = {
+                "level": "diagnostic_only",
+                "rejections": [],
+                "indicators": {"alignment_status": result.status},
+            }
 
             if result.status == "needs_review":
                 self._status(
@@ -636,12 +624,6 @@ class WindowActionsMixin:
                 )
             else:
                 self._status("对齐完成", "success")
-
-            self._last_quality_assessment = {
-                "quality": quality,
-                "rejections": rejections,
-                "indicators": indicators,
-            }
 
             _report_path = self._session_path()
             if stats.get("load_origin") != "report":
@@ -664,11 +646,7 @@ class WindowActionsMixin:
                     document_b_path=self._tgt_path,
                     operations=result.all_ops,
                     stats=stats,
-                    quality={
-                        "level": quality,
-                        "rejections": rejections,
-                        "indicators": indicators,
-                    },
+                    quality=quality_payload,
                     alignment=alignment_payload(result, calibration_id=calibration_id),
                     provenance=_provenance(model, self._align_config, calibration_id),
                     repair_log=self._repair_state.repair_log,
@@ -764,30 +742,30 @@ class WindowActionsMixin:
         kind = action.kind
         if kind == "merge":
             if not ops.get("merge", False):
-                self._status(f"⚠ 跳过: snap[{action.ordinal}] 当前不可合并", "warning")
+                self._status(f"⚠ 跳过: 关系[{action.ordinal}] 当前不可合并", "warning")
                 return
         elif kind in ("split",):
             if not ops.get("split_tgt", False) and not ops.get("split_src", False):
-                self._status(f"⚠ 跳过: snap[{action.ordinal}] 当前不可拆分", "warning")
+                self._status(f"⚠ 跳过: 关系[{action.ordinal}] 当前不可拆分", "warning")
                 return
         elif kind in ("edit", "edit_tgt", "edit_src"):
             if not ops.get("edit", False):
-                self._status(f"⚠ 跳过: snap[{action.ordinal}] 当前不可校订", "warning")
+                self._status(f"⚠ 跳过: 关系[{action.ordinal}] 当前不可校订", "warning")
                 return
         elif kind == "delete":
             if not ops.get("delete", False):
-                self._status(f"⚠ 跳过: snap[{action.ordinal}] 当前不可删除", "warning")
+                self._status(f"⚠ 跳过: 关系[{action.ordinal}] 当前不可删除", "warning")
                 return
         elif kind in ("placeholder_src", "placeholder_tgt"):
             if not ops.get("placeholder", False):
                 self._status(
-                    f"⚠ 跳过: snap[{action.ordinal}] 当前不可插占位符", "warning"
+                    f"⚠ 跳过: 关系[{action.ordinal}] 当前不可插占位符", "warning"
                 )
                 return
         elif kind in ("ok", "flag"):
             if not ops.get(kind, False):
                 self._status(
-                    f"⚠ 跳过: snap[{action.ordinal}] 操作 {kind} 不可用", "warning"
+                    f"⚠ 跳过: 关系[{action.ordinal}] 操作 {kind} 不可用", "warning"
                 )
                 return
 
@@ -798,10 +776,10 @@ class WindowActionsMixin:
         self._undo_stack.append(self._repair_state)
         self._redo_stack.clear()
         self._repair_state = self._repair_state.apply(action)
-        # 标记受影响 snap 失效，等待 poll_now 捡起重算
+        # 标记受影响关系失效，等待 poll_now 捡起重算
         _affected = action.operation_indices
-        self._invalidate_snap_scores(_affected)
-        # 文本变更类操作 → 重置该 snap 已采纳的 AI 建议为 pending
+        self._invalidate_relation_scores(_affected)
+        # 文本变更类操作 → 重置该关系已采纳的 AI 建议为 pending
         _text_changing_kinds = {
             "edit",
             "edit_tgt",
@@ -834,22 +812,22 @@ class WindowActionsMixin:
             "placeholder_tgt": "已插占位符",
         }
         lbl = _action_labels.get(kind, f"已{kind}")
-        self._set_temp_status(f"{lbl} snap[{action.ordinal}]", "success")
+        self._set_temp_status(f"{lbl} 关系[{action.ordinal}]", "success")
 
         # 撤销栈溢出提醒
         if len(self._undo_stack) == self._undo_stack.maxlen:
             self._status("撤销栈已达上限 (50)，将覆盖最旧记录", "warning")
 
-    def do_merge(self, snap_i: int):
+    def do_merge(self, ordinal: int):
         """合并当前文本对。"""
         if self._repair_state is None:
             return
-        s_idx, t_idx, _sc = self._repair_state.snapshot.original_ops[snap_i]
+        s_idx, t_idx, _sc = self._repair_state.snapshot.original_ops[ordinal]
         self._apply_action(
-            RepairAction.make_merge(snap_i, sub_count=max(len(s_idx), len(t_idx)))
+            RepairAction.make_merge(ordinal, sub_count=max(len(s_idx), len(t_idx)))
         )
 
-    def do_split(self, snap_i: int):
+    def do_split(self, ordinal: int):
         """拆分文本对 — 自动拆分少行的一侧（按硬分割）。
 
         注意：拆分涉及模型编码，可能耗时。通过状态栏提示用户。
@@ -859,12 +837,12 @@ class WindowActionsMixin:
         if not self._ensure_model():
             self._status("拆分需要编码模型，请先完成一次对齐", "warning")
             return
-        snap = self._repair_state.snapshot
-        s_idx, t_idx, _sc = snap.original_ops[snap_i]
+        snapshot = self._repair_state.snapshot
+        s_idx, t_idx, _sc = snapshot.original_ops[ordinal]
         ls, lt = len(s_idx), len(t_idx)
 
         side = "src" if ls <= lt else "tgt"
-        self._status(f"拆分 snap[{snap_i}] {side} 侧…")
+        self._status(f"拆分关系[{ordinal}] {side} 侧…")
         QApplication.processEvents()
 
         # 创建嵌入缓存，使 split 产生的新文本被缓存
@@ -874,10 +852,10 @@ class WindowActionsMixin:
         ec = EmbeddingCache(get_embedding_cache_path())
         try:
             attempt = RepairService.try_split(
-                self._repair_state, snap_i, side, self._model, cache=ec
+                self._repair_state, ordinal, side, self._model, cache=ec
             )
         except Exception as exc:
-            self._set_flags([snap_i], f"拆分失败：{SPLIT_FAILURE_REALIGN}")
+            self._set_flags([ordinal], f"拆分失败：{SPLIT_FAILURE_REALIGN}")
             self._status(
                 f"拆分失败：{SPLIT_FAILURE_REALIGN}（{exc}），已标记 [F]",
                 "warning",
@@ -888,7 +866,7 @@ class WindowActionsMixin:
         if not attempt.succeeded:
             prefix = "拆分需复核" if attempt.needs_review else "拆分失败"
             note = f"{prefix}：{attempt.failure_reason}"
-            self._set_flags([snap_i], note)
+            self._set_flags([ordinal], note)
             self._status(f"{note}，已标记 [F]", "warning")
             return
         self._undo_stack.append(self._repair_state)
@@ -899,19 +877,19 @@ class WindowActionsMixin:
             action.source = "user"
             action.data["approvals"] = {"manual"}
         split_scores = action.data.get("split_scores", []) if action else []
-        self._set_known_snap_scores(snap_i, split_scores)
-        self._reset_accepted_proposals([snap_i])
+        self._set_known_relation_scores(ordinal, split_scores)
+        self._reset_accepted_proposals([ordinal])
         self._save_session()
         self._refresh()
         # 滚动到拆分后的文本对
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
-            if item is not None and item.data(Qt.ItemDataRole.UserRole) == snap_i:
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == ordinal:
                 self.table.scrollToItem(
                     item, QAbstractItemView.ScrollHint.PositionAtCenter
                 )
                 break
-        self._set_temp_status(f"已拆分 snap[{snap_i}] ({side}侧)", "success")
+        self._set_temp_status(f"已拆分关系[{ordinal}] ({side}侧)", "success")
 
     def _ensure_model(self):
         """确保 self._model 已加载。返回 True 表示就绪。"""
@@ -932,18 +910,18 @@ class WindowActionsMixin:
         self._model = m
         return True
 
-    def do_edit_single(self, snap_i: int):
+    def do_edit_single(self, ordinal: int):
         """校订单个文本对。优先使用当前修复状态。"""
         if self._repair_state is None:
             return
         ch = self._repair_state.current
-        g = ch.group(snap_i)
-        snap = self._repair_state.snapshot
+        g = ch.group(ordinal)
+        snapshot = self._repair_state.snapshot
 
         # 初始文本（原始对齐输出，始终不变）
-        s_idx, t_idx, _sc = snap.original_ops[snap_i]
-        initial_src = [snap.src_text(i) for i in s_idx]
-        initial_tgt = [snap.tgt_text(j) for j in t_idx]
+        s_idx, t_idx, _sc = snapshot.original_ops[ordinal]
+        initial_src = [snapshot.src_text(i) for i in s_idx]
+        initial_tgt = [snapshot.tgt_text(j) for j in t_idx]
 
         if g is not None and g.rows:
             from dualign.models.marker import is_merge
@@ -971,78 +949,78 @@ class WindowActionsMixin:
             new_tgt = dlg.result_tgt_lines
             # 不传 inherited_scores → _apply_info_full 用 osc 原始分 fallback
             action = RepairAction.make_edit(
-                snap_i,
+                ordinal,
                 new_src_lines=new_src,
                 new_tgt_lines=new_tgt,
             )
             self._apply_action(action)
 
-    def do_ok(self, snap_i: int):
+    def do_ok(self, ordinal: int):
         """审核通过 — 认可当前 1:1 状态，不做任何文本修改。"""
-        self._apply_action(RepairAction.make_ok(snap_i))
+        self._apply_action(RepairAction.make_ok(ordinal))
 
-    def do_flag(self, snap_i: int):
+    def do_flag(self, ordinal: int):
         """打开单个文本对的标记编辑器。"""
-        self.do_flag_selected([snap_i])
+        self.do_flag_selected([ordinal])
 
-    def do_flag_selected(self, snap_indices: List[int]):
+    def do_flag_selected(self, ordinals: List[int]):
         """为一个或多个文本对编辑标记注释。"""
         if self._repair_state is None:
             return
-        snaps = sorted(set(snap_indices))
+        selected = sorted(set(ordinals))
         flags = [
             self._repair_state.flag_for_relation(
                 self._repair_state.snapshot.relation_id(si)
             )
-            for si in snaps
+            for si in selected
         ]
         notes = [flag.data.get("note", "") for flag in flags if flag is not None]
         initial_note = (
             notes[0]
-            if len(notes) == len(snaps) and notes and len(set(notes)) == 1
+            if len(notes) == len(selected) and notes and len(set(notes)) == 1
             else ""
         )
         dialog = FlagEditDialog(
             initial_note,
             self,
             can_delete=bool(notes),
-            selection_count=len(snaps),
+            selection_count=len(selected),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         if dialog.delete_requested:
-            self._remove_flags(snaps)
+            self._remove_flags(selected)
         else:
-            self._set_flags(snaps, dialog.note)
+            self._set_flags(selected, dialog.note)
 
-    def _set_flags(self, snap_indices: List[int], note: str):
+    def _set_flags(self, ordinals: List[int], note: str):
         """一次历史操作中设置一组标记。"""
         if self._repair_state is None:
             return
-        snaps = sorted(set(snap_indices))
-        if not snaps:
+        selected = sorted(set(ordinals))
+        if not selected:
             return
         self._undo_stack.append(self._repair_state)
         self._redo_stack.clear()
         state = self._repair_state
-        for snap_i in snaps:
-            action = RepairAction.make_flag(snap_i, note)
+        for ordinal in selected:
+            action = RepairAction.make_flag(ordinal, note)
             action.source = "user"
             action.data["approvals"] = {"manual"}
             state = state.apply(action)
         self._repair_state = state
         self._save_session()
         self._refresh()
-        self._set_temp_status(f"已标记 {len(snaps)} 个文本对", "success")
+        self._set_temp_status(f"已标记 {len(selected)} 个文本对", "success")
 
-    def _remove_flags(self, snap_indices: List[int]):
+    def _remove_flags(self, ordinals: List[int]):
         """删除一组标记，保留同文本对的其他修复。"""
         if self._repair_state is None:
             return
-        snaps = sorted(set(snap_indices))
+        selected = sorted(set(ordinals))
         state = self._repair_state
-        for snap_i in snaps:
-            relation_id = state.snapshot.relation_id(snap_i)
+        for ordinal in selected:
+            relation_id = state.snapshot.relation_id(ordinal)
             state = state.without_relation_flag(relation_id)
         if state.repair_log == self._repair_state.repair_log:
             return
@@ -1051,62 +1029,47 @@ class WindowActionsMixin:
         self._repair_state = state
         self._save_session()
         self._refresh()
-        self._set_temp_status(f"已删除 {len(snaps)} 个文本对的标记", "info")
+        self._set_temp_status(f"已删除 {len(selected)} 个文本对的标记", "info")
 
-    def do_delete(self, snap_i: int):
+    def do_delete(self, ordinal: int):
         """删除文本对。"""
-        self._apply_action(RepairAction.make_delete(snap_i))
+        self._apply_action(RepairAction.make_delete(ordinal))
 
-    def _delete_selected_snaps(self, snaps: List[int]):
-        """批量删除选中 snap。逐个 apply delete action。"""
-        if self._repair_state is None or len(snaps) < 1:
+    def _delete_selected_relations(self, ordinals: List[int]):
+        """逐个删除选中的关系。"""
+        if self._repair_state is None or len(ordinals) < 1:
             return
         self._undo_stack.append(self._repair_state)
         self._redo_stack.clear()
         state = self._repair_state
-        for si in sorted(snaps, reverse=True):
+        for si in sorted(ordinals, reverse=True):
             action = RepairAction.make_delete(si, source="user")
             action.data["approvals"] = {"manual"}
             state = state.apply(action)
         self._repair_state = state
-        self._invalidate_snap_scores(snaps)
-        self._reset_accepted_proposals(snaps)
+        self._invalidate_relation_scores(ordinals)
+        self._reset_accepted_proposals(ordinals)
         self._save_session()
         self._refresh()
-        self._set_temp_status(f"已删除 {len(snaps)} 个文本对", "success")
+        self._set_temp_status(f"已删除 {len(ordinals)} 个文本对", "success")
 
-    def do_placeholder(self, snap_i: int):
+    def do_placeholder(self, ordinal: int):
         """占位符 — 自动判断方向（1:0 → tgt, 0:1 → src）。"""
         if self._repair_state is None:
             return
-        s_idx, t_idx, _sc = self._repair_state.snapshot.original_ops[snap_i]
+        s_idx, t_idx, _sc = self._repair_state.snapshot.original_ops[ordinal]
         ls, lt = len(s_idx), len(t_idx)
         if ls > 0 and lt == 0:
-            self._apply_action(RepairAction.make_placeholder_tgt(snap_i))
+            self._apply_action(RepairAction.make_placeholder_tgt(ordinal))
         elif ls == 0 and lt > 0:
-            self._apply_action(RepairAction.make_placeholder_src(snap_i))
+            self._apply_action(RepairAction.make_placeholder_src(ordinal))
 
-    def do_auto_repair_single(self, snap_i: int):
-        """自动修复当前文本对。"""
-        if self._repair_state is None:
-            return
-        s_idx, t_idx, _sc = self._repair_state.snapshot.original_ops[snap_i]
-        ls, lt = len(s_idx), len(t_idx)
-        if ls > 1 and lt == 1:
-            self.do_split(snap_i)  # N:1 → 拆 tgt
-        elif ls == 1 and lt > 1:
-            self.do_merge(snap_i)  # 1:M → 合 tgt
-        elif ls > 0 and lt == 0:
-            self.do_placeholder(snap_i)
-        elif ls == 0 and lt > 0:
-            self.do_placeholder(snap_i)
-
-    def do_edit_selected(self, snaps: List[int]):
-        """跨 snap 手动校订。所有选中文本对合并编辑。"""
-        if self._repair_state is None or len(snaps) < 1:
+    def do_edit_selected(self, ordinals: List[int]):
+        """跨关系手动校订。所有选中文本对合并编辑。"""
+        if self._repair_state is None or len(ordinals) < 1:
             return
         ch = self._repair_state.current
-        snap = self._repair_state.snapshot
+        snapshot = self._repair_state.snapshot
         from dualign.models.marker import is_merge
 
         # 收集所有原文/译文行（优先从当前状态读取）
@@ -1115,9 +1078,9 @@ class WindowActionsMixin:
         # 初始文本（原始对齐输出，始终不变）
         init_src: List[str] = []
         init_tgt: List[str] = []
-        for si in sorted(snaps):
+        for si in sorted(ordinals):
             g = ch.group(si)
-            s_idx, t_idx, _sc = snap.original_ops[si]
+            s_idx, t_idx, _sc = snapshot.original_ops[si]
 
             if g is not None and g.rows:
                 if is_merge(g.rows[0].marker):
@@ -1131,21 +1094,21 @@ class WindowActionsMixin:
                             all_tgt.append(r.tgt_text)
             else:
                 for i in s_idx:
-                    t = snap.src_text(i)
+                    t = snapshot.src_text(i)
                     if t:
                         all_src.append(t)
                 for j in t_idx:
-                    t = snap.tgt_text(j)
+                    t = snapshot.tgt_text(j)
                     if t:
                         all_tgt.append(t)
 
-            # 收集该 snap 的初始文本（始终从 snapshot 原始数据）
+            # 收集该关系的初始文本（始终从不可变基线读取）
             for i in s_idx:
-                t = snap.src_text(i)
+                t = snapshot.src_text(i)
                 if t:
                     init_src.append(t)
             for j in t_idx:
-                t = snap.tgt_text(j)
+                t = snapshot.tgt_text(j)
                 if t:
                     init_tgt.append(t)
 
@@ -1159,37 +1122,37 @@ class WindowActionsMixin:
         if dlg.exec() == BlockEditDialog.DialogCode.Accepted:
             new_src = dlg.result_src_lines
             new_tgt = dlg.result_tgt_lines
-            if len(snaps) == 1:
+            if len(ordinals) == 1:
                 # 不传入 inherited_scores → _apply_info_full 用 osc 原始分 fallback
                 # 轮询自动触发异步评分
                 action = RepairAction.make_edit(
-                    snaps[0],
+                    ordinals[0],
                     new_src_lines=new_src,
                     new_tgt_lines=new_tgt,
                 )
                 self._apply_action(action)
             else:
-                # 多 snap 校订：不传 scores，轮询自动评分
+                # 多关系校订：不传 scores，轮询自动评分
                 self._undo_stack.append(self._repair_state)
                 self._redo_stack.clear()
                 self._repair_state = RepairService.repair_multi_edit(
                     self._repair_state,
-                    snaps,
+                    ordinals,
                     new_src,
                     new_tgt,
                 )
-                self._invalidate_snap_scores(snaps)
-                self._reset_accepted_proposals(snaps)
+                self._invalidate_relation_scores(ordinals)
+                self._reset_accepted_proposals(ordinals)
                 self._save_session()
                 self._refresh()
 
-    def _reset_accepted_proposals(self, snap_indices: list[int]):
-        """重置指定 snap 中已采纳的 AI 建议为 pending。"""
-        if self._repair_state is None or not snap_indices:
+    def _reset_accepted_proposals(self, ordinals: list[int]):
+        """重置指定关系中已采纳的 AI 建议为 pending。"""
+        if self._repair_state is None or not ordinals:
             return
         store = self._repair_state.ai_proposal_store
         changed = False
-        for si in snap_indices:
+        for si in ordinals:
             relation_id = self._repair_state.snapshot.relation_id(si)
             for p in store.get(relation_id):
                 if p.status == "accepted":
@@ -1199,7 +1162,7 @@ class WindowActionsMixin:
             self._review._rebuild_ai_suggestions()
 
     def do_bundle_relations(self, ordinals: List[int]):
-        """跨 snap 合并：将多个 snap 捆绑为一个文本对。原文和译文均合并。"""
+        """跨关系合并：将多个关系捆绑为一个文本对。两侧文本均合并。"""
         if self._repair_state is None or len(ordinals) < 2:
             return
         self._undo_stack.append(self._repair_state)
@@ -1207,7 +1170,7 @@ class WindowActionsMixin:
         self._repair_state = RepairService.repair_bundle_relations(
             self._repair_state, sorted(ordinals)
         )
-        self._invalidate_snap_scores([ordinals[0]])
+        self._invalidate_relation_scores([ordinals[0]])
         self._reset_accepted_proposals([ordinals[0]])
         self._save_session()
         self._refresh()
@@ -1215,18 +1178,18 @@ class WindowActionsMixin:
             f"已合并 {len(ordinals)} 个文本对 → 关系[{ordinals[0]}]", "success"
         )
 
-    def do_reset(self, snap_i: int):
+    def do_reset(self, ordinal: int):
         """重置当前文本对的修复。"""
         if self._repair_state is None:
             return
         self._undo_stack.append(self._repair_state)
         self._redo_stack.clear()
-        relation_id = self._repair_state.snapshot.relation_id(snap_i)
+        relation_id = self._repair_state.snapshot.relation_id(ordinal)
         self._repair_state = self._repair_state.reset_relation(relation_id)
-        self._invalidate_snap_scores([snap_i])
+        self._invalidate_relation_scores([ordinal])
         self._save_session()
         self._refresh()
-        self._set_temp_status(f"已重置 snap[{snap_i}]", "info")
+        self._set_temp_status(f"已重置关系[{ordinal}]", "info")
 
     def _apply_ai_action(self, action: RepairAction):
         """AI 操作的受控入口：用户已确认采纳，执行修复。
@@ -1236,7 +1199,7 @@ class WindowActionsMixin:
         """
         self._apply_action(action, auto=False)
         self._set_temp_status(
-            f"AI 修复已应用: snap[{action.ordinal}] {action.kind}", "success"
+            f"AI 修复已应用: 关系[{action.ordinal}] {action.kind}", "success"
         )
 
     def _on_ai_repair_chapter(self):
@@ -1348,9 +1311,9 @@ class WindowActionsMixin:
         QApplication.processEvents()
         self._undo_stack.append(self._repair_state)
         self._repair_state = self._repair_state.reset()
-        _all_snaps = [g.ordinal for g in self._repair_state.current.groups]
-        self._invalidate_snap_scores(_all_snaps)
-        self._reset_accepted_proposals(_all_snaps)
+        all_ordinals = [g.ordinal for g in self._repair_state.current.groups]
+        self._invalidate_relation_scores(all_ordinals)
+        self._reset_accepted_proposals(all_ordinals)
         self._refresh()
         self._save_session()
         self._safe_status("已重置所有修复")
@@ -1415,8 +1378,8 @@ class WindowActionsMixin:
     def _on_auto_repair_done(self, result):
         """一键修复完成 → 更新状态并刷新 UI。"""
         self._repair_state = result
-        _all_snaps = [g.ordinal for g in self._repair_state.current.groups]
-        self._invalidate_snap_scores(_all_snaps)
+        all_ordinals = [g.ordinal for g in self._repair_state.current.groups]
+        self._invalidate_relation_scores(all_ordinals)
         self._save_session()
         self._refresh()
         n_actions = len(result._repair_log) if result._repair_log else 0
@@ -1735,30 +1698,32 @@ class WindowActionsMixin:
     def _on_undo(self):
         """撤销 — 恢复位置 + 同步 AiProposalStore。
 
-        撤销一个操作时，对应 snap 的 AI 建议应从 accepted 回退到 pending，
+        撤销一个操作时，对应关系的 AI 建议应从 accepted 回退到 pending，
         避免建议显示"已采纳"但修复已被回退的不一致状态。
         """
         if self._undo_stack:
-            self._undo_snap_save = self._review._cur_snap_i()
-            # 找出将被撤销的操作涉及的 snap
+            self._undo_ordinal_save = self._review._current_ordinal()
+            # 找出将被撤销的操作涉及的关系
             old_state = self._repair_state
             self._redo_stack.append(old_state)
             self._repair_state = self._undo_stack.pop()
             # 同步 AiProposalStore：被撤销的操作回退为 pending
-            undone_snaps = self._sync_proposals_on_undo(old_state, self._repair_state)
-            # 标记受影响的 snap 失效
-            if undone_snaps:
-                self._invalidate_snap_scores(undone_snaps)
+            undone_ordinals = self._sync_proposals_on_undo(
+                old_state, self._repair_state
+            )
+            # 标记受影响的关系失效
+            if undone_ordinals:
+                self._invalidate_relation_scores(undone_ordinals)
             self._refresh()
             # 恢复撤销前的位置
-            saved = self._undo_snap_save
-            self._undo_snap_save = None
+            saved = self._undo_ordinal_save
+            self._undo_ordinal_save = None
             if saved is not None:
                 for i, anomaly in enumerate(self._anomalies):
                     if saved in anomaly.ordinals:
                         self._review.go(i, scroll_to=True)
                         break
-            if undone_snaps:
+            if undone_ordinals:
                 self._review._rebuild_ai_suggestions()
             self._set_temp_status(
                 f"已撤销 (共 {len(self._repair_state.repair_log)} 个操作)", "info"
@@ -1768,11 +1733,11 @@ class WindowActionsMixin:
     def _sync_proposals_on_undo(
         self, old_state: RepairState, new_state: RepairState
     ) -> List[int]:
-        """撤销后同步 AiProposalStore：找出被撤销的操作对应的 snap，回退为 pending。
+        """撤销后同步 AiProposalStore：找出被撤销操作对应的关系，回退为 pending。
 
-        Returns: 被回退的 snap 列表。
+        Returns: 被回退的关系序号列表。
         """
-        undone_snaps: Set[int] = set()
+        undone_ordinals: Set[int] = set()
         old_log = old_state._repair_log
         new_log = new_state._repair_log
         # 找出 old 中有但 new 中没有的 action
@@ -1796,16 +1761,16 @@ class WindowActionsMixin:
             ):
                 store = new_state.ai_proposal_store
                 store.reset(new_state.snapshot.relation_id(op_i))
-                undone_snaps.add(op_i)
-        return list(undone_snaps)
+                undone_ordinals.add(op_i)
+        return list(undone_ordinals)
 
     def _on_redo(self):
         """恢复 — 重做被撤销的操作。"""
         if self._redo_stack:
             self._undo_stack.append(self._repair_state)
             self._repair_state = self._redo_stack.pop()
-            _all_snaps = [g.ordinal for g in self._repair_state.current.groups]
-            self._invalidate_snap_scores(_all_snaps)
+            all_ordinals = [g.ordinal for g in self._repair_state.current.groups]
+            self._invalidate_relation_scores(all_ordinals)
             self._refresh()
             self._set_temp_status(
                 f"已恢复 (共 {len(self._repair_state.repair_log)} 个操作)", "info"
@@ -1843,9 +1808,9 @@ class WindowActionsMixin:
             _tb.print_exc()
 
     def _on_placeholder(self):
-        snap_i = self._review._cur_snap_i()
-        if snap_i is not None:
-            self.do_placeholder(snap_i)
+        ordinal = self._review._current_ordinal()
+        if ordinal is not None:
+            self.do_placeholder(ordinal)
 
     def _session_path(self) -> str:
         """Return the sole JSON work-report path."""
@@ -1869,7 +1834,6 @@ class WindowActionsMixin:
                 os.remove(npy_path)
             except OSError:
                 pass
-        self._sim_matrix = None
 
     def _write_report(self, writer) -> bool:
         """Apply one guarded report update and refresh its observed identity."""
@@ -2008,7 +1972,7 @@ class WindowActionsMixin:
             self._status_bar.set_view_mode_enabled(True)
             self._status_bar.set_preview_active(True, phase="准备失败")
 
-    def _on_show_all_snaps(self):
+    def _on_show_all_relations(self):
         """空状态页的「查看全部文本对」按钮回调。
 
         取消勾选筛选面板的「仅显示异常文本对」复选框并触发刷新，

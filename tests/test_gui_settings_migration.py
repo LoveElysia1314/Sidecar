@@ -6,7 +6,7 @@ from dualign.gui.settings import (
 )
 
 
-def test_legacy_quality_gate_settings_keep_only_anomaly_display_values(tmp_path):
+def test_legacy_quality_gate_settings_are_discarded(tmp_path):
     path = tmp_path / "gui_config.json"
     path.write_text(
         json.dumps(
@@ -27,10 +27,7 @@ def test_legacy_quality_gate_settings_keep_only_anomaly_display_values(tmp_path)
     loaded = config.load()
 
     assert "quality_gate" not in loaded
-    assert loaded[KEY_ANOMALY_DETECTION] == {
-        "zscore_k": 2.5,
-        "zscore_min_score": 0.55,
-    }
+    assert KEY_ANOMALY_DETECTION not in loaded
     config.save()
     persisted = json.loads(path.read_text(encoding="utf-8"))
     assert "quality_gate" not in persisted

@@ -191,7 +191,7 @@ def test_review_session_keeps_context_and_proposed_state_together():
     assert proposed
     assert proposed[-1].kind == "merge"
     # Context 和 proposed_state 均保留 merge 后的组内行布局。
-    info = session.context.get_snap_info(1)
+    info = session.context.get_relation_info(1)
     assert info.src_text.splitlines() == ["S1", "S2"]
     assert json.loads(str(info))["proposal"] == "merge"
 
@@ -236,8 +236,8 @@ def test_review_session_preserves_explicitly_selected_normal_pairs():
 
     assert session.context.reviewable_ids == [0, 3]
     assert [info.ordinal for info in session.context.reviewable_infos] == [0, 3]
-    assert not session.context.get_snap_info(0).is_reviewable
-    assert not session.context.get_snap_info(3).is_reviewable
+    assert not session.context.get_relation_info(0).is_reviewable
+    assert not session.context.get_relation_info(3).is_reviewable
 
     prompt = AiRepairAgent(strategy="tgt")._build_initial_user_message(session.context)
     assert '>> {"id": 0' in prompt

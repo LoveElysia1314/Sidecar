@@ -7,18 +7,15 @@ from pathlib import Path
 from dualign.common import load_text_lines
 from dualign.config import get_embedding_cache_path
 from dualign.core import (
-    ALGORITHM_LEGACY_ANCHOR_V1,
     ALGORITHM_MDL_V1,
     AlignConfig,
     AlignmentResult,
-    LegacyAnchorConfig,
     align,
     alignment_payload,
 )
 from dualign.core.calibration import resolve_alignment_calibration
 from dualign.services.cached_encoder import CachedEncoder
 from dualign.services.embedding_cache import EmbeddingCache
-from dualign.services.quality_gate import automatic_repair_blockers
 from dualign.services.report_io import (
     ReportError,
     build_report,
@@ -28,6 +25,52 @@ from dualign.services.report_io import (
     report_matches_alignment,
     save_report,
 )
+
+LEGACY_ALGORITHM = "legacy-anchor-v1"
+
+
+def _algorithm_name(config) -> str:
+    return str(getattr(config, "algorithm", ALGORITHM_MDL_V1))
+
+
+def _run_alignment(
+    lines_a,
+    lines_b,
+    embeddings_a,
+    embeddings_b,
+    config,
+    encode_fn,
+    calibration,
+) -> AlignmentResult:
+    """Keep the archived solver behind the explicit CLI configuration boundary."""
+
+    if _algorithm_name(config) != LEGACY_ALGORITHM:
+        return align(
+            lines_a,
+            lines_b,
+            embeddings_a,
+            embeddings_b,
+            config,
+            encode_fn=encode_fn,
+            calibration=calibration,
+        )
+
+    from dualign.core.legacy_anchor_aligner import align as legacy_align
+
+    legacy = legacy_align(
+        lines_a,
+        lines_b,
+        embeddings_a,
+        embeddings_b,
+        config,
+        encode_fn=encode_fn,
+    )
+    return AlignmentResult(
+        all_ops=list(legacy.all_ops),
+        stats=dict(legacy.stats),
+        status="aligned",
+        algorithm=LEGACY_ALGORITHM,
+    )
 
 
 def default_report_path(document_a_path: str | Path) -> Path:
@@ -81,26 +124,20 @@ def _provenance(model, config, calibration_id: str = "") -> dict:
 
     from dualign import __version__
 
-    if (
-        not calibration_id
-        and isinstance(config, AlignConfig)
-        and config.algorithm == ALGORITHM_MDL_V1
-    ):
+    algorithm_name = _algorithm_name(config)
+    if not calibration_id and algorithm_name == ALGORITHM_MDL_V1:
         resolved = resolve_alignment_calibration(
             model, calibration_id=config.calibration_id
         )
         calibration_id = resolved.calibration_id if resolved is not None else ""
-    if isinstance(config, LegacyAnchorConfig):
+    if algorithm_name == LEGACY_ALGORITHM:
         from dualign.core.legacy_anchor_aligner import (
             ALIGN_CACHE_REVISION,
             ALIGN_CORE_VERSION,
         )
 
-        algorithm_name = ALGORITHM_LEGACY_ANCHOR_V1
     else:
         from dualign.core import ALIGN_CACHE_REVISION, ALIGN_CORE_VERSION
-
-        algorithm_name = config.algorithm
 
     provider = ""
     endpoint = ""
@@ -149,11 +186,9 @@ def _provenance(model, config, calibration_id: str = "") -> dict:
 
 
 def _empty_result(source_count: int, target_count: int, config) -> AlignmentResult:
-    if not isinstance(config, LegacyAnchorConfig):
+    if _algorithm_name(config) != LEGACY_ALGORITHM:
         return AlignmentResult(
             all_ops=[],
-            anchors=[],
-            anchor_op_indices={},
             stats={"n_source": source_count, "n_target": target_count, "n_ops": 0},
             status="rejected",
             reason="empty_document",
@@ -166,8 +201,6 @@ def _empty_result(source_count: int, target_count: int, config) -> AlignmentResu
         operations = [((), (index,), 0.0) for index in range(target_count)]
     return AlignmentResult(
         all_ops=operations,
-        anchors=[],
-        anchor_op_indices={},
         stats={
             "n_source": source_count,
             "n_target": target_count,
@@ -176,20 +209,23 @@ def _empty_result(source_count: int, target_count: int, config) -> AlignmentResu
             "anchor_density": 0.0,
             "avg_similarity": 0.0,
         },
-        algorithm=ALGORITHM_LEGACY_ANCHOR_V1,
+        algorithm=LEGACY_ALGORITHM,
     )
 
 
 def _quality_diagnostics(result, source_count: int, target_count: int) -> dict:
     """Keep anomaly diagnostics separate from the mdl applicability decision."""
 
-    if result.algorithm != ALGORITHM_LEGACY_ANCHOR_V1:
+    if result.algorithm != LEGACY_ALGORITHM:
         return {
             "level": "diagnostic_only",
             "rejections": [],
             "indicators": {"alignment_status": result.status},
         }
-    from dualign.services.quality_gate import _gap_row_ratio, assess_alignment_quality
+    from dualign.core.legacy_anchor_quality import (
+        _gap_row_ratio,
+        assess_alignment_quality,
+    )
 
     assessment = assess_alignment_quality(
         result.stats or {},
@@ -205,10 +241,14 @@ def _quality_diagnostics(result, source_count: int, target_count: int) -> dict:
     }
 
 
-def _safe_repair_mode(strategy: str, model, quality: dict) -> tuple[str, object]:
-    """Fall back to the no-encoding strategy for structurally unsafe input."""
-    if automatic_repair_blockers(quality):
-        return "minimal", None
+def _repair_mode(strategy: str, model, quality: dict) -> tuple[str, object]:
+    """Apply frozen structural blockers only to explicit legacy results."""
+
+    if quality.get("level") != "diagnostic_only":
+        from dualign.core.legacy_anchor_quality import automatic_repair_blockers
+
+        if automatic_repair_blockers(quality):
+            return "minimal", None
     return strategy, model
 
 
@@ -249,7 +289,7 @@ def align_documents(
         if encoder is None:
             return {"success": False, "error": "模型未加载"}
     resolved = None
-    if isinstance(cfg, AlignConfig) and cfg.algorithm == ALGORITHM_MDL_V1:
+    if _algorithm_name(cfg) == ALGORITHM_MDL_V1:
         resolved = resolve_alignment_calibration(
             encoder, calibration_id=cfg.calibration_id
         )
@@ -288,7 +328,7 @@ def align_documents(
                             ),
                             existing_actions,
                         )
-                        repair_strategy, repair_model = _safe_repair_mode(
+                        repair_strategy, repair_model = _repair_mode(
                             strategy, encoder, quality
                         )
                         repair_log = RepairService.auto_repair(
@@ -347,14 +387,14 @@ def align_documents(
     if lines_a and lines_b:
         with EmbeddingCache(get_embedding_cache_path()) as cache:
             cached_encoder = CachedEncoder(encoder, cache)
-            result = align(
+            result = _run_alignment(
                 lines_a,
                 lines_b,
                 cached_encoder.encode(lines_a),
                 cached_encoder.encode(lines_b),
                 cfg,
-                encode_fn=cached_encoder.encode,
-                calibration=resolved.calibration if resolved is not None else None,
+                cached_encoder.encode,
+                resolved.calibration if resolved is not None else None,
             )
     else:
         result = _empty_result(len(lines_a), len(lines_b), cfg)
@@ -369,7 +409,7 @@ def align_documents(
         state = RepairState(
             AlignmentSnapshot.from_alignment(result.all_ops, lines_a, lines_b)
         )
-        repair_strategy, repair_model = _safe_repair_mode(strategy, encoder, quality)
+        repair_strategy, repair_model = _repair_mode(strategy, encoder, quality)
         repair_log = RepairService.auto_repair(
             state, strategy=repair_strategy, model=repair_model
         ).repair_log

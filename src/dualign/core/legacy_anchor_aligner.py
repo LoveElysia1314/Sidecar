@@ -3,8 +3,8 @@ Dualign — 冻结的 legacy 锚点 DP 对齐引擎
 =============================
 纯函数实现，无 GUI 依赖，可独立单元测试。
 
-本模块保留 0.8 系列生产算法，供显式 legacy CLI、回归 benchmark 与
-局部修复使用。新生产入口位于 ``dualign.core.aligner``；禁止把这里的
+本模块保留 0.8 系列生产算法，只供显式 legacy CLI 与回归 benchmark 使用。
+生产入口和局部重对齐都使用 ``dualign.core.aligner``；禁止把这里的
 拒绝或质量判断当作新算法的静默回退。
 
 算法流水线 (Phase 1→5)
@@ -32,13 +32,15 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterator, List, Optional, Set, Tuple, Union
+from typing import Callable, ClassVar, Dict, Iterator, List, Optional, Set, Tuple, Union
 
 import numpy as np
 
 from dualign.version import __version__
 
-from .punctuation import PunctuationHandler
+from .text import op_type_str, smart_join_lines as _smart_join_lines
+
+ALGORITHM_NAME = "legacy-anchor-v1"
 
 _IndexTuple = Tuple[int, ...]
 _AlignmentOperation = Tuple[_IndexTuple, _IndexTuple, float]
@@ -57,7 +59,7 @@ elif not logger.handlers:
 
 
 # Public core version follows package metadata.  The cache revision changes
-# independently whenever relations can change without an AlignConfig change.
+# independently whenever relations can change without a config change.
 ALIGN_CORE_VERSION = __version__
 ALIGN_CACHE_REVISION = "coverage-combos.1"
 
@@ -89,6 +91,8 @@ MERGE_PREFLIGHT_MAX_ANCHOR_GAP = 50
 class LegacyAnchorConfig:
     """冻结的锚点算法参数；只供显式 legacy 路径使用。"""
 
+    algorithm: ClassVar[str] = ALGORITHM_NAME
+
     allow_deletions: bool = True
     allow_insertions: bool = True
     allow_merge: bool = True
@@ -113,44 +117,9 @@ class AlignmentResult:
     sim_matrix: Optional[np.ndarray] = None
 
 
-# Source compatibility for archived scripts.  Production code should import
-# ``LegacyAnchorConfig`` explicitly so legacy parameters do not leak into the
-# new algorithm configuration.
-AlignConfig = LegacyAnchorConfig
-
-
 # ═══════════════════════════════════════════════════════════════
 # 底层工具函数
 # ═══════════════════════════════════════════════════════════════
-
-
-def count_punct_info(text: str) -> int:
-    """统计文本中标点符号数量，作为语言无关的信息量代理。"""
-    return PunctuationHandler.count_punctuation_line(text)
-
-
-def op_type_str(s_tuple: _IndexTuple, t_tuple: _IndexTuple) -> str:
-    """Return the compact source-to-target cardinality label for an operation."""
-    ls, lt = len(s_tuple), len(t_tuple)
-    if ls == 1 and lt == 1:
-        return "1:1"
-    if ls > 1 and lt >= 1:
-        return f"{ls}:1"
-    if ls >= 1 and lt > 1:
-        return f"1:{lt}"
-    if ls > 0 and lt == 0:
-        return f"{ls}:0"
-    if ls == 0 and lt > 0:
-        return f"0:{lt}"
-    if ls == 0 and lt == 0:
-        return "0:0"
-    return "?:?"
-
-
-def _normalize(v: np.ndarray) -> np.ndarray:
-    """L2 归一化，零向量保持不变。"""
-    norm = np.linalg.norm(v)
-    return v / norm if norm > 1e-12 else v
 
 
 def _normalize_batch(v: np.ndarray) -> np.ndarray:
@@ -161,58 +130,8 @@ def _normalize_batch(v: np.ndarray) -> np.ndarray:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 核心评分函数
-# ═══════════════════════════════════════════════════════════════
-
-
-def pair_score(
-    src_emb: np.ndarray,
-    tgt_emb: np.ndarray,
-    src_indices: _IndexTuple,
-    tgt_indices: _IndexTuple,
-    encode_fn: Optional[_EncodeFn] = None,
-    src_texts: Optional[List[str]] = None,
-    tgt_texts: Optional[List[str]] = None,
-) -> float:
-    """1:1 点积评分；N:1/1:M 拼接后重新编码再评分。"""
-    if not src_indices or not tgt_indices:
-        return 0.0
-
-    if len(src_indices) > 1 or len(tgt_indices) > 1:
-        if encode_fn is None:
-            return 0.0
-        src_joined = _smart_join_lines(
-            [src_texts[i] for i in src_indices] if src_texts else []
-        )
-        tgt_joined = _smart_join_lines(
-            [tgt_texts[j] for j in tgt_indices] if tgt_texts else []
-        )
-        embs = encode_fn([src_joined, tgt_joined])
-        vs = _normalize(embs[0])
-        vt = _normalize(embs[1])
-        return float(np.dot(vs, vt))
-
-    if len(src_indices) == 1 and len(tgt_indices) == 1:
-        vs = src_emb[src_indices[0]]
-        vt = tgt_emb[tgt_indices[0]]
-        return float(np.dot(vs, vt))
-
-
-# ═══════════════════════════════════════════════════════════════
 # 锚点搜索（双边信任余量 + 单调链 DP）
 # ═══════════════════════════════════════════════════════════════
-
-
-def bilateral_trust_margin(
-    score: float,
-    min_score: float = ANCHOR_MIN_SCORE,
-    slope: float = ANCHOR_MARGIN_SLOPE,
-    intercept: float = ANCHOR_MARGIN_INTERCEPT,
-) -> float:
-    """双边信任余量公式: margin = slope × score - intercept"""
-    if score < min_score:
-        return float("inf")
-    return slope * score - intercept
 
 
 def find_bilateral_anchors(
@@ -367,7 +286,7 @@ def _anchor_index(
 
 def _restricted_dp(
     sim_matrix: np.ndarray,
-    config: AlignConfig,
+    config: LegacyAnchorConfig,
 ) -> Tuple[List[_AlignmentOperation], float]:
     """受限 DP：仅 1:1/1:0/0:1 三种移动，无 N:1/1:M。
 
@@ -514,7 +433,7 @@ def _supplement_micro_anchors(
     sim_matrix: np.ndarray,
     n: int,
     m: int,
-    config: AlignConfig,
+    config: LegacyAnchorConfig,
 ) -> List[_AlignmentOperation]:
     """Phase 2: 在未覆盖区域用受限 DP 补全微锚点。"""
     micro: List[_AlignmentOperation] = []
@@ -669,7 +588,7 @@ def _final_dp(
     merge_scores: Dict[_AlignmentPair, float],
     n: int,
     m: int,
-    config: AlignConfig,
+    config: LegacyAnchorConfig,
 ) -> List[_AlignmentOperation]:
     """Phase 5: 单一 DP 最终决选。"""
     if n == 0 and m == 0:
@@ -782,7 +701,7 @@ def align(
     tgt_lines: List[str],
     src_emb: np.ndarray,
     tgt_emb: np.ndarray,
-    config: Optional[AlignConfig] = None,
+    config: Optional[LegacyAnchorConfig] = None,
     encode_fn: Optional[_EncodeFn] = None,
     build_merge_cache: bool = True,
     silent: bool = False,
@@ -796,7 +715,7 @@ def align(
     Phase 5: 单一 DP 最终决选
     """
     if config is None:
-        config = AlignConfig()
+        config = LegacyAnchorConfig()
 
     n, m = len(src_lines), len(tgt_lines)
 
@@ -1182,32 +1101,6 @@ def _max_anchor_gap(
 # ═══════════════════════════════════════════════════════════════
 # 文本拼接辅助
 # ═══════════════════════════════════════════════════════════════
-
-
-def _smart_join_lines(lines: List[str], sep: Optional[str] = None) -> str:
-    """拼接多行文本。"""
-    if not lines:
-        return ""
-    result = lines[0].rstrip()
-    for nxt in lines[1:]:
-        nxt = nxt.strip()
-        if not nxt:
-            continue
-        if sep is not None:
-            result += sep + nxt
-            continue
-        if result:
-            last = result[-1]
-            is_cjk = (
-                "\u4e00" <= last <= "\u9fff"
-                or "\u3000" <= last <= "\u303f"
-                or "\uff00" <= last <= "\uffef"
-                or "\u3400" <= last <= "\u4dbf"
-            )
-            result += nxt if is_cjk else " " + nxt
-        else:
-            result = nxt
-    return result
 
 
 _CJK_RANGES = (
