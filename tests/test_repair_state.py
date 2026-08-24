@@ -169,16 +169,37 @@ class TestApplyUndo:
         assert restored.repair_log[0].relation_ids == ("L000001",)
         assert restored.current.group(0).rows[0].tgt_text == "fixed"
 
-    def test_meta_decisions_survive_a_compatible_content_decision(self):
+    def test_explicit_approval_resolves_a_flag_without_erasing_content(self):
         edit = RepairAction.make_edit("L000001", source="ai", new_tgt_lines=["fixed"])
         flag = RepairAction.make_flag("L000001", "review")
         approval = RepairAction.make_ok("L000001")
 
-        assert normalize_repair_log([edit, flag, approval]) == [
-            edit,
-            flag,
-            approval,
-        ]
+        assert normalize_repair_log([edit, flag, approval]) == [edit, approval]
+
+    def test_content_changes_preserve_flag_and_invalidate_approval(self):
+        flag = RepairAction.make_flag("L000001", "review", source="auto")
+        approval = RepairAction.make_ok("L000001", source="ai")
+        edit = RepairAction.make_edit("L000001", source="user", new_tgt_lines=["fixed"])
+
+        assert normalize_repair_log([approval, flag, edit]) == [edit, flag]
+
+    def test_flag_reopens_an_approved_relation(self):
+        approval = RepairAction.make_ok("L000001", source="user")
+        flag = RepairAction.make_flag("L000001", "review", source="ai")
+
+        assert normalize_repair_log([approval, flag]) == [flag]
+
+    def test_full_auto_repair_preserves_an_existing_review_flag(self, simple_state):
+        flagged = simple_state.apply(
+            simple_state.make_action("flag", 2, note="结构分歧", source="auto")
+        )
+
+        repaired = RepairService.auto_repair(flagged, strategy="minimal")
+        relation_id = repaired.snapshot.relation_id(2)
+
+        assert [action.kind for action in repaired.repair_log] == ["merge", "flag"]
+        assert repaired.flag_for_relation(relation_id) is not None
+        assert "[F]" in repaired.current.group(2).rows[0].marker
 
 
 class _PartitionEncoder:
@@ -448,20 +469,22 @@ class TestRenderRows:
         assert tgt[1] == "b", f"merged tgt mismatch: {tgt[1]!r}"
 
     def test_merge_bundle(self, multi_state):
-        """[M] 跨行合并 (bundle)：合并 snap0+snap2。"""
-        repaired = RepairService.repair_bundle_relations(multi_state, [0, 2])
-        src, tgt = RepairService.render_rows(repaired)
-        assert len(src) == 5, f"expect 5 rows, got {len(src)}"
-        assert src[0] == "A D", f"bundle src mismatch: {src[0]!r}"
-        assert tgt[0] == "a c", f"bundle tgt mismatch: {tgt[0]!r}"
+        """跨关系正文动作不得越过未选关系并改变单调顺序。"""
+        with pytest.raises(ValueError, match="连续"):
+            RepairService.repair_bundle_relations(multi_state, [0, 2])
 
-        # 平坦预览也必须使用整个 bundle，而不是只读取 anchor 的原始 snap。
-        from dualign.gui.window_table import WindowTableMixin
+        with pytest.raises(ValueError, match="连续"):
+            RepairService.repair_multi_edit(multi_state, [0, 2], ["X", "Y"], ["x", "y"])
 
-        stub = type("WindowStub", (), {"_repair_state": repaired})()
-        flat_src, flat_tgt = WindowTableMixin._get_flat_lines(stub)
-        assert flat_src[0] == "A D"
-        assert flat_tgt[0] == "a c"
+    def test_selection_capabilities_disable_noncontiguous_content_actions(
+        self, multi_state
+    ):
+        adjacent = RepairService.valid_selection_operations(multi_state, [0, 1])
+        separated = RepairService.valid_selection_operations(multi_state, [0, 2])
+
+        assert adjacent["merge"] and adjacent["edit"]
+        assert not separated["merge"] and not separated["edit"]
+        assert separated["flag"] and separated["delete"]
 
     def test_native_asymmetric_relation_uses_one_current_score(self, multi_state):
         view = make_table_view(multi_state)

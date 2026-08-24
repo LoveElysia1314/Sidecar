@@ -463,36 +463,44 @@ class WindowTableMixin:
         )
         menu.addSeparator()
 
-        ops = RepairService.valid_operations(self._repair_state, ordinal)
+        capabilities = RepairService.valid_selection_operations(
+            self._repair_state, selected_ordinals
+        )
 
-        if ops.get("merge"):
+        if len(selected_ordinals) == 1:
             a = menu.addAction("合并 [M]")
+            a.setEnabled(capabilities["merge"])
             a.triggered.connect(lambda: self.do_merge(ordinal))
-        if ops.get("split_tgt") or ops.get("split_src"):
-            a = menu.addAction("拆分 [S]")
-            a.triggered.connect(lambda: self.do_split(ordinal))
-
-        # 跨关系合并 — 多选时可用
-        if len(selected_ordinals) > 1:
-            menu.addSeparator()
+        else:
             a = menu.addAction(f"⤓ 合并选中 ({len(selected_ordinals)} → 1) [M]")
-            a.setToolTip("旧格式操作：将多个关系合并为一个等行文本对")
+            a.setEnabled(capabilities["merge"])
+            if not capabilities["merge"]:
+                a.setToolTip("跨关系合并要求选择连续文本对")
             a.triggered.connect(lambda: self.do_bundle_relations(selected_ordinals))
+
+        a = menu.addAction("拆分 [S]")
+        a.setEnabled(capabilities["split"])
+        a.triggered.connect(lambda: self.do_split(ordinal))
 
         menu.addSeparator()
 
         if len(selected_ordinals) > 1:
             a = menu.addAction(f"校订选中 ({len(selected_ordinals)} 组) [E]")
+            a.setEnabled(capabilities["edit"])
+            if not capabilities["edit"]:
+                a.setToolTip("跨关系校订要求选择连续文本对")
             a.triggered.connect(lambda: self.do_edit_selected(selected_ordinals))
-        elif ops.get("edit"):
+        else:
             a = menu.addAction("校订 [E]")
+            a.setEnabled(capabilities["edit"])
             a.triggered.connect(lambda: self.do_edit_single(ordinal))
 
         a = menu.addAction("审核通过")
-        a.setEnabled(ops.get("ok", False))
+        a.setEnabled(len(selected_ordinals) == 1 and capabilities["ok"])
         a.triggered.connect(lambda: self.do_ok(ordinal))
         flag_label = "编辑标记…" if len(selected_ordinals) == 1 else "批量编辑标记…"
         a = menu.addAction(flag_label)
+        a.setEnabled(capabilities["flag"])
         a.triggered.connect(lambda: self.do_flag_selected(selected_ordinals))
         if len(selected_ordinals) > 1:
             a = menu.addAction(f"✕ 删除选中 ({len(selected_ordinals)} 组)")
@@ -503,15 +511,15 @@ class WindowTableMixin:
             a = menu.addAction("✕ 删除")
             a.triggered.connect(lambda: self.do_delete(ordinal))
 
-        if ops.get("placeholder"):
-            a = menu.addAction("▸ 占位")
-            a.triggered.connect(lambda: self.do_placeholder(ordinal))
+        a = menu.addAction("▸ 占位")
+        a.setEnabled(len(selected_ordinals) == 1 and capabilities["placeholder"])
+        a.triggered.connect(lambda: self.do_placeholder(ordinal))
 
         menu.addSeparator()
 
-        if ops.get("reset"):
-            a = menu.addAction("↺ 重置")
-            a.triggered.connect(lambda: self.do_reset(ordinal))
+        a = menu.addAction("↺ 重置")
+        a.setEnabled(len(selected_ordinals) == 1 and capabilities["reset"])
+        a.triggered.connect(lambda: self.do_reset(ordinal))
 
         # ── AI 选项 ──
         menu.addSeparator()

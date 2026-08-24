@@ -155,7 +155,7 @@ def build_spec_content(
         "dualign.models",
         "dualign.models.state",
         "dualign.models.action",
-        "dualign.models.snap_state",
+        "dualign.models.relation_status",
         "dualign.services",
         "dualign.services.repair",
         "dualign.services.local_realign",
@@ -197,7 +197,7 @@ def build_spec_content(
 from PyInstaller.utils.hooks import copy_metadata
 
 a = Analysis(
-    ['{ENTRY_POINT}'],
+    [{ENTRY_POINT!r}],
     pathex=[],
     binaries=[],
     datas=copy_metadata('dualign') + [

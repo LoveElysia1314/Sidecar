@@ -269,8 +269,10 @@ merge/marker 的强调色不会被误当成正文确实发生变化。Snap 列�
 切换后一部分控件仍持有旧色。设置读写也从 `_load_history/_save_history` 收敛为配置快照和
 `_schedule_settings_save/_save_settings`，调用方不再直接访问 `DualignConfig._data`。
 
-标记组合规则也只保留一份：生产回放原先私有的 `_combine_meta()` 已下沉为
-`marker.combine()`，统一处理 `[OK]/[F]` 互斥、去重和 `[AI]` 来源保留。静态未使用代码审计
+标记的视觉组合规则只保留一份：生产回放原先私有的 `_combine_meta()` 已下沉为
+`marker.combine()`，统一处理 `[OK]/[F]` 互斥、去重和 `[AI]` 来源保留。审阅生命周期则由
+`normalize_repair_log()` 统一投影：正文动作保留 `[F]` 并使旧 `[OK]` 失效，显式 `ok` 解除
+`[F]`，再次 flag 重新开启事项。静态未使用代码审计
 随后清除了回放中的多余导入，80% 置信度以上不再报告未使用的生产符号。
 
 同一轮审计还删除了从未接入界面的折叠容器与分数渐变图例、失去入口的单关系自动修复

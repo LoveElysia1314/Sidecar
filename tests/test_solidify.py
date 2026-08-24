@@ -263,7 +263,7 @@ def test_two_sided_split_requires_both_split_types(tmp_path: Path):
     assert path_b.read_text(encoding="utf-8") == "A\nB\n"
 
 
-def test_flag_and_ok_are_reanchored_after_surviving_content_solidification(
+def test_resolved_flag_does_not_reappear_after_content_solidification(
     tmp_path: Path,
 ):
     edit = RepairAction.make_edit("L000001", source="user", new_tgt_lines=["edited"])
@@ -287,8 +287,7 @@ def test_flag_and_ok_are_reanchored_after_surviving_content_solidification(
 
     assert result is not None
     remaining = load_report(report_path)["repair_log"]
-    assert [item["kind"] for item in remaining] == ["flag", "ok"]
-    assert remaining[0]["data"]["note"] == "复查术语"
+    assert [item["kind"] for item in remaining] == ["ok"]
 
 
 def test_delete_is_solidified_but_review_markers_remain_in_history(tmp_path: Path):

@@ -837,45 +837,21 @@ class ReviewController(QWidget):
         s_idx, t_idx, _ = snapshot.original_ops[ordinal]
         ls, lt = len(s_idx), len(t_idx)
 
-        # 从 valid_operations 获取基础可用性
+        # 同一份选择投影同时驱动工具栏、菜单和服务层校验。
         from dualign.services.repair import RepairService
 
-        ops = RepairService.valid_operations(w._repair_state, ordinal)
+        selected = self._selected_ordinals() or [ordinal]
+        capabilities = RepairService.valid_selection_operations(
+            w._repair_state, selected
+        )
 
         predicted = self._predict_auto_action(ls, lt, getattr(w, "_strategy", "src"))
 
         for key, btn in self._btn_refs.items():
-            if key == "merge":
-                # 多选始终可用；单选由 valid_operations 决定
-                sel = self._selected_ordinals()
-                enabled = ops.get(key, False) or len(sel) > 1
-            elif key == "split":
-                enabled = ops.get("split_tgt", False) or ops.get("split_src", False)
-            elif key == "edit":
-                enabled = ops.get("edit", False)
-            elif key == "ok":
-                sel = self._selected_ordinals()
-                enabled = ops.get("ok", False) or any(
-                    RepairService.valid_operations(w._repair_state, si).get("ok", False)
-                    for si in sel
-                )
-            elif key == "flag":
-                enabled = True  # 始终可标记
-            elif key == "delete":
-                sel = self._selected_ordinals()
-                enabled = ops.get("delete", False) or len(sel) > 1
-            elif key == "placeholder":
-                sel = self._selected_ordinals()
-                enabled = ops.get("placeholder", False) or any(
-                    RepairService.valid_operations(w._repair_state, si).get(
-                        "placeholder", False
-                    )
-                    for si in sel
-                )
+            if key in capabilities:
+                enabled = capabilities[key]
             elif key == "suggest":
                 enabled = predicted is not None  # 有自动修复建议时可用
-            elif key == "reset":
-                enabled = True  # 始终可用，无副作用
             else:
                 enabled = False
 

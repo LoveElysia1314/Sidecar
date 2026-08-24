@@ -1073,6 +1073,13 @@ class WindowActionsMixin:
         """跨关系手动校订。所有选中文本对合并编辑。"""
         if self._repair_state is None or len(ordinals) < 1:
             return
+        selected = sorted(set(ordinals))
+        capabilities = RepairService.valid_selection_operations(
+            self._repair_state, selected
+        )
+        if not capabilities["edit"]:
+            self._status("跨关系校订要求选择连续文本对", "warning")
+            return
         ch = self._repair_state.current
         snapshot = self._repair_state.snapshot
         from dualign.models.marker import is_merge
@@ -1083,7 +1090,7 @@ class WindowActionsMixin:
         # 初始文本（原始对齐输出，始终不变）
         init_src: List[str] = []
         init_tgt: List[str] = []
-        for si in sorted(ordinals):
+        for si in selected:
             g = ch.group(si)
             s_idx, t_idx, _sc = snapshot.original_ops[si]
 
@@ -1127,12 +1134,12 @@ class WindowActionsMixin:
         if dlg.exec() == BlockEditDialog.DialogCode.Accepted:
             new_src = dlg.result_src_lines
             new_tgt = dlg.result_tgt_lines
-            if len(ordinals) == 1:
+            if len(selected) == 1:
                 # 不传入 inherited_scores → _apply_info_full 用 osc 原始分 fallback
                 # 轮询自动触发异步评分
                 action = self._repair_state.make_action(
                     "edit",
-                    ordinals[0],
+                    selected[0],
                     new_src_lines=new_src,
                     new_tgt_lines=new_tgt,
                 )
@@ -1143,12 +1150,12 @@ class WindowActionsMixin:
                 self._redo_stack.clear()
                 self._repair_state = RepairService.repair_multi_edit(
                     self._repair_state,
-                    ordinals,
+                    selected,
                     new_src,
                     new_tgt,
                 )
-                self._invalidate_relation_scores(ordinals)
-                self._reset_accepted_proposals(ordinals)
+                self._invalidate_relation_scores(selected)
+                self._reset_accepted_proposals(selected)
                 self._save_session()
                 self._refresh()
 
@@ -1171,17 +1178,24 @@ class WindowActionsMixin:
         """跨关系合并：将多个关系捆绑为一个文本对。两侧文本均合并。"""
         if self._repair_state is None or len(ordinals) < 2:
             return
+        selected = sorted(set(ordinals))
+        capabilities = RepairService.valid_selection_operations(
+            self._repair_state, selected
+        )
+        if not capabilities["merge"]:
+            self._status("跨关系合并要求选择连续文本对", "warning")
+            return
         self._undo_stack.append(self._repair_state)
         self._redo_stack.clear()
         self._repair_state = RepairService.repair_bundle_relations(
-            self._repair_state, sorted(ordinals)
+            self._repair_state, selected
         )
-        self._invalidate_relation_scores([ordinals[0]])
-        self._reset_accepted_proposals([ordinals[0]])
+        self._invalidate_relation_scores([selected[0]])
+        self._reset_accepted_proposals([selected[0]])
         self._save_session()
         self._refresh()
         self._set_temp_status(
-            f"已合并 {len(ordinals)} 个文本对 → 关系[{ordinals[0]}]", "success"
+            f"已合并 {len(selected)} 个文本对 → 关系[{selected[0]}]", "success"
         )
 
     def do_reset(self, ordinal: int):
@@ -1753,7 +1767,7 @@ class WindowActionsMixin:
         old_set = {(a.relation_ids, a.kind, a.timestamp) for a in old_log}
         new_set = {(a.relation_ids, a.kind, a.timestamp) for a in new_log}
         undone = old_set - new_set
-        for op_i, kind, _ts in undone:
+        for relation_ids, kind, _ts in undone:
             if kind in (
                 "edit",
                 "edit_tgt",
@@ -1769,8 +1783,9 @@ class WindowActionsMixin:
                 "placeholder_tgt",
             ):
                 store = new_state.ai_proposal_store
-                store.reset(new_state.snapshot.relation_id(op_i))
-                undone_ordinals.add(op_i)
+                for relation_id in relation_ids:
+                    store.reset(relation_id)
+                    undone_ordinals.add(new_state.snapshot.operation_index(relation_id))
         return list(undone_ordinals)
 
     def _on_redo(self):

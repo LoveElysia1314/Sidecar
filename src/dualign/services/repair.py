@@ -516,11 +516,15 @@ def replay(snapshot: AlignmentSnapshot, log: List[RepairAction]) -> ChapterState
 def normalize_repair_log(actions) -> list[RepairAction]:
     """Collapse an append-only action stream into its effective decisions.
 
-    External AI runners and older reports may append a newer content action
-    without removing the action it supersedes. Replaying both is ambiguous and
-    solidification can then try to edit a relation already deleted by the older
-    action. This applies the same replacement semantics as ``RepairState.apply``
-    while retaining compatible meta actions (``ok`` and ``flag``).
+    Content decisions and review decisions are independent state axes:
+
+    - a newer content action replaces older content and invalidates ``ok``;
+    - ``flag`` survives content changes until somebody explicitly resolves it;
+    - ``ok`` resolves ``flag``; a later ``flag`` reopens the review concern.
+
+    Preserved flags are moved behind replacement content so replay renders
+    ``[F]`` on the new content.  The rules depend on action meaning, not on
+    whether the producer was automatic repair, AI, or a person.
     """
 
     def targets(action: RepairAction) -> set[tuple[str, object]]:
@@ -529,17 +533,42 @@ def normalize_repair_log(actions) -> list[RepairAction]:
     normalized: list[RepairAction] = []
     for action in actions:
         affected = targets(action)
-        if action.kind in ("ok", "flag"):
+        if action.kind == "flag":
             normalized = [
                 previous
                 for previous in normalized
-                if not (targets(previous) & affected and previous.kind == action.kind)
+                if not (
+                    targets(previous) & affected and previous.kind in {"flag", "ok"}
+                )
             ]
-        else:
+            normalized.append(action)
+            continue
+        if action.kind == "ok":
             normalized = [
-                previous for previous in normalized if not targets(previous) & affected
+                previous
+                for previous in normalized
+                if not (
+                    targets(previous) & affected and previous.kind in {"flag", "ok"}
+                )
             ]
+            normalized.append(action)
+            continue
+
+        preserved_flags = [
+            previous
+            for previous in normalized
+            if targets(previous) & affected and previous.kind == "flag"
+        ]
+        normalized = [
+            previous
+            for previous in normalized
+            if not (targets(previous) & affected) or previous.kind == "flag"
+        ]
+        normalized = [
+            previous for previous in normalized if previous not in preserved_flags
+        ]
         normalized.append(action)
+        normalized.extend(preserved_flags)
     return normalized
 
 
@@ -844,7 +873,6 @@ class RepairService:
         snapshot = result.snapshot
 
         protected: set[int] = set()
-        flags_by_ordinal: Dict[int, List[RepairAction]] = {}
 
         def matches_current_auto_plan(action: RepairAction, ordinal: int) -> bool:
             """Whether an older automatic action is still valid for strategy."""
@@ -865,8 +893,9 @@ class RepairService:
             for action in state.repair_log:
                 affected = set(state.action_ordinals(action))
                 if action.kind == "flag":
-                    for affected_index in affected:
-                        flags_by_ordinal.setdefault(affected_index, []).append(action)
+                    # A concern does not block a machine proposal.  The log
+                    # normalizer keeps it visible across that proposal.
+                    continue
                 elif action.source == "auto" and action.kind in {
                     "merge",
                     "split",
@@ -916,11 +945,6 @@ class RepairService:
             )
             if applied_action is not None and applied_action.source == "auto":
                 applied_action.data["strategy"] = strategy
-
-            # flag 表示仍待关注，而不是阻止机器提出结构修复。自动修复会先
-            # 替换同一关系的操作，因此在其后重新附加原标记，保留审阅意图。
-            for flag in flags_by_ordinal.get(ordinal, []):
-                result = result.apply(flag)
 
         return result
 
@@ -1070,24 +1094,78 @@ class RepairService:
         ordinals 必须连续。非锚点关系被移除，原文/译文均合并到锚点关系。
         统一为 kind="merge"。
 
-        自动消除占位、删除、拆分操作；但保留 edit 操作不撤销。
+        新合并作为正文决定统一替换旧正文动作；独立的 ``flag`` 由日志
+        规范化器保留，直至显式审核通过或取消标记。
         """
         if len(ordinals) < 2:
             return state
 
-        # 选择性重置：消除 placeholder/delete/split，保留 edit
-        for ordinal in ordinals:
-            relation_id = state.snapshot.relation_id(ordinal)
-            action = state.action_for_relation(relation_id)
-            if action is None:
-                continue
-            kind = action.kind
-            # edit 操作保留，其余（placeholder_src/tgt, delete, split, ok, flag, merge）均重置
-            if kind not in ("edit",):
-                state = state.reset_relation(relation_id)
+        ordinals = sorted(set(ordinals))
+        if not RepairService.selection_is_contiguous(ordinals):
+            raise ValueError("跨关系合并要求选择连续文本对")
 
         action = state.make_action("merge", ordinals[0], ordinals=ordinals)
         return state.apply(action)
+
+    @staticmethod
+    def selection_is_contiguous(ordinals: List[int]) -> bool:
+        """Return whether a relation selection is unique and gap-free."""
+
+        selected = sorted(set(ordinals))
+        return bool(selected) and selected == list(range(selected[0], selected[-1] + 1))
+
+    @staticmethod
+    def valid_selection_operations(
+        state: RepairState, ordinals: List[int]
+    ) -> Dict[str, bool]:
+        """Project one relation selection into shared GUI capabilities.
+
+        Cross-relation merge and edit are monotone only for a contiguous
+        selection.  Other bulk operations act independently on each relation.
+        Keeping the rule here prevents toolbar and context-menu drift.
+        """
+
+        selected = sorted(set(ordinals))
+        keys = (
+            "merge",
+            "split",
+            "edit",
+            "ok",
+            "flag",
+            "delete",
+            "placeholder",
+            "reset",
+        )
+        if not selected:
+            return {key: False for key in keys}
+
+        per_relation = [
+            RepairService.valid_operations(state, ordinal) for ordinal in selected
+        ]
+        if len(selected) == 1:
+            operations = per_relation[0]
+            return {
+                "merge": operations["merge"],
+                "split": operations["split_src"] or operations["split_tgt"],
+                "edit": operations["edit"],
+                "ok": operations["ok"],
+                "flag": operations["flag"],
+                "delete": operations["delete"],
+                "placeholder": operations["placeholder"],
+                "reset": operations["reset"],
+            }
+
+        contiguous = RepairService.selection_is_contiguous(selected)
+        return {
+            "merge": contiguous,
+            "split": False,
+            "edit": contiguous,
+            "ok": any(operation["ok"] for operation in per_relation),
+            "flag": True,
+            "delete": True,
+            "placeholder": any(operation["placeholder"] for operation in per_relation),
+            "reset": any(operation["reset"] for operation in per_relation),
+        }
 
     @staticmethod
     def valid_operations(state: RepairState, ordinal: int) -> Dict[str, bool]:
@@ -1150,6 +1228,10 @@ class RepairService:
         """
         if len(ordinals) < 2:
             return state
+
+        ordinals = sorted(set(ordinals))
+        if not RepairService.selection_is_contiguous(ordinals):
+            raise ValueError("跨关系校订要求选择连续文本对")
 
         anchor = ordinals[0]
         action = state.make_action(

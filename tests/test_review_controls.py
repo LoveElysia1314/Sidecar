@@ -182,6 +182,24 @@ def test_flag_note_update_and_removal_are_single_undoable_operations():
     assert window._repair_state.action_for_relation(relation_id).kind == "edit"
 
 
+def test_undo_projects_relation_identity_before_resetting_ai_proposal():
+    state = RepairState.from_ops([((0,), (0,), 0.9)], ["A"], ["B"])
+    action = state.make_action(
+        "edit", 0, source="ai", new_src_lines=["A"], new_tgt_lines=["B+"]
+    )
+    store = state.ai_proposal_store
+    store.add(action)
+    assert store.accept(action)
+    applied = state.apply(action)
+
+    ordinals = WindowActionsMixin._sync_proposals_on_undo(
+        SimpleNamespace(), applied, state
+    )
+
+    assert ordinals == [0]
+    assert store.get_status(action) == "pending"
+
+
 def test_new_chapter_focus_prefers_first_visible_anomaly():
     window = _InitialFocusHarness([RelationAnomaly(ordinals=(12,))], {12})
 
