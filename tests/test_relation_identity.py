@@ -21,10 +21,11 @@ from dualign.services.report_io import (
 )
 
 
-def test_legacy_report_derives_compatible_relation_ids():
+def test_current_report_contract_rejects_missing_relation_ids():
     report = {"ops": [{"s": [0], "t": [0], "sc": 0.8}, {"s": [1], "t": []}]}
 
-    assert relation_ids_from_report(report) == ("L000001", "L000002")
+    with pytest.raises(ReportError, match="关系 ID 无效"):
+        relation_ids_from_report(report)
 
 
 def test_partial_relation_identity_is_rejected_instead_of_silently_rebased():

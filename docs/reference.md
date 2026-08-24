@@ -21,7 +21,7 @@ result = align_documents(
 
 ## 报告
 
-报告顶层 `format` 固定为 `dualign-report`。关键字段：
+报告顶层 `format` 固定为 `dualign-report/v1`。加载器只接受完全匹配的版本，不迁移旧报告。关键字段：
 
 - `documents.a/b.sha256`：规范化正文哈希；
 - `ops`：不可变初始关系，`s` / `t` 是两侧原始块索引；

@@ -48,7 +48,7 @@ def test_alignment_persists_only_a_report(tmp_path):
     assert not list(tmp_path.rglob("*.align.yaml"))
     assert not (report.parent / "chapter.source.md").exists()
     data = json.loads(report.read_text(encoding="utf-8"))
-    assert data["format"] == "dualign-report"
+    assert data["format"] == "dualign-report/v1"
     assert data["documents"]["a"]["sha256"]
     assert data["snapshot_fingerprint"]
     assert data["provenance"]["embedding"]["model"] == "mock-diagonal"
@@ -65,6 +65,23 @@ def test_matching_report_skips_model_and_stale_document_invalidates_it(tmp_path)
     source.write_text("changed\n", encoding="utf-8")
     third = align_documents(str(source), str(target), str(report), model=encoder)
     assert third["success"] and not third["cache_hit"]
+
+
+def test_unversioned_report_is_recomputed_instead_of_migrated(tmp_path):
+    source, target = _pair(tmp_path)
+    report = tmp_path / "chapter.report.json"
+    encoder = MockEncoder()
+    assert align_documents(str(source), str(target), str(report), model=encoder)[
+        "success"
+    ]
+    stale = json.loads(report.read_text(encoding="utf-8"))
+    stale["format"] = "dualign-report"
+    report.write_text(json.dumps(stale), encoding="utf-8")
+
+    rebuilt = align_documents(str(source), str(target), str(report), model=encoder)
+
+    assert rebuilt["success"] and not rebuilt["cache_hit"]
+    assert load_report(report)["format"] == "dualign-report/v1"
 
 
 def test_alignment_configuration_is_part_of_report_cache_identity(tmp_path):
@@ -141,7 +158,7 @@ def test_disabling_alignment_reuse_recomputes_and_replaces_old_report(tmp_path):
         "success"
     ]
     stale = load_report(report)
-    stale["ops"] = [{"s": [0, 1], "t": [0, 1], "sc": 0.01}]
+    stale["ops"] = [{"id": "L000001", "s": [0, 1], "t": [0, 1], "sc": 0.01}]
     stale["repair_log"] = [RepairAction.make_flag("L000001", "旧标记").to_dict()]
     save_report(stale, report)
 
@@ -167,8 +184,8 @@ def test_preserved_work_state_repairs_only_unresolved_relations(tmp_path):
     first = align_documents(str(source), str(target), str(report), model=encoder)
     stale = load_report(report)
     stale["ops"] = [
-        {"s": [0, 1], "t": [0], "sc": 0.5},
-        {"s": [], "t": [1], "sc": 0.0},
+        {"id": "L000001", "s": [0, 1], "t": [0], "sc": 0.5},
+        {"id": "L000002", "s": [], "t": [1], "sc": 0.0},
     ]
     stale["repair_log"] = [
         RepairAction.make_flag("L000001", "仍需人工确认").to_dict(),

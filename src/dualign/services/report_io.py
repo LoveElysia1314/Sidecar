@@ -24,7 +24,7 @@ from dualign.models.score_cache import RelationScoreCache
 from dualign.services.alignment_io import document_sha256
 from dualign.services.repair import RepairService, RepairState
 
-REPORT_FORMAT = "dualign-report"
+REPORT_FORMAT = "dualign-report/v1"
 
 
 class ReportError(ValueError):
@@ -110,7 +110,7 @@ def operations_from_report(report: Mapping[str, Any]) -> list[tuple]:
 
 
 def relation_ids_from_report(report: Mapping[str, Any]) -> tuple[str, ...]:
-    """Read stable relation IDs, deriving them for reports from before IDs."""
+    """Read the stable relation IDs required by the current report format."""
 
     try:
         items = list(report["ops"])
@@ -121,10 +121,8 @@ def relation_ids_from_report(report: Mapping[str, Any]) -> tuple[str, ...]:
         )
         if len(values) != len(items):
             raise ValueError("对齐关系必须是对象")
-        if values and all(not value for value in values):
-            return normalize_relation_ids(len(items))
         if any(not value for value in values):
-            raise ValueError("关系 ID 不能只存在于部分关系")
+            raise ValueError("当前报告格式要求每条关系都有稳定 ID")
         return normalize_relation_ids(len(items), values)
     except (KeyError, TypeError, ValueError) as exc:
         raise ReportError("报告中的关系 ID 无效") from exc
@@ -256,6 +254,8 @@ def save_report(report: Mapping[str, Any], path: str | Path) -> Path:
     data = deepcopy(dict(report))
     if data.get("format") != REPORT_FORMAT:
         raise ReportError("拒绝写入无法识别的 Dualign 报告")
+    if not isinstance(data.get("alignment"), Mapping):
+        raise ReportError("拒绝写入缺少对齐决策的 Dualign 报告")
     operations_from_report(data)
     _canonicalize_relation_state(data)
     data["updated_at"] = _now()
@@ -294,14 +294,8 @@ def load_report(path: str | Path) -> dict[str, Any]:
         raise ReportError("报告格式已过时，请重新对齐文档")
     operations_from_report(data)
     _canonicalize_relation_state(data)
-    # Reports written before the decision contract represent completed legacy
-    # alignments.  Keep them readable without pretending they passed mdl-v1.
-    if "alignment" not in data:
-        data["alignment"] = {
-            "status": "aligned",
-            "reason": None,
-            "algorithm": "legacy-anchor-v1",
-        }
+    if not isinstance(data.get("alignment"), Mapping):
+        raise ReportError("报告缺少当前格式要求的对齐决策，请重新对齐文档")
     return data
 
 

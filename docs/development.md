@@ -210,7 +210,7 @@ python scripts/build_exe.py
 ```bash
 # 需安装 Inno Setup 6
 python scripts/build_exe.py --installer
-# → Dualign_Setup_v0.9.0.exe
+# → Dualign_Setup_v0.9.1.exe
 ```
 
 ### PyPI 发布
