@@ -126,7 +126,7 @@ class TestMultiPersistence:
         """AI ok 解析为 merge — merge 已使逻辑为 1:1，current 不再含 NON_1TO1。"""
         # AI 的 ok 在 ToolExecutor 层面解析为真实的操作 kind
         s2 = repaired_state.apply(
-            RepairAction(kind="merge", source="ai", operation_indices=(5,))
+            RepairAction(kind="merge", source="ai", relation_ids=("L000006",))
         )
         r2 = project_relation_statuses(s2)
         assert "NON_1TO1" in r2[5].initial_anomaly_types
@@ -139,7 +139,7 @@ class TestMultiPersistence:
     ):
         """人类 ok — approval=USER → is_reviewable=False。"""
         s2 = repaired_state.apply(
-            RepairAction(kind="ok", source="user", operation_indices=(5,))
+            RepairAction(kind="ok", source="user", relation_ids=("L000006",))
         )
         r2 = project_relation_statuses(s2)
         assert not r2[5].is_reviewable
@@ -168,7 +168,7 @@ class TestOrphanPersistence:
         """AI ok 解析为 placeholder_tgt — 占位文本保持不变，current 仍无 NON_1TO1。"""
         # AI 的 ok 在 ToolExecutor 层面解析为真实的操作 kind
         s2 = repaired_state.apply(
-            RepairAction(kind="placeholder_tgt", source="ai", operation_indices=(8,))
+            RepairAction(kind="placeholder_tgt", source="ai", relation_ids=("L000009",))
         )
         r2 = project_relation_statuses(s2)
         assert "NON_1TO1" in r2[8].initial_anomaly_types
@@ -181,7 +181,7 @@ class TestOrphanPersistence:
     ):
         """人类 ok — approval=USER → is_reviewable=False。"""
         s2 = repaired_state.apply(
-            RepairAction(kind="ok", source="user", operation_indices=(8,))
+            RepairAction(kind="ok", source="user", relation_ids=("L000009",))
         )
         r2 = project_relation_statuses(s2)
         assert not r2[8].is_reviewable

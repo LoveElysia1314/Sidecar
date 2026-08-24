@@ -84,6 +84,11 @@ class AlignmentSnapshot:
         except ValueError as exc:
             raise KeyError(f"未知关系 ID: {relation_id}") from exc
 
+    def operation_indices(self, relation_ids: Iterable[str]) -> tuple[int, ...]:
+        """Project stable relation identities into the snapshot order."""
+
+        return tuple(self.operation_index(relation_id) for relation_id in relation_ids)
+
     @property
     def ops_list(self) -> list:
         return list(self.original_ops)

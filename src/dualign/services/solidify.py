@@ -16,7 +16,7 @@ from typing import Iterable, Mapping
 
 from dualign.common import file_bytes_sha256
 from dualign.core.text import smart_join_lines as _smart_join_lines
-from dualign.models.action import RepairAction, project_action_to_relation_order
+from dualign.models.action import RepairAction
 from dualign.models.pair_editing import PairEditingState
 from dualign.services._text_diff import unified_text_diff
 from dualign.services.alignment_io import create_alignment_pair
@@ -123,9 +123,7 @@ def load_solidify_policy(path: str | Path) -> SolidifyPolicy:
 def _action_copy(
     action: RepairAction,
     *,
-    ordinal: int,
     data: Mapping[str, object] | None = None,
-    operation_indices: tuple[int, ...] | None = None,
     relation_ids: tuple[str, ...] | None = None,
 ) -> RepairAction:
     return RepairAction(
@@ -135,14 +133,7 @@ def _action_copy(
         data=dict(action.data if data is None else data),
         timestamp=action.timestamp,
         relation_ids=action.relation_ids if relation_ids is None else relation_ids,
-        operation_indices=(
-            (ordinal,) if operation_indices is None else operation_indices
-        ),
     )
-
-
-def _action_operations(action: RepairAction) -> tuple[int, ...]:
-    return action.operation_indices
 
 
 def _ordered_block_ids(state: PairEditingState, link_ids: Iterable[str], side: str):
@@ -315,25 +306,25 @@ def build_solidification_plan(
 
     state = baseline
 
-    def bind_action(action: RepairAction) -> RepairAction:
-        return project_action_to_relation_order(
-            action, tuple(link.id for link in baseline.links)
-        )
-
-    actions = tuple(normalize_repair_log(bind_action(action) for action in repair_log))
-    old_to_link = {index: link.id for index, link in enumerate(state.links)}
+    initial_link_ids = {link.id for link in baseline.links}
+    actions = tuple(normalize_repair_log(repair_log))
+    for action in actions:
+        unknown = set(action.relation_ids) - initial_link_ids
+        if unknown:
+            raise ValueError("固化操作引用未知关系: " + "、".join(sorted(unknown)))
+    relation_to_link = {link.id: link.id for link in state.links}
     pending: list[_PendingAction] = []
     applied: list[dict] = []
 
     def links_for(action: RepairAction) -> tuple[str, ...]:
         result: list[str] = []
-        for operation in _action_operations(action):
-            link_id = old_to_link.get(operation)
+        for relation_id in action.relation_ids:
+            link_id = relation_to_link.get(relation_id)
             if link_id and link_id not in result:
                 result.append(link_id)
         return tuple(result)
 
-    def merge_links(link_ids: tuple[str, ...], operations: tuple[int, ...]) -> str:
+    def merge_links(link_ids: tuple[str, ...], relation_ids: tuple[str, ...]) -> str:
         nonlocal state
         available = {link.id for link in state.links}
         existing = tuple(link_id for link_id in link_ids if link_id in available)
@@ -342,12 +333,11 @@ def build_solidification_plan(
         anchor = existing[0]
         if len(existing) > 1:
             state = state.merge_links(existing)
-        for operation in operations:
-            old_to_link[operation] = anchor
+        for relation_id in relation_ids:
+            relation_to_link[relation_id] = anchor
         return anchor
 
     for action in actions:
-        operations = _action_operations(action)
         link_ids = links_for(action)
         if not link_ids:
             continue
@@ -371,7 +361,7 @@ def build_solidification_plan(
             if not selected:
                 pending.append(_PendingAction(action, link_ids))
                 continue
-            anchor = merge_links(link_ids, operations)
+            anchor = merge_links(link_ids, action.relation_ids)
             kwargs = {}
             if "a" in selected:
                 kwargs["document_a"] = [
@@ -390,7 +380,7 @@ def build_solidification_plan(
             )
             remaining_sides = set(effects) - selected
             if remaining_sides:
-                residual = _action_copy(action, ordinal=0, data={})
+                residual = _action_copy(action, data={})
                 pending.append(_PendingAction(residual, (anchor,)))
             continue
 
@@ -415,7 +405,7 @@ def build_solidification_plan(
             if selected != affected:
                 pending.append(_PendingAction(action, link_ids))
                 continue
-            anchor = merge_links(link_ids, operations)
+            anchor = merge_links(link_ids, action.relation_ids)
             kwargs = {
                 "document_a" if side == "a" else "document_b": list(
                     action.data.get(keys[side]) or ()
@@ -447,7 +437,7 @@ def build_solidification_plan(
             if not selected:
                 pending.append(_PendingAction(action, link_ids))
                 continue
-            anchor = merge_links(link_ids, operations)
+            anchor = merge_links(link_ids, action.relation_ids)
             kwargs = {
                 candidates[side][2]: list(action.data.get(candidates[side][1]) or ())
                 for side in selected
@@ -470,9 +460,7 @@ def build_solidification_plan(
                     key = candidates[side][1]
                     data[key] = action.data[key]
                 pending.append(
-                    _PendingAction(
-                        _action_copy(action, ordinal=0, data=data), (anchor,)
-                    )
+                    _PendingAction(_action_copy(action, data=data), (anchor,))
                 )
             continue
 
@@ -480,31 +468,24 @@ def build_solidification_plan(
             if not policy.includes("delete_pair"):
                 pending.append(_PendingAction(action, link_ids))
                 continue
-            anchor = merge_links(link_ids, operations)
+            anchor = merge_links(link_ids, action.relation_ids)
             state = state.delete_link_content(anchor)
             applied.append({"action": action.to_dict(), "effects": ["delete_pair"]})
             continue
 
         pending.append(_PendingAction(action, link_ids))
 
-    final_positions = {link.id: index for index, link in enumerate(state.links)}
+    final_link_ids = {link.id for link in state.links}
     remaining: list[RepairAction] = []
     for item in pending:
-        positions: list[int] = []
-        for link_id in item.link_ids:
-            position = final_positions.get(link_id)
-            if position is not None and position not in positions:
-                positions.append(position)
-        if not positions:
-            continue
         surviving_ids = tuple(
-            link_id for link_id in item.link_ids if link_id in final_positions
+            link_id for link_id in item.link_ids if link_id in final_link_ids
         )
+        if not surviving_ids:
+            continue
         remaining.append(
             _action_copy(
                 item.action,
-                ordinal=positions[0],
-                operation_indices=tuple(positions),
                 relation_ids=surviving_ids,
             )
         )

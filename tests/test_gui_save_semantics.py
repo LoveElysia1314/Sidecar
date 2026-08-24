@@ -68,7 +68,7 @@ class _ScoreLoadHarness(WindowTableMixin):
 
 def test_save_records_relation_decision_without_touching_documents(tmp_path):
     harness = _Harness(tmp_path)
-    action = RepairAction.make_ok(0)
+    action = RepairAction.make_ok("L000001")
     action.source = "user"
     harness._repair_state = harness._repair_state.apply(action)
 
@@ -82,7 +82,7 @@ def test_save_records_relation_decision_without_touching_documents(tmp_path):
 def test_save_records_content_edit_without_implicitly_overwriting_sources(tmp_path):
     harness = _Harness(tmp_path)
     action = RepairAction.make_edit(
-        0,
+        "L000001",
         source="user",
         new_src_lines=["甲校订", "乙"],
         new_tgt_lines=["A"],
@@ -145,7 +145,7 @@ def test_loading_split_prefers_action_scores_over_pre_split_cache():
     state = RepairState.from_ops([((0, 1), (0,), 0.8)], ["甲", "乙"], ["A B"])
     state = state.apply(
         RepairAction.make_split(
-            0,
+            "L000001",
             source="user",
             new_src_lines=["甲", "乙"],
             new_tgt_lines=["A", "B"],

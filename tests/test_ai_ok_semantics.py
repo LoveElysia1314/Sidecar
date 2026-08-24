@@ -41,7 +41,7 @@ def _snapshot():
 
 def _repaired_state():
     """snap 1 已有自动合并。"""
-    return RepairState(_snapshot(), [RepairAction.make_merge(1, sub_count=2)])
+    return RepairState(_snapshot(), [RepairAction.make_merge("L000002", sub_count=2)])
 
 
 def _ctx_with_repair():
@@ -102,8 +102,8 @@ class TestAiOkDoesNotEraseRepairMarker:
         state = RepairState(
             _snapshot(),
             [
-                RepairAction.make_merge(1, sub_count=2),
-                RepairAction(kind="ok", source="ai", operation_indices=(1,)),
+                RepairAction.make_merge("L000002", sub_count=2),
+                RepairAction(kind="ok", source="ai", relation_ids=("L000002",)),
             ],
         )
         markers = {row.marker for row in state.current.rows if row.ordinal == 1}
@@ -113,8 +113,8 @@ class TestAiOkDoesNotEraseRepairMarker:
         state = RepairState(
             _snapshot(),
             [
-                RepairAction.make_merge(1, sub_count=2),
-                RepairAction(kind="flag", source="ai", operation_indices=(1,)),
+                RepairAction.make_merge("L000002", sub_count=2),
+                RepairAction(kind="flag", source="ai", relation_ids=("L000002",)),
             ],
         )
         markers = {row.marker for row in state.current.rows if row.ordinal == 1}
@@ -123,7 +123,7 @@ class TestAiOkDoesNotEraseRepairMarker:
     def test_ai_ok_without_prior_repair_keeps_full_marker(self):
         state = RepairState(
             _snapshot(),
-            [RepairAction(kind="ok", source="ai", operation_indices=(1,))],
+            [RepairAction(kind="ok", source="ai", relation_ids=("L000002",))],
         )
         markers = {row.marker for row in state.current.rows if row.ordinal == 1}
         assert markers == {"[AI][OK]"}, markers
@@ -132,7 +132,10 @@ class TestAiOkDoesNotEraseRepairMarker:
         # 对照组：手动 ok（无 AI 前缀）行为不变
         state = RepairState(
             _snapshot(),
-            [RepairAction.make_merge(1, sub_count=2), RepairAction.make_ok(1)],
+            [
+                RepairAction.make_merge("L000002", sub_count=2),
+                RepairAction.make_ok("L000002"),
+            ],
         )
         markers = {row.marker for row in state.current.rows if row.ordinal == 1}
         assert markers == {"[M] [OK]"}, markers
@@ -142,8 +145,8 @@ class TestAiOkDoesNotEraseRepairMarker:
         state = RepairState(
             _snapshot(),
             [
-                RepairAction(kind="ok", source="ai", operation_indices=(1,)),
-                RepairAction(kind="flag", source="ai", operation_indices=(1,)),
+                RepairAction(kind="ok", source="ai", relation_ids=("L000002",)),
+                RepairAction(kind="flag", source="ai", relation_ids=("L000002",)),
             ],
         )
         markers = {row.marker for row in state.current.rows if row.ordinal == 1}
@@ -173,7 +176,7 @@ def test_agent_run_with_initial_state_passes_ok_through():
     agent = AiRepairAgent(backend="deepseek", verbose=False, strategy="src")
     agent._llm = _ScriptedBackend([t1])
     actions = agent.run(ctx, initial_state=_repaired_state())
-    by_op = {a.ordinal: a for a in actions}
+    by_op = {_snapshot().operation_index(a.relation_ids[0]): a for a in actions}
     assert by_op[1].kind == "merge"  # AI ok 认可已有 merge
     assert by_op[2].kind == "ok"  # snap 2 无修复 → 真正的通过
 
@@ -186,7 +189,8 @@ def test_review_session_keeps_context_and_proposed_state_together():
     proposed = [
         action
         for action in session.proposed_state.repair_log
-        if action.ordinal == 1 and action.kind not in {"ok", "flag"}
+        if session.proposed_state.action_ordinal(action) == 1
+        and action.kind not in {"ok", "flag"}
     ]
     assert proposed
     assert proposed[-1].kind == "merge"
@@ -209,7 +213,7 @@ def test_review_session_keeps_context_and_proposed_state_together():
 
 def test_review_session_does_not_overwrite_existing_user_repair():
     user_edit = RepairAction.make_edit(
-        1,
+        "L000002",
         source="user",
         new_src_lines=["S1", "S2"],
         new_tgt_lines=["T1a", "T1b"],

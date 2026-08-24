@@ -87,7 +87,7 @@ class SuggestionPreviewTable(BaseTextTable):
     """
 
     COL_HEADERS = [
-        "Snap",
+        "关系",
         "初始类型",
         "初始评分",
         "预览状态",
@@ -129,7 +129,7 @@ class SuggestionPreviewTable(BaseTextTable):
             self.table.horizontalHeaderItem(col).setText(_HEADERS[col] if show else "")
 
     def _get_span_col_offset(self) -> int:
-        """第 0 列是 Snap，span 从第 1 列开始。"""
+        """第 0 列是关系编号，span 从第 1 列开始。"""
         return 1
 
     def _get_relation_col(self) -> int | None:

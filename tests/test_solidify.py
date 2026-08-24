@@ -80,7 +80,7 @@ def _report_case(tmp_path: Path, text_a: str, text_b: str, operations, actions):
 
 def test_partial_edit_solidification_keeps_other_side_as_rebased_action():
     action = RepairAction.make_edit(
-        0,
+        "L000001",
         source="user",
         new_src_lines=["甲校订"],
         new_tgt_lines=["A edited"],
@@ -100,7 +100,7 @@ def test_partial_edit_does_not_promote_score_for_the_uncommitted_full_edit(
     tmp_path: Path,
 ):
     action = RepairAction.make_edit(
-        0,
+        "L000001",
         source="user",
         new_src_lines=["甲校订"],
         new_tgt_lines=["A edited"],
@@ -125,7 +125,7 @@ def test_partial_edit_does_not_promote_score_for_the_uncommitted_full_edit(
 
 
 def test_two_sided_merge_requires_both_merge_types(tmp_path: Path):
-    action = RepairAction.make_merge(0, sub_count=2, source="auto")
+    action = RepairAction.make_merge("L000001", sub_count=2, source="auto")
     path_a, path_b, report_path = _report_case(
         tmp_path,
         "甲\n乙\n",
@@ -164,7 +164,7 @@ def test_two_sided_merge_requires_both_merge_types(tmp_path: Path):
 
 def test_split_solidification_rebuilds_ops_and_removes_applied_action(tmp_path: Path):
     action = RepairAction.make_split(
-        0,
+        "L000001",
         source="user",
         side="tgt",
         new_src_lines=["甲", "乙"],
@@ -198,9 +198,7 @@ def test_split_solidification_rebuilds_ops_and_removes_applied_action(tmp_path: 
 
 
 def test_cross_snap_two_sided_merge_is_atomic(tmp_path: Path):
-    action = RepairAction.make_merge(
-        0, sub_count=2, source="user", operation_indices=(0, 1)
-    )
+    action = RepairAction.make_merge(("L000001", "L000002"), sub_count=2, source="user")
     path_a, path_b, report_path = _report_case(
         tmp_path,
         "甲\n乙\n",
@@ -227,7 +225,7 @@ def test_cross_snap_two_sided_merge_is_atomic(tmp_path: Path):
 
 def test_two_sided_split_requires_both_split_types(tmp_path: Path):
     action = RepairAction.make_split(
-        0,
+        "L000001",
         source="user",
         side="src",
         new_src_lines=["甲", "乙"],
@@ -268,9 +266,9 @@ def test_two_sided_split_requires_both_split_types(tmp_path: Path):
 def test_flag_and_ok_are_reanchored_after_surviving_content_solidification(
     tmp_path: Path,
 ):
-    edit = RepairAction.make_edit(0, source="user", new_tgt_lines=["edited"])
-    flag = RepairAction.make_flag(0, note="复查术语")
-    approval = RepairAction.make_ok(0)
+    edit = RepairAction.make_edit("L000001", source="user", new_tgt_lines=["edited"])
+    flag = RepairAction.make_flag("L000001", note="复查术语")
+    approval = RepairAction.make_ok("L000001")
     approval.source = "user"
     path_a, path_b, report_path = _report_case(
         tmp_path,
@@ -294,9 +292,9 @@ def test_flag_and_ok_are_reanchored_after_surviving_content_solidification(
 
 
 def test_delete_is_solidified_but_review_markers_remain_in_history(tmp_path: Path):
-    deletion = RepairAction.make_delete(0, source="ai")
-    flag = RepairAction.make_flag(0, note="确认冗余")
-    approval = RepairAction.make_ok(0)
+    deletion = RepairAction.make_delete("L000001", source="ai")
+    flag = RepairAction.make_flag("L000001", note="确认冗余")
+    approval = RepairAction.make_ok("L000001")
     approval.source = "user"
     approval.data["approvals"] = {"manual"}
     path_a, path_b, report_path = _report_case(
@@ -347,7 +345,7 @@ def test_policy_file_supports_toml_preset_overrides(tmp_path: Path):
 def test_report_changed_during_batch_plan_is_not_overwritten(
     tmp_path: Path, monkeypatch
 ):
-    action = RepairAction.make_edit(0, source="user", new_tgt_lines=["changed"])
+    action = RepairAction.make_edit("L000001", source="user", new_tgt_lines=["changed"])
     path_a, path_b, report_path = _report_case(
         tmp_path, "甲\n", "A\n", [((0,), (0,), 0.9)], [action]
     )
@@ -379,7 +377,7 @@ def test_report_changed_during_batch_plan_is_not_overwritten(
 
 def test_ai_edit_can_be_solidified_without_manual_ok(tmp_path: Path):
     action = RepairAction.make_edit(
-        0,
+        "L000001",
         source="ai",
         new_tgt_lines=["AI edit"],
     )
@@ -400,8 +398,8 @@ def test_ai_edit_can_be_solidified_without_manual_ok(tmp_path: Path):
 
 
 def test_later_edit_supersedes_stale_delete_before_solidification(tmp_path: Path):
-    deletion = RepairAction.make_delete(0, source="auto")
-    edit = RepairAction.make_edit(0, source="ai", new_tgt_lines=["AI edit"])
+    deletion = RepairAction.make_delete("L000001", source="auto")
+    edit = RepairAction.make_edit("L000001", source="ai", new_tgt_lines=["AI edit"])
     path_a, path_b, report_path = _report_case(
         tmp_path,
         "甲\n",
@@ -424,7 +422,7 @@ def test_later_edit_supersedes_stale_delete_before_solidification(tmp_path: Path
 
 
 def test_cli_is_preview_only_until_apply_flag(tmp_path: Path, capsys):
-    action = RepairAction.make_edit(0, source="user", new_tgt_lines=["changed"])
+    action = RepairAction.make_edit("L000001", source="user", new_tgt_lines=["changed"])
     path_a, path_b, report_path = _report_case(
         tmp_path, "甲\n", "A\n", [((0,), (0,), 0.9)], [action]
     )
@@ -462,7 +460,7 @@ def test_batch_plan_and_apply_share_the_exact_previewed_transactions(tmp_path: P
         "甲\n",
         "A\n",
         [((0,), (0,), 0.9)],
-        [RepairAction.make_edit(0, source="user", new_tgt_lines=["A1"])],
+        [RepairAction.make_edit("L000001", source="user", new_tgt_lines=["A1"])],
     )
     second = _report_case(
         tmp_path / "second",
@@ -500,7 +498,7 @@ def test_batch_cli_uses_the_gui_manifest_and_is_preview_only_by_default(
         "甲\n",
         "A\n",
         [((0,), (0,), 0.9)],
-        [RepairAction.make_edit(0, source="user", new_tgt_lines=["changed"])],
+        [RepairAction.make_edit("L000001", source="user", new_tgt_lines=["changed"])],
     )
     manifest = tmp_path / "entries.json"
     manifest.write_text(

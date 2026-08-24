@@ -589,7 +589,7 @@ class WindowActionsMixin:
                 )
 
                 flagged_ops = {
-                    action.ordinal
+                    self._repair_state.action_ordinal(action)
                     for action in self._repair_state.repair_log
                     if action.kind == "flag"
                 }
@@ -597,8 +597,9 @@ class WindowActionsMixin:
                     result.all_ops,
                     result.uncertain_regions,
                     alternative_operations=result.alternative_ops,
+                    relation_ids=self._repair_state.snapshot.relation_ids,
                 ):
-                    if action.ordinal not in flagged_ops:
+                    if self._repair_state.action_ordinal(action) not in flagged_ops:
                         self._repair_state = self._repair_state.apply(action)
 
             self._initialize_pair_editing_state(result)
@@ -738,46 +739,42 @@ class WindowActionsMixin:
         # ── 统一合法性校验 ──
         from dualign.services.repair import RepairService
 
-        ops = RepairService.valid_operations(self._repair_state, action.ordinal)
+        ordinal = self._repair_state.action_ordinal(action)
+        ops = RepairService.valid_operations(self._repair_state, ordinal)
         kind = action.kind
         if kind == "merge":
             if not ops.get("merge", False):
-                self._status(f"⚠ 跳过: 关系[{action.ordinal}] 当前不可合并", "warning")
+                self._status(f"⚠ 跳过: 关系[{ordinal}] 当前不可合并", "warning")
                 return
         elif kind in ("split",):
             if not ops.get("split_tgt", False) and not ops.get("split_src", False):
-                self._status(f"⚠ 跳过: 关系[{action.ordinal}] 当前不可拆分", "warning")
+                self._status(f"⚠ 跳过: 关系[{ordinal}] 当前不可拆分", "warning")
                 return
         elif kind in ("edit", "edit_tgt", "edit_src"):
             if not ops.get("edit", False):
-                self._status(f"⚠ 跳过: 关系[{action.ordinal}] 当前不可校订", "warning")
+                self._status(f"⚠ 跳过: 关系[{ordinal}] 当前不可校订", "warning")
                 return
         elif kind == "delete":
             if not ops.get("delete", False):
-                self._status(f"⚠ 跳过: 关系[{action.ordinal}] 当前不可删除", "warning")
+                self._status(f"⚠ 跳过: 关系[{ordinal}] 当前不可删除", "warning")
                 return
         elif kind in ("placeholder_src", "placeholder_tgt"):
             if not ops.get("placeholder", False):
-                self._status(
-                    f"⚠ 跳过: 关系[{action.ordinal}] 当前不可插占位符", "warning"
-                )
+                self._status(f"⚠ 跳过: 关系[{ordinal}] 当前不可插占位符", "warning")
                 return
         elif kind in ("ok", "flag"):
             if not ops.get(kind, False):
-                self._status(
-                    f"⚠ 跳过: 关系[{action.ordinal}] 操作 {kind} 不可用", "warning"
-                )
+                self._status(f"⚠ 跳过: 关系[{ordinal}] 操作 {kind} 不可用", "warning")
                 return
 
         action.data["approvals"] = {"auto"} if auto else {"manual"}
         if not auto and action.source == "auto":
             action.source = "user"
-        action = self._repair_state.bind_action(action)
         self._undo_stack.append(self._repair_state)
         self._redo_stack.clear()
         self._repair_state = self._repair_state.apply(action)
         # 标记受影响关系失效，等待 poll_now 捡起重算
-        _affected = action.operation_indices
+        _affected = self._repair_state.action_ordinals(action)
         self._invalidate_relation_scores(_affected)
         # 文本变更类操作 → 重置该关系已采纳的 AI 建议为 pending
         _text_changing_kinds = {
@@ -812,7 +809,7 @@ class WindowActionsMixin:
             "placeholder_tgt": "已插占位符",
         }
         lbl = _action_labels.get(kind, f"已{kind}")
-        self._set_temp_status(f"{lbl} 关系[{action.ordinal}]", "success")
+        self._set_temp_status(f"{lbl} 关系[{ordinal}]", "success")
 
         # 撤销栈溢出提醒
         if len(self._undo_stack) == self._undo_stack.maxlen:
@@ -824,7 +821,9 @@ class WindowActionsMixin:
             return
         s_idx, t_idx, _sc = self._repair_state.snapshot.original_ops[ordinal]
         self._apply_action(
-            RepairAction.make_merge(ordinal, sub_count=max(len(s_idx), len(t_idx)))
+            self._repair_state.make_action(
+                "merge", ordinal, sub_count=max(len(s_idx), len(t_idx))
+            )
         )
 
     def do_split(self, ordinal: int):
@@ -948,7 +947,8 @@ class WindowActionsMixin:
             new_src = dlg.result_src_lines
             new_tgt = dlg.result_tgt_lines
             # 不传 inherited_scores → _apply_info_full 用 osc 原始分 fallback
-            action = RepairAction.make_edit(
+            action = self._repair_state.make_action(
+                "edit",
                 ordinal,
                 new_src_lines=new_src,
                 new_tgt_lines=new_tgt,
@@ -957,7 +957,8 @@ class WindowActionsMixin:
 
     def do_ok(self, ordinal: int):
         """审核通过 — 认可当前 1:1 状态，不做任何文本修改。"""
-        self._apply_action(RepairAction.make_ok(ordinal))
+        if self._repair_state is not None:
+            self._apply_action(self._repair_state.make_action("ok", ordinal))
 
     def do_flag(self, ordinal: int):
         """打开单个文本对的标记编辑器。"""
@@ -1004,8 +1005,7 @@ class WindowActionsMixin:
         self._redo_stack.clear()
         state = self._repair_state
         for ordinal in selected:
-            action = RepairAction.make_flag(ordinal, note)
-            action.source = "user"
+            action = state.make_action("flag", ordinal, note=note, source="user")
             action.data["approvals"] = {"manual"}
             state = state.apply(action)
         self._repair_state = state
@@ -1033,7 +1033,8 @@ class WindowActionsMixin:
 
     def do_delete(self, ordinal: int):
         """删除文本对。"""
-        self._apply_action(RepairAction.make_delete(ordinal))
+        if self._repair_state is not None:
+            self._apply_action(self._repair_state.make_action("delete", ordinal))
 
     def _delete_selected_relations(self, ordinals: List[int]):
         """逐个删除选中的关系。"""
@@ -1043,7 +1044,7 @@ class WindowActionsMixin:
         self._redo_stack.clear()
         state = self._repair_state
         for si in sorted(ordinals, reverse=True):
-            action = RepairAction.make_delete(si, source="user")
+            action = state.make_action("delete", si, source="user")
             action.data["approvals"] = {"manual"}
             state = state.apply(action)
         self._repair_state = state
@@ -1060,9 +1061,13 @@ class WindowActionsMixin:
         s_idx, t_idx, _sc = self._repair_state.snapshot.original_ops[ordinal]
         ls, lt = len(s_idx), len(t_idx)
         if ls > 0 and lt == 0:
-            self._apply_action(RepairAction.make_placeholder_tgt(ordinal))
+            self._apply_action(
+                self._repair_state.make_action("placeholder_tgt", ordinal)
+            )
         elif ls == 0 and lt > 0:
-            self._apply_action(RepairAction.make_placeholder_src(ordinal))
+            self._apply_action(
+                self._repair_state.make_action("placeholder_src", ordinal)
+            )
 
     def do_edit_selected(self, ordinals: List[int]):
         """跨关系手动校订。所有选中文本对合并编辑。"""
@@ -1125,7 +1130,8 @@ class WindowActionsMixin:
             if len(ordinals) == 1:
                 # 不传入 inherited_scores → _apply_info_full 用 osc 原始分 fallback
                 # 轮询自动触发异步评分
-                action = RepairAction.make_edit(
+                action = self._repair_state.make_action(
+                    "edit",
                     ordinals[0],
                     new_src_lines=new_src,
                     new_tgt_lines=new_tgt,
@@ -1197,9 +1203,12 @@ class WindowActionsMixin:
         统一方案：所有 AI 操作（含 delete）走统一 _apply_action 路径，
         不再为 delete 单独追加 [OK]——采纳操作本身已构成审批。
         """
+        if self._repair_state is None:
+            return
+        ordinal = self._repair_state.action_ordinal(action)
         self._apply_action(action, auto=False)
         self._set_temp_status(
-            f"AI 修复已应用: 关系[{action.ordinal}] {action.kind}", "success"
+            f"AI 修复已应用: 关系[{ordinal}] {action.kind}", "success"
         )
 
     def _on_ai_repair_chapter(self):
@@ -1382,7 +1391,7 @@ class WindowActionsMixin:
         self._invalidate_relation_scores(all_ordinals)
         self._save_session()
         self._refresh()
-        n_actions = len(result._repair_log) if result._repair_log else 0
+        n_actions = len(result.repair_log)
         self._status(f"一键修复完成 ({n_actions} 个操作)", "success")
 
     def _recover_pair_save_transactions(self):
@@ -1738,11 +1747,11 @@ class WindowActionsMixin:
         Returns: 被回退的关系序号列表。
         """
         undone_ordinals: Set[int] = set()
-        old_log = old_state._repair_log
-        new_log = new_state._repair_log
+        old_log = old_state.repair_log
+        new_log = new_state.repair_log
         # 找出 old 中有但 new 中没有的 action
-        old_set = {(a.ordinal, a.kind, a.timestamp) for a in old_log}
-        new_set = {(a.ordinal, a.kind, a.timestamp) for a in new_log}
+        old_set = {(a.relation_ids, a.kind, a.timestamp) for a in old_log}
+        new_set = {(a.relation_ids, a.kind, a.timestamp) for a in new_log}
         undone = old_set - new_set
         for op_i, kind, _ts in undone:
             if kind in (

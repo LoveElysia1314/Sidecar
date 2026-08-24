@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from dualign.models.action import (
@@ -14,6 +16,7 @@ from dualign.models.state import AlignmentSnapshot
 from dualign.services.report_io import (
     ReportError,
     build_report,
+    load_report,
     relation_ids_from_report,
 )
 
@@ -52,7 +55,7 @@ def test_action_is_bound_to_snapshot_identity_when_entering_repair_state():
         [((0,), (0,), 0.8)], ["A"], ["a"], ["relation-original"]
     )
 
-    state = RepairState(snapshot).apply(RepairAction.make_ok(0))
+    state = RepairState(snapshot).apply(RepairAction.make_ok("relation-original"))
 
     assert state.repair_log[0].relation_ids == ("relation-original",)
     payload = state.repair_log[0].to_dict()
@@ -76,7 +79,7 @@ def test_report_binds_unbound_actions_to_persisted_relation_ids(tmp_path):
         stats={},
         quality={},
         provenance={},
-        repair_log=[RepairAction.make_flag(0, "review")],
+        repair_log=[RepairAction.make_flag("relation-original", "review")],
     )
 
     payload = report["repair_log"][0]
@@ -97,10 +100,10 @@ def test_stable_action_identity_is_authoritative_over_stale_position():
 
     state = RepairState(
         snapshot,
-        [RepairAction.make_ok(0, relation_ids=["relation-b"])],
+        [RepairAction.make_ok("relation-b")],
     )
 
-    assert state.repair_log[0].ordinal == 1
+    assert state.action_ordinal(state.repair_log[0]) == 1
     assert state.current.group(1).rows[0].marker == "[OK]"
 
 
@@ -113,7 +116,7 @@ def test_cross_relation_action_is_queryable_and_reset_from_every_target():
         ["a", "b"],
         ["relation-a", "relation-b"],
     )
-    action = RepairAction.make_merge(0, operation_indices=[0, 1])
+    action = RepairAction.make_merge(("relation-a", "relation-b"))
     state = RepairState(snapshot).apply(action)
 
     assert state.action_for_relation("relation-a") is state.action_for_relation(
@@ -132,10 +135,10 @@ def test_new_decision_on_secondary_relation_replaces_cross_relation_action():
         ["relation-a", "relation-b"],
     )
     state = RepairState(snapshot).apply(
-        RepairAction.make_merge(0, operation_indices=[0, 1])
+        RepairAction.make_merge(("relation-a", "relation-b"))
     )
     state = state.apply(
-        RepairAction.make_edit(1, new_src_lines=["B2"], new_tgt_lines=["b2"])
+        RepairAction.make_edit("relation-b", new_src_lines=["B2"], new_tgt_lines=["b2"])
     )
 
     assert [action.kind for action in state.repair_log] == ["edit"]
@@ -153,7 +156,7 @@ def test_legacy_proposal_keys_are_regrouped_by_bound_relation_identity():
             "0": [
                 {
                     "action": RepairAction.make_edit(
-                        0, new_tgt_lines=["edited"]
+                        "stable-relation", new_tgt_lines=["edited"]
                     ).to_dict(),
                     "status": "pending",
                 }
@@ -170,25 +173,27 @@ def test_legacy_proposal_keys_are_regrouped_by_bound_relation_identity():
     assert state.ai_proposal_store.get_status(proposal.action) == "accepted"
 
 
-def test_proposal_store_rejects_unbound_positional_actions():
+def test_action_rejects_missing_stable_identity():
     store = AiProposalStore()
 
     with pytest.raises(ValueError):
-        store.add(RepairAction.make_ok(0))
+        store.add(RepairAction(kind="ok"))
 
 
-def test_legacy_orig_snaps_are_loaded_once_into_explicit_position_projection():
-    action = RepairAction.from_dict(
+def test_canonicalized_legacy_positions_create_an_id_only_action():
+    payload = canonicalize_action_payload(
         {
             "op_index": 1,
             "kind": "merge",
             "data": {"orig_snaps": [1, 2]},
-        }
+        },
+        ("relation-a", "relation-b", "relation-c"),
     )
+    action = RepairAction.from_dict(payload)
 
-    assert action.operation_indices == (1, 2)
+    assert action.relation_ids == ("relation-b", "relation-c")
     assert "orig_snaps" not in action.data
-    assert action.to_dict()["operation_indices"] == [1, 2]
+    assert "operation_indices" not in action.to_dict()
 
 
 def test_legacy_action_payload_is_canonicalized_without_mutating_input():
@@ -206,6 +211,41 @@ def test_legacy_action_payload_is_canonicalized_without_mutating_input():
     assert "operation_indices" not in result
     assert result["data"] == {"note": "keep"}
     assert payload["data"]["orig_snaps"] == [0]
+
+
+def test_report_load_is_the_only_legacy_position_migration_boundary(tmp_path):
+    path_a = tmp_path / "a.md"
+    path_b = tmp_path / "b.md"
+    report_path = tmp_path / "pair.report.json"
+    path_a.write_text("A\n", encoding="utf-8")
+    path_b.write_text("a\n", encoding="utf-8")
+    report = build_report(
+        chapter_id="chapter",
+        document_a_path=path_a,
+        document_b_path=path_b,
+        operations=[((0,), (0,), 0.8)],
+        relation_ids=["stable-relation"],
+        stats={},
+        quality={},
+        provenance={},
+    )
+    report["repair_log"] = [
+        {
+            "kind": "merge",
+            "op_index": 0,
+            "data": {"orig_snaps": [0], "note": "keep"},
+        }
+    ]
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    loaded = load_report(report_path)
+    payload = loaded["repair_log"][0]
+    action = RepairAction.from_dict(payload)
+
+    assert action.relation_ids == ("stable-relation",)
+    assert action.data == {"note": "keep"}
+    assert "op_index" not in payload
+    assert "operation_indices" not in payload
 
 
 def test_rebase_preserves_exact_matches_and_never_recycles_removed_ids():

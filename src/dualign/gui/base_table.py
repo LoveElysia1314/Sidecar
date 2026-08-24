@@ -125,8 +125,8 @@ def type_cl(init_type: str) -> QColor:
     """初始/当前类型 → 颜色。"""
     if not init_type:
         return TYPE_CL_11
-    # 跨关系行的展示标签还可能包含旧 ``snap N`` 和 ``---``。颜色应取其中的
-    # 关系事实，而不是因为展示字符串不再等于纯 ``N:M`` 就退回灰色。
+    # 跨关系行的展示标签包含关系编号和 ``---``。颜色应取其中的关系事实，
+    # 而不是因为展示字符串不再等于纯 ``N:M`` 就退回灰色。
     relation_types = [
         (int(match.group(1)), int(match.group(2)))
         for match in re.finditer(r"(?m)^\s*(\d+)\s*:\s*(\d+)\s*$", str(init_type))
@@ -608,7 +608,7 @@ class BaseTextTable(QWidget):
     def _get_span_col_offset(self) -> int:
         """跨行合并的列偏移量。
 
-        如果表格第 0 列不是 init_type（如 Snap 列），
+        如果表格第 0 列不是 init_type（如关系列），
         子类应返回偏移量使 span 正确对齐。
         """
         return 0
@@ -616,7 +616,7 @@ class BaseTextTable(QWidget):
     def _get_relation_col(self) -> int | None:
         """关系列索引。有关系列时返回列号，无时返回 None。
 
-        基类返回 None（无 Snap 列），子类（如主对齐表）可重写返回 0。
+        基类返回 None（无关系列），子类（如主对齐表）可重写返回 0。
         """
         return None
 

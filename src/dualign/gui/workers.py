@@ -356,11 +356,11 @@ class AutoRepairWorker(QThread):
         self.status_signal.emit("一键修复中…")
         try:
             try:
-                before = len(self._state._repair_log)
+                before = len(self._state.repair_log)
                 result = RepairService.auto_repair(
                     self._state, self._strategy, model=self._model, cache=self._cache
                 )
-                for act in result._repair_log[before:]:
+                for act in result.repair_log[before:]:
                     act.data["approvals"] = {"auto"}
                 self.finished_signal.emit(result)
             finally:

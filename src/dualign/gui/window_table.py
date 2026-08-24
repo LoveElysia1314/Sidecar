@@ -867,7 +867,7 @@ class WindowTableMixin:
             relation_ids = (g.relation_id,)
             resolution = action.kind if action else ""
             if action:
-                ordinals = tuple(sorted(action.operation_indices))
+                ordinals = tuple(sorted(self._repair_state.action_ordinals(action)))
                 relation_ids = action.relation_ids
 
             self._anomalies.append(
@@ -1180,13 +1180,13 @@ class WindowTableMixin:
 
     @staticmethod
     def _compute_relation_display(row: RelationRow) -> str:
-        """计算关系列显示文本（col 0），兼容旧 ``snap N`` 内存标签。"""
+        """计算关系列显示文本（col 0）。"""
         if row.sub != 0:
             return ""
         init_lines = row.init_type.split("\n") if row.init_type else []
         relation_ordinals = []
         for ln in init_lines:
-            if ln.startswith(("关系 ", "snap ")):
+            if ln.startswith("关系 "):
                 try:
                     relation_ordinals.append(int(ln.split()[1]))
                 except (IndexError, ValueError):
@@ -1201,9 +1201,7 @@ class WindowTableMixin:
         init_lines = row.init_type.split("\n") if row.init_type else []
         bundled = len(init_lines) > 1 and ("---" in row.init_type)
         if bundled and row.sub == 0:
-            pure_types = [
-                ln for ln in init_lines if not ln.startswith(("关系 ", "snap "))
-            ]
+            pure_types = [ln for ln in init_lines if not ln.startswith("关系 ")]
             return "  ".join(pure_types)
         elif bundled:
             return init_lines[-1] if len(init_lines) >= 2 else ""
@@ -1246,7 +1244,7 @@ class WindowTableMixin:
                 if si in changed_src and si in changed_tgt:
                     continue
                 for action in self._repair_state.repair_log:
-                    if action.ordinal != si:
+                    if si not in self._repair_state.action_ordinals(action):
                         continue
                     sc, tc = relation_text_changes(si, action, snapshot)
                     if sc:

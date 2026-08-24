@@ -23,9 +23,9 @@ class _Emitter:
 
 def test_relation_text_changes_are_shared_but_marker_coloring_stays_visual():
     snapshot = AlignmentSnapshot.from_alignment([((0,), (0,), 0.9)], ["A"], ["B"])
-    edit = RepairAction.make_edit(0, new_src_lines=["A+"], new_tgt_lines=["B"])
-    placeholder = RepairAction.make_placeholder_src(0)
-    merge = RepairAction.make_merge(0)
+    edit = RepairAction.make_edit("L000001", new_src_lines=["A+"], new_tgt_lines=["B"])
+    placeholder = RepairAction.make_placeholder_src("L000001")
+    merge = RepairAction.make_merge("L000001")
 
     assert relation_text_changes(0, edit, snapshot) == (True, False)
     assert relation_text_changes(0, placeholder, snapshot) == (True, False)
@@ -69,7 +69,9 @@ class _FlagHarness(WindowActionsMixin):
     def __init__(self):
         state = RepairState.from_ops([((0,), (0,), 0.9)], ["A"], ["B"])
         self._repair_state = state.apply(
-            RepairAction.make_edit(0, new_src_lines=["A+"], new_tgt_lines=["B+"])
+            RepairAction.make_edit(
+                "L000001", new_src_lines=["A+"], new_tgt_lines=["B+"]
+            )
         )
         self._undo_stack = deque(maxlen=50)
         self._redo_stack = deque(maxlen=50)

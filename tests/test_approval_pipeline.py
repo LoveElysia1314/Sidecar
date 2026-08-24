@@ -56,28 +56,28 @@ class TestDeriveApproval:
         assert _derive_approval(None) == APPROVAL_NONE
 
     def test_auto_source(self):
-        a = RepairAction(kind="merge", operation_indices=(0,), source="auto")
+        a = RepairAction(kind="merge", relation_ids=("L000001",), source="auto")
         assert _derive_approval(a) == APPROVAL_PROPOSED
 
     def test_ai_source(self):
-        a = RepairAction(kind="ok", operation_indices=(0,), source="ai")
+        a = RepairAction(kind="ok", relation_ids=("L000001",), source="ai")
         assert _derive_approval(a) == APPROVAL_AGENT
 
     def test_user_source(self):
-        a = RepairAction(kind="ok", operation_indices=(0,), source="user")
+        a = RepairAction(kind="ok", relation_ids=("L000001",), source="user")
         assert _derive_approval(a) == APPROVAL_USER
 
     def test_flag_does_not_advance(self):
         """flag 不推进管线。"""
-        a = RepairAction(kind="flag", operation_indices=(0,), source="ai")
+        a = RepairAction(kind="flag", relation_ids=("L000001",), source="ai")
         assert _derive_approval(a) == APPROVAL_NONE
 
-        a2 = RepairAction(kind="flag", operation_indices=(0,), source="user")
+        a2 = RepairAction(kind="flag", relation_ids=("L000001",), source="user")
         assert _derive_approval(a2) == APPROVAL_NONE
 
     def test_empty_source_is_auto(self):
         """兼容旧 source=""。"""
-        a = RepairAction(kind="merge", operation_indices=(0,), source="")
+        a = RepairAction(kind="merge", relation_ids=("L000001",), source="")
         assert _derive_approval(a) == APPROVAL_PROPOSED
 
 
@@ -108,9 +108,7 @@ class TestApprovalPipeline:
 
     def test_ai_ok_advances_to_agent(self, raw_state):
         repaired = RepairService.auto_repair(raw_state, strategy="src")
-        s2 = repaired.apply(
-            RepairAction(kind="ok", operation_indices=(1,), source="ai")
-        )
+        s2 = repaired.apply(repaired.make_action("ok", 1, source="ai"))
         states = _build_states(s2)
         assert states[1].approval == APPROVAL_AGENT
 
@@ -118,11 +116,8 @@ class TestApprovalPipeline:
         """AI 直接 edit（覆盖 auto_repair）→ AGENT。"""
         repaired = RepairService.auto_repair(raw_state, strategy="src")
         s2 = repaired.apply(
-            RepairAction(
-                kind="edit",
-                source="ai",
-                data={"new_tgt_lines": ["修正1", "修正2"]},
-                operation_indices=(1,),
+            repaired.make_action(
+                "edit", 1, source="ai", new_tgt_lines=["修正1", "修正2"]
             )
         )
         states = _build_states(s2)
@@ -130,9 +125,7 @@ class TestApprovalPipeline:
 
     def test_human_ok_advances_to_user(self, raw_state):
         repaired = RepairService.auto_repair(raw_state, strategy="src")
-        s2 = repaired.apply(
-            RepairAction(kind="ok", operation_indices=(1,), source="user")
-        )
+        s2 = repaired.apply(repaired.make_action("ok", 1, source="user"))
         states = _build_states(s2)
         assert states[1].approval == APPROVAL_USER
 
@@ -140,27 +133,23 @@ class TestApprovalPipeline:
         """auto → agent → user：AI ok 后人类 ok → approval=USER。"""
         repaired = RepairService.auto_repair(raw_state, strategy="src")
         # AI ok
-        s2 = repaired.apply(
-            RepairAction(kind="ok", operation_indices=(1,), source="ai")
-        )
+        s2 = repaired.apply(repaired.make_action("ok", 1, source="ai"))
         states2 = _build_states(s2)
         assert states2[1].approval == APPROVAL_AGENT
         # 人类 ok 覆盖
-        s3 = s2.apply(RepairAction(kind="ok", operation_indices=(1,), source="user"))
+        s3 = s2.apply(s2.make_action("ok", 1, source="user"))
         states3 = _build_states(s3)
         assert states3[1].approval == APPROVAL_USER
 
     def test_flag_no_advance(self, raw_state):
         """auto → flag(ai) → 仍为 AUTO。"""
         repaired = RepairService.auto_repair(raw_state, strategy="src")
-        s2 = repaired.apply(
-            RepairAction(kind="flag", operation_indices=(1,), source="ai")
-        )
+        s2 = repaired.apply(repaired.make_action("flag", 1, source="ai"))
         states = _build_states(s2)
         assert states[1].approval == APPROVAL_PROPOSED
         assert states[1].is_flagged
         # 人类 flag 同样不推进
-        s3 = s2.apply(RepairAction(kind="flag", operation_indices=(1,), source="user"))
+        s3 = s2.apply(s2.make_action("flag", 1, source="user"))
         states3 = _build_states(s3)
         assert states3[1].approval == APPROVAL_PROPOSED
         assert states3[1].is_flagged
@@ -176,11 +165,11 @@ class TestAiOkPreservesAutoRepair:
 
     def test_auto_repair_is_preserved_after_ai_ok(self, raw_state):
         repaired = RepairService.auto_repair(raw_state, strategy="src")
-        log_before = [(a.ordinal, a.kind, a.source) for a in repaired.repair_log]
-        s2 = repaired.apply(
-            RepairAction(kind="ok", operation_indices=(1,), source="ai")
-        )
-        log_after = [(a.ordinal, a.kind, a.source) for a in s2.repair_log]
+        log_before = [
+            (repaired.action_ordinal(a), a.kind, a.source) for a in repaired.repair_log
+        ]
+        s2 = repaired.apply(repaired.make_action("ok", 1, source="ai"))
+        log_after = [(s2.action_ordinal(a), a.kind, a.source) for a in s2.repair_log]
 
         # auto_repair 操作仍在
         assert len(log_after) == len(log_before) + 1, (
@@ -194,13 +183,8 @@ class TestAiOkPreservesAutoRepair:
         """AI edit 应清除 auto_repair 操作（覆盖语义）。"""
         repaired = RepairService.auto_repair(raw_state, strategy="src")
         s2 = repaired.apply(
-            RepairAction(
-                kind="edit",
-                source="ai",
-                data={"new_tgt_lines": ["修正1"]},
-                operation_indices=(1,),
-            )
+            repaired.make_action("edit", 1, source="ai", new_tgt_lines=["修正1"])
         )
-        log_after = [(a.ordinal, a.kind, a.source) for a in s2.repair_log]
+        log_after = [(s2.action_ordinal(a), a.kind, a.source) for a in s2.repair_log]
         # auto_repair 的 merge 被清除，只剩 edit
         assert log_after == [(1, "edit", "ai")], f"edit should override: {log_after}"

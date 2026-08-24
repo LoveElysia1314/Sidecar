@@ -1,13 +1,13 @@
 [
   {
     "name": "ok",
-    "description": "Approve the current review candidate for ONE snap. If a proposed repair exists, ok accepts that exact merge/split/edit/delete/placeholder proposal; otherwise it confirms the original alignment relation without inventing a repair action. Do not use on snaps containing ⟢MISSING⟣ (use edit instead).",
+    "description": "Approve the current review candidate for ONE relation. If a proposed repair exists, ok accepts that exact merge/split/edit/delete/placeholder proposal; otherwise it confirms the original alignment relation without inventing a repair action. Do not use on relations containing ⟢MISSING⟣ (use edit instead).",
     "parameters": {
       "type": "object",
       "properties": {
         "target": {
           "type": "string",
-          "description": "Snap id, e.g. '7'."
+          "description": "Relation ordinal, e.g. '7'."
         }
       },
       "required": [
@@ -17,27 +17,27 @@
   },
   {
     "name": "edit",
-    "description": "Replace original text of one side or both sides of one or more CONSECUTIVE snaps. Operates on INITIAL text. Pass only the side(s) needing change; for a single snap you may pass one side only. If both new_src and new_tgt are passed, their arrays must have equal length (each row pair becomes a 1:1 snap).",
+    "description": "Replace original text of one side or both sides of one or more CONSECUTIVE relations. Operates on INITIAL text. Pass only the side(s) needing change; for a single relation you may pass one side only. If both new_src and new_tgt are passed, their arrays must have equal length (each row pair becomes a 1:1 relation).",
     "parameters": {
       "type": "object",
       "properties": {
         "target": {
           "type": "string",
-          "description": "Snap id (e.g. '7') or consecutive range (e.g. '10-13')."
+          "description": "Relation ordinal (e.g. '7') or consecutive range (e.g. '10-13')."
         },
         "new_src": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "New source lines — one per snap in the range. Omit to keep source unchanged."
+          "description": "New source lines — one per relation in the range. Omit to keep source unchanged."
         },
         "new_tgt": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "New target lines — one per snap in the range. Omit to keep target unchanged."
+          "description": "New target lines — one per relation in the range. Omit to keep target unchanged."
         }
       },
       "required": [
@@ -47,13 +47,13 @@
   },
   {
     "name": "merge",
-    "description": "Merge consecutive snaps into a single 1:1 snap: source lines join into one paragraph, target lines join into one paragraph. Both sides merge simultaneously. Do NOT merge when each source line is a complete, independent sentence — use ok instead for clean N:N splits.",
+    "description": "Merge consecutive relations into a single 1:1 relation: source lines join into one paragraph, target lines join into one paragraph. Both sides merge simultaneously. Do NOT merge when each source line is a complete, independent sentence — use ok instead for clean N:N splits.",
     "parameters": {
       "type": "object",
       "properties": {
         "target": {
           "type": "string",
-          "description": "Snap id (e.g. '7') or consecutive range to merge (e.g. '10-13')."
+          "description": "Relation ordinal (e.g. '7') or consecutive range to merge (e.g. '10-13')."
         }
       },
       "required": [
@@ -63,13 +63,13 @@
   },
   {
     "name": "delete",
-    "description": "Remove one or more snaps entirely (both sides). Use only for content that is clearly redundant or a duplicate of another snap. If content belongs to a neighbor, re-assign it with edit instead of deleting it.",
+    "description": "Remove one or more relations entirely (both sides). Use only for content that is clearly redundant or a duplicate of another relation. If content belongs to a neighbor, re-assign it with edit instead of deleting it.",
     "parameters": {
       "type": "object",
       "properties": {
         "target": {
           "type": "string",
-          "description": "Snap id (e.g. '7') or consecutive range (e.g. '10-13')."
+          "description": "Relation ordinal (e.g. '7') or consecutive range (e.g. '10-13')."
         }
       },
       "required": [
@@ -79,13 +79,13 @@
   },
   {
     "name": "flag",
-    "description": "Mark ONE snap for human review because you cannot resolve it reliably. Provide a note explaining the difficulty.",
+    "description": "Mark ONE relation for human review because you cannot resolve it reliably. Provide a note explaining the difficulty.",
     "parameters": {
       "type": "object",
       "properties": {
         "target": {
           "type": "string",
-          "description": "Snap id, e.g. '7'."
+          "description": "Relation ordinal, e.g. '7'."
         },
         "note": {
           "type": "string",
@@ -100,13 +100,13 @@
   },
   {
     "name": "view",
-    "description": "Retrieve full JSON content of specified snaps (initial and current text). Use when the ±3 context is insufficient.",
+    "description": "Retrieve full JSON content of specified relations (initial and current text). Use when the ±3 context is insufficient.",
     "parameters": {
       "type": "object",
       "properties": {
         "target": {
           "type": "string",
-          "description": "Comma-separated snap ids or ranges, e.g. '1-3,5,11'."
+          "description": "Comma-separated relation ordinals or ranges, e.g. '1-3,5,11'."
         }
       },
       "required": [
@@ -116,13 +116,13 @@
   },
   {
     "name": "append",
-    "description": "Add a snap you discovered as problematic (outside the flagged list) to the review list so it is processed this round. Only use when you cannot resolve it immediately with edit/merge/delete.",
+    "description": "Add a relation you discovered as problematic (outside the flagged list) to the review list so it is processed this round. Only use when you cannot resolve it immediately with edit/merge/delete.",
     "parameters": {
       "type": "object",
       "properties": {
         "target": {
           "type": "string",
-          "description": "Snap id, e.g. '7'."
+          "description": "Relation ordinal, e.g. '7'."
         }
       },
       "required": [
@@ -132,13 +132,13 @@
   },
   {
     "name": "done",
-    "description": "Finish the review. Only valid when ALL flagged snaps have been processed (ok/edit/merge/delete/flag). Call it after your last action in the same response, or in the following turn. If you have a legitimate reason to skip remaining items (e.g. systemic duplicates already handled), set force=true and explain in note.",
+    "description": "Finish the review. Only valid when ALL flagged relations have been processed (ok/edit/merge/delete/flag). Call it after your last action in the same response, or in the following turn. If you have a legitimate reason to skip remaining items (e.g. systemic duplicates already handled), set force=true and explain in note.",
     "parameters": {
       "type": "object",
       "properties": {
         "force": {
           "type": "boolean",
-          "description": "Set true to finish even if some flagged snaps remain unprocessed. Requires a note explaining why."
+          "description": "Set true to finish even if some flagged relations remain unprocessed. Requires a note explaining why."
         },
         "note": {
           "type": "string",

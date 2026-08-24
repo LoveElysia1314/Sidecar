@@ -267,9 +267,9 @@ def test_solidification_rebases_only_unchanged_pending_derived_state(tmp_path: P
     state = PairEditingState.from_alignment_pair(
         pair, path_a.read_text(encoding="utf-8"), path_b.read_text(encoding="utf-8")
     ).delete_link_content("L1")
-    pending_changed = RepairAction.make_edit(0, source="ai", new_tgt_lines=["X"])
-    pending_survivor = RepairAction.make_edit(2, source="ai", new_tgt_lines=["Z"])
-    accepted = RepairAction.make_ok(1)
+    pending_changed = RepairAction.make_edit("L1", source="ai", new_tgt_lines=["X"])
+    pending_survivor = RepairAction.make_edit("L3", source="ai", new_tgt_lines=["Z"])
+    accepted = RepairAction.make_ok("L2")
     report = build_report(
         chapter_id="pair",
         document_a_path=path_a,
@@ -294,11 +294,9 @@ def test_solidification_rebases_only_unchanged_pending_derived_state(tmp_path: P
         path_b,
         report_path,
         solidification_policy={"include": ["delete_pair"]},
-        applied_repairs=[{"action": RepairAction.make_delete(0).to_dict()}],
+        applied_repairs=[{"action": RepairAction.make_delete("L1").to_dict()}],
         changed_relation_ids={"L1"},
-        remaining_repair_log=[
-            RepairAction.make_flag(1, note="保留", relation_ids=["L2"])
-        ],
+        remaining_repair_log=[RepairAction.make_flag("L2", note="保留")],
     )
 
     saved = load_report(report_path)
@@ -315,7 +313,7 @@ def test_solidified_edit_uses_fresh_alignment_score(tmp_path: Path):
     report = load_report(report_path)
     report["scores"] = {"0_0": 0.717}
     save_report(report, report_path)
-    action = RepairAction.make_edit(0, source="user", new_tgt_lines=["A edited"])
+    action = RepairAction.make_edit("L1", source="user", new_tgt_lines=["A edited"])
 
     _save(
         edited,
@@ -417,7 +415,7 @@ def test_duplicate_relation_text_is_treated_as_ambiguous_and_not_reanchored(
         quality={},
         provenance={},
     )
-    proposal = RepairAction.make_edit(0, source="ai", new_tgt_lines=["X"])
+    proposal = RepairAction.make_edit("L1", source="ai", new_tgt_lines=["X"])
     report["ai_proposals"] = {
         "0": [{"action": proposal.to_dict(), "status": "pending"}]
     }

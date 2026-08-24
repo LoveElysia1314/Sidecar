@@ -978,7 +978,8 @@ class ReviewController(QWidget):
             return False, False
         from dualign.gui.base_table import relation_text_changes
 
-        return relation_text_changes(action.ordinal, action, snapshot)
+        ordinal = snapshot.operation_index(action.relation_ids[0])
+        return relation_text_changes(ordinal, action, snapshot)
 
     def _rebuild_ai_suggestions(self):
         """重建 AI 建议表格。每条建议通过 replay 引擎计算执行后预览文本。"""
@@ -1013,11 +1014,12 @@ class ReviewController(QWidget):
         cur_repair_state = w._repair_state  # 保留当前状态（含已有操作标记）
         items = []
         for action, status in actions_to_show:
+            ordinal = snapshot.operation_index(action.relation_ids[0])
             rows_data = self._compute_action_preview(action, snapshot, cur_repair_state)
             # 获取初始文本（action 前）— 从 snapshot 原始文本获取
             ini_src, ini_tgt = "", ""
-            if snapshot and 0 <= action.ordinal < len(snapshot.original_ops):
-                s_idx, t_idx, _ = snapshot.original_ops[action.ordinal]
+            if snapshot and 0 <= ordinal < len(snapshot.original_ops):
+                s_idx, t_idx, _ = snapshot.original_ops[ordinal]
                 ini_src_lines = [snapshot.src_text(i) for i in s_idx]
                 ini_tgt_lines = [snapshot.tgt_text(j) for j in t_idx]
                 ini_src = (
@@ -1055,7 +1057,7 @@ class ReviewController(QWidget):
             ) in enumerate(rows_data):
                 sub_items.append(
                     AiSuggestionItem(
-                        action.ordinal,
+                        ordinal,
                         action,
                         status,
                         sub=i,
@@ -1168,7 +1170,8 @@ class ReviewController(QWidget):
         base = repair_state if repair_state else RepairState(snapshot)
         temp_state = base.apply(action)
         view = make_table_view(temp_state)
-        relation_rows = [r for r in view.rows if r.ordinal == action.ordinal]
+        ordinal = base.action_ordinal(action)
+        relation_rows = [r for r in view.rows if r.ordinal == ordinal]
         if not relation_rows:
             return None
         return [
@@ -1354,10 +1357,10 @@ class ReviewController(QWidget):
         # 找出所有涉及选中关系的 actions（包括跨关系合并/编辑）
         state = self._window._repair_state
         target_ops = set()
-        for a in state._repair_log:
-            involved = set(a.operation_indices)
+        for a in state.repair_log:
+            involved = set(state.action_ordinals(a))
             if involved & set(sel):
-                target_ops.add(a.ordinal)
+                target_ops.add(state.action_ordinal(a))
         for op_idx in sorted(target_ops):
             self._window.do_reset(op_idx)
 
@@ -1395,7 +1398,12 @@ class ReviewController(QWidget):
         # 同步到 FocusManager（供跨筛选关系显示等使用）
         w = self._window
         if w and hasattr(w, "_focus"):
-            w._focus.focus_action(action)
+            ordinals = (
+                w._repair_state.action_ordinals(action)
+                if action and w._repair_state
+                else ()
+            )
+            w._focus.focus_action(action, ordinals)
 
         has_focus = action is not None
         # ── 应用按钮样式（绿色边框）──
@@ -1501,7 +1509,8 @@ class ReviewController(QWidget):
             from dualign.models.action import RepairAction
 
             # 追加 [OK] 确认标记
-            ok_action = RepairAction(kind="ok", operation_indices=(action.ordinal,))
+            ordinal = w._repair_state.action_ordinal(action)
+            ok_action = w._repair_state.make_action("ok", ordinal)
             w._undo_stack.append(w._repair_state)
             w._repair_state = w._repair_state.apply(ok_action)
             w._refresh()
@@ -1520,7 +1529,7 @@ class ReviewController(QWidget):
         w = self._window
         if w and w._repair_state:
             w._repair_state.ai_proposal_store.reject(action)
-            relation_id = w._repair_state.snapshot.relation_id(action.ordinal)
+            relation_id = action.relation_ids[0]
             existing = w._repair_state.action_for_relation(relation_id)
             if existing and existing.kind == action.kind:
                 new_state = w._repair_state.reset_relation(relation_id)
@@ -1550,21 +1559,25 @@ class ReviewController(QWidget):
             # 仅当建议已被接受时才回退修复状态
             if status == "accepted":
                 # 从 repair_log 中移除该 AI 操作及其附属的 ok
-                log = w._repair_state._repair_log
+                log = w._repair_state.repair_log
                 new_log = []
                 skip_ok = False
                 for a in log:
-                    if a.ordinal == action.ordinal and a.kind == action.kind:
+                    if a.relation_ids == action.relation_ids and a.kind == action.kind:
                         skip_ok = True
                         continue
-                    if skip_ok and a.ordinal == action.ordinal and a.kind == "ok":
+                    if (
+                        skip_ok
+                        and a.relation_ids == action.relation_ids
+                        and a.kind == "ok"
+                    ):
                         skip_ok = False
                         continue
                     new_log.append(a)
                 from dualign.services.repair import RepairState
 
                 w._repair_state = RepairState(
-                    w._repair_state._snapshot,
+                    w._repair_state.snapshot,
                     new_log,
                     w._repair_state.ai_proposal_store,
                 )
@@ -1648,11 +1661,11 @@ class ReviewController(QWidget):
             # 先通过标准入口 apply（生成 [AI][M] 等 marker）
             self.action_requested.emit(a)
             if w._repair_state:
-                a = w._repair_state.bind_action(a)
+                a = w._repair_state.validate_action(a)
                 w._repair_state.ai_proposal_store.add(a)
                 w._repair_state.ai_proposal_store.accept(a)
                 # 叠加 [OK] 标记用户审核通过
-                ok_action = RepairAction(kind="ok", operation_indices=(a.ordinal,))
+                ok_action = RepairAction.make_ok(a.relation_ids[0])
                 w._repair_state = w._repair_state.apply(ok_action)
         if w._repair_state:
             w._refresh()
@@ -1782,7 +1795,7 @@ class ReviewController(QWidget):
             ra = evt.review_action
             self._reviewed_count = getattr(self, "_reviewed_count", 0) + 1
             if self._window and self._window._repair_state:
-                ra = self._window._repair_state.bind_action(ra)
+                ra = self._window._repair_state.validate_action(ra)
                 store = self._window._repair_state.ai_proposal_store
                 # 去重：若同一关系同 kind 已有 pending/accepted 建议则跳过
                 existing = store.get(ra.relation_ids[0])
@@ -1808,7 +1821,11 @@ class ReviewController(QWidget):
         self._navigate_suggestion(1)
 
     def _navigate_suggestion(self, step: int):
-        current = self._focused_action.ordinal if self._focused_action else None
+        current = (
+            self._window._repair_state.action_ordinal(self._focused_action)
+            if self._focused_action and self._window and self._window._repair_state
+            else None
+        )
         ordinal = _next_suggestion_ordinal(self._suggestions, current, step)
         if ordinal is None:
             return
@@ -1846,7 +1863,7 @@ class ReviewController(QWidget):
 
         if safe_actions:
             for a in safe_actions:
-                a = w._repair_state.bind_action(a)
+                a = w._repair_state.validate_action(a)
                 if store:
                     store.add(a)
                     store.accept(a)
@@ -1855,7 +1872,7 @@ class ReviewController(QWidget):
         if review_actions:
             for a in review_actions:
                 if store:
-                    store.add(w._repair_state.bind_action(a))
+                    store.add(w._repair_state.validate_action(a))
 
         self._rebuild_ai_suggestions()
         self.actions_updated.emit()

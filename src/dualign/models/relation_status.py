@@ -373,7 +373,7 @@ def project_relation_statuses(repair_state, k: float = 3.0) -> List[RelationStat
     ]
     actions_by_ordinal: dict[int, list[RepairAction]] = {}
     for action in repair_log:
-        for ordinal in action.operation_indices:
+        for ordinal in repair_state.action_ordinals(action):
             actions_by_ordinal.setdefault(ordinal, []).append(action)
 
     statuses: list[RelationStatus] = []

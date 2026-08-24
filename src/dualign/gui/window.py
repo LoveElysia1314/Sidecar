@@ -428,7 +428,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         # 启用鼠标跟踪以支持悬停弹出
         self.table.viewport().setMouseTracking(True)
-        self.table.verticalHeader().setVisible(False)  # 隐藏原生行号（Snap 列替代）
+        self.table.verticalHeader().setVisible(False)  # 隐藏原生行号（关系列替代）
         from dualign.gui.base_table import THIN_SCROLLBAR_CSS
 
         self.table.setStyleSheet(

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from dualign.models.marker import from_kind as _marker_from_kind
 
@@ -27,16 +27,6 @@ _VALID_KINDS = frozenset(
         "placeholder_tgt",
     }
 )
-
-
-def _pop_relation_ids(values: Dict[str, Any]) -> tuple[str, ...]:
-    raw = values.pop("relation_ids", ())
-    return tuple(str(value) for value in raw)
-
-
-def _pop_operation_indices(values: Dict[str, Any]) -> tuple[int, ...]:
-    raw = values.pop("operation_indices", ())
-    return tuple(int(value) for value in raw)
 
 
 def canonicalize_action_payload(
@@ -93,7 +83,6 @@ class RepairAction:
                    不保存关系身份或位置）
     timestamp:     ISO 时间戳
     relation_ids:  稳定关系身份
-    operation_indices: 当前有序关系中的派生位置；首项即动作 anchor
     """
 
     kind: str
@@ -102,7 +91,6 @@ class RepairAction:
     data: Dict[str, Any] = field(default_factory=dict)
     timestamp: str = ""
     relation_ids: tuple[str, ...] = ()
-    operation_indices: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in _VALID_KINDS:
@@ -111,24 +99,12 @@ class RepairAction:
             self.timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
         if not self.source:
             self.source = "auto"
-        self.operation_indices = tuple(dict.fromkeys(self.operation_indices))
-        if not self.operation_indices:
-            raise ValueError("修复动作必须至少包含一个关系位置")
-        if any(value < 0 for value in self.operation_indices):
-            raise ValueError("关系位置不能为负数")
-        self.relation_ids = tuple(str(value).strip() for value in self.relation_ids)
-        if any(not value for value in self.relation_ids):
+        normalized_ids = tuple(str(value).strip() for value in self.relation_ids)
+        if not normalized_ids or any(not value for value in normalized_ids):
             raise ValueError("关系 ID 不能为空")
-        if len(set(self.relation_ids)) != len(self.relation_ids):
+        if len(set(normalized_ids)) != len(normalized_ids):
             raise ValueError("修复动作中的关系 ID 必须唯一")
-
-    # ── 属性 ──
-
-    @property
-    def ordinal(self) -> int:
-        """Return the action anchor in the current relation order."""
-
-        return self.operation_indices[0]
+        self.relation_ids = normalized_ids
 
     @property
     def marker(self) -> str:
@@ -148,7 +124,7 @@ class RepairAction:
     @classmethod
     def _make(
         cls,
-        ordinal: int,
+        relation_ids: str | Iterable[str],
         kind: str,
         *,
         sub_count: int = 1,
@@ -156,10 +132,8 @@ class RepairAction:
     ) -> RepairAction:
         """Construct an action while keeping metadata out of action data."""
 
-        relation_ids = _pop_relation_ids(values)
-        operation_indices = _pop_operation_indices(values)
-        if not operation_indices:
-            operation_indices = (ordinal,)
+        if isinstance(relation_ids, str):
+            relation_ids = (relation_ids,)
         source = str(values.pop("source", ""))
         timestamp = str(values.pop("timestamp", ""))
         return cls(
@@ -168,41 +142,48 @@ class RepairAction:
             source=source,
             data=values,
             timestamp=timestamp,
-            relation_ids=relation_ids,
-            operation_indices=operation_indices,
+            relation_ids=tuple(relation_ids),
         )
 
     @classmethod
-    def make_merge(cls, ordinal: int, sub_count: int = 1, **kw) -> RepairAction:
-        return cls._make(ordinal, "merge", sub_count=sub_count, **kw)
+    def make_merge(
+        cls, relation_ids: str | Iterable[str], sub_count: int = 1, **kw
+    ) -> RepairAction:
+        return cls._make(relation_ids, "merge", sub_count=sub_count, **kw)
 
     @classmethod
-    def make_split(cls, ordinal: int, **kw) -> RepairAction:
-        return cls._make(ordinal, "split", **kw)
+    def make_split(cls, relation_ids: str | Iterable[str], **kw) -> RepairAction:
+        return cls._make(relation_ids, "split", **kw)
 
     @classmethod
-    def make_edit(cls, ordinal: int, **kw) -> RepairAction:
-        return cls._make(ordinal, "edit", **kw)
+    def make_edit(cls, relation_ids: str | Iterable[str], **kw) -> RepairAction:
+        return cls._make(relation_ids, "edit", **kw)
 
     @classmethod
-    def make_delete(cls, ordinal: int, **kw) -> RepairAction:
-        return cls._make(ordinal, "delete", **kw)
+    def make_delete(cls, relation_ids: str | Iterable[str], **kw) -> RepairAction:
+        return cls._make(relation_ids, "delete", **kw)
 
     @classmethod
-    def make_flag(cls, ordinal: int, note: str = "", **kw) -> RepairAction:
-        return cls._make(ordinal, "flag", note=note, **kw)
+    def make_flag(
+        cls, relation_ids: str | Iterable[str], note: str = "", **kw
+    ) -> RepairAction:
+        return cls._make(relation_ids, "flag", note=note, **kw)
 
     @classmethod
-    def make_ok(cls, ordinal: int, **kw) -> RepairAction:
-        return cls._make(ordinal, "ok", **kw)
+    def make_ok(cls, relation_ids: str | Iterable[str], **kw) -> RepairAction:
+        return cls._make(relation_ids, "ok", **kw)
 
     @classmethod
-    def make_placeholder_src(cls, ordinal: int, **kw) -> RepairAction:
-        return cls._make(ordinal, "placeholder_src", **kw)
+    def make_placeholder_src(
+        cls, relation_ids: str | Iterable[str], **kw
+    ) -> RepairAction:
+        return cls._make(relation_ids, "placeholder_src", **kw)
 
     @classmethod
-    def make_placeholder_tgt(cls, ordinal: int, **kw) -> RepairAction:
-        return cls._make(ordinal, "placeholder_tgt", **kw)
+    def make_placeholder_tgt(
+        cls, relation_ids: str | Iterable[str], **kw
+    ) -> RepairAction:
+        return cls._make(relation_ids, "placeholder_tgt", **kw)
 
     # ── 序列化 ──
 
@@ -214,10 +195,7 @@ class RepairAction:
             "data": {},
             "timestamp": self.timestamp,
         }
-        if self.relation_ids:
-            d["relation_ids"] = list(self.relation_ids)
-        else:
-            d["operation_indices"] = list(self.operation_indices)
+        d["relation_ids"] = list(self.relation_ids)
         for k, v in self.data.items():
             d["data"][k] = sorted(v) if isinstance(v, set) else v
         return d
@@ -225,12 +203,6 @@ class RepairAction:
     @classmethod
     def from_dict(cls, d: dict) -> RepairAction:
         data = dict(d.get("data") or {})
-        operation_indices = tuple(
-            d.get("operation_indices") or data.pop("orig_snaps", ()) or ()
-        )
-        legacy_ordinal = d.get("op_index")
-        if not operation_indices:
-            operation_indices = (int(legacy_ordinal or 0),)
         relation_ids = tuple(
             d.get("relation_ids") or data.pop("relation_ids", ()) or ()
         )
@@ -242,40 +214,7 @@ class RepairAction:
             data=data,
             timestamp=d.get("timestamp", ""),
             relation_ids=relation_ids,
-            operation_indices=operation_indices,
         )
-
-
-def project_action_to_relation_order(
-    action: RepairAction, relation_ids: tuple[str, ...]
-) -> RepairAction:
-    """Bind stable identities and derive their current ordinal projection."""
-
-    if action.relation_ids:
-        positions = {
-            relation_id: index for index, relation_id in enumerate(relation_ids)
-        }
-        try:
-            ordinals = tuple(
-                positions[relation_id] for relation_id in action.relation_ids
-            )
-        except KeyError as exc:
-            raise ValueError(f"未知关系 ID: {exc.args[0]}") from exc
-        target_ids = action.relation_ids
-    else:
-        ordinals = tuple(
-            ordinal
-            for ordinal in action.operation_indices
-            if 0 <= ordinal < len(relation_ids)
-        )
-        target_ids = tuple(relation_ids[ordinal] for ordinal in ordinals)
-    if not ordinals:
-        return action
-    return replace(
-        action,
-        relation_ids=target_ids,
-        operation_indices=ordinals,
-    )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -426,19 +365,17 @@ class AiProposalStore:
         proposal = self._find(self.proposals.get(self._relation_id(action), []), action)
         return proposal.status if proposal is not None else None
 
-    def project_actions(self, projector) -> AiProposalStore:
-        """Project legacy proposal actions and regroup them by stable identity."""
+    def validated_copy(self, validator) -> AiProposalStore:
+        """Validate proposal identities and regroup them by their stable anchor."""
 
-        projected = AiProposalStore()
+        validated = AiProposalStore()
         for props in self.proposals.values():
             for proposal in props:
-                action = projector(proposal.action)
-                if not action.relation_ids:
-                    continue
-                projected.proposals.setdefault(action.relation_ids[0], []).append(
+                action = validator(proposal.action)
+                validated.proposals.setdefault(action.relation_ids[0], []).append(
                     replace(proposal, action=action)
                 )
-        return projected
+        return validated
 
     def to_dict(self) -> dict:
         return {

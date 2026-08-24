@@ -42,7 +42,7 @@ def test_uncertain_region_flags_cover_the_whole_disagreement_island():
 
     flags = review_flags_for_uncertain_regions(ops, (((1, 1), (3, 3)),))
 
-    assert [flag.ordinal for flag in flags] == [1, 2]
+    assert [flag.relation_ids[0] for flag in flags] == ["L000002", "L000003"]
     assert all(flag.source == "auto" for flag in flags)
     assert all(flag.data["reason"] == "composition_disagreement" for flag in flags)
     assert "A 行 2–3" in flags[0].data["note"]
@@ -66,7 +66,7 @@ def test_uncertain_region_flags_only_the_line_whose_matchedness_changes():
         alternative_operations=alternative,
     )
 
-    assert [flag.ordinal for flag in flags] == [1]
+    assert [flag.relation_ids[0] for flag in flags] == ["L000002"]
     assert flags[0].data["current_structure"] == "1:1+1:0"
     assert flags[0].data["alternative_structure"] == "2:1"
     assert "当前路径 1:1+1:0；备选路径 2:1" in flags[0].data["note"]
@@ -84,7 +84,7 @@ class TestRepairStateCreate:
     def test_current_reuses_immutable_replay_result(self, simple_state):
         assert simple_state.current is simple_state.current
 
-        changed = simple_state.apply(RepairAction(kind="ok", operation_indices=(0,)))
+        changed = simple_state.apply(simple_state.make_action("ok", 0))
         assert changed.current is changed.current
         assert changed.current is not simple_state.current
 
@@ -92,7 +92,7 @@ class TestRepairStateCreate:
         assert len(simple_state.repair_log) == 0
 
     def test_dirty_after_apply(self, simple_state):
-        action = RepairAction(kind="ok", operation_indices=(0,))
+        action = simple_state.make_action("ok", 0)
         state2 = simple_state.apply(action)
         assert len(state2.repair_log) == 1
         assert len(simple_state.repair_log) == 0  # 原状态不变
@@ -100,12 +100,12 @@ class TestRepairStateCreate:
 
 class TestApplyUndo:
     def test_apply_new_instance(self, simple_state):
-        action = RepairAction(kind="ok", operation_indices=(0,))
+        action = simple_state.make_action("ok", 0)
         state2 = simple_state.apply(action)
         assert state2 is not simple_state
 
     def test_undo_new_instance(self, simple_state):
-        action = RepairAction(kind="ok", operation_indices=(0,))
+        action = simple_state.make_action("ok", 0)
         state2 = simple_state.apply(action)
         state3 = RepairState(
             state2.snapshot, state2.repair_log[:-1], state2.ai_proposal_store
@@ -116,7 +116,7 @@ class TestApplyUndo:
         assert len(simple_state.repair_log) == 0
 
     def test_apply_then_undo_restores(self, simple_state):
-        action = RepairAction(kind="ok", operation_indices=(0,))
+        action = simple_state.make_action("ok", 0)
         n_before = len(simple_state.current.groups)
         state2 = simple_state.apply(action)
         state3 = RepairState(
@@ -125,12 +125,12 @@ class TestApplyUndo:
         assert len(state3.current.groups) == n_before
 
     def test_reset_clears_log(self, simple_state):
-        state2 = simple_state.apply(RepairAction(kind="ok", operation_indices=(0,)))
+        state2 = simple_state.apply(simple_state.make_action("ok", 0))
         assert len(state2.reset().repair_log) == 0
 
     def test_reset_relation(self, simple_state):
-        s1 = simple_state.apply(RepairAction(kind="ok", operation_indices=(0,)))
-        s2 = s1.apply(RepairAction(kind="flag", operation_indices=(1,)))
+        s1 = simple_state.apply(simple_state.make_action("ok", 0))
+        s2 = s1.apply(s1.make_action("flag", 1))
         sr = s2.reset_relation(simple_state.snapshot.relation_id(0))
         assert sr.action_for_relation(simple_state.snapshot.relation_id(0)) is None
         assert sr.action_for_relation(simple_state.snapshot.relation_id(1)) is not None
@@ -139,12 +139,12 @@ class TestApplyUndo:
         self, simple_state
     ):
         edited = simple_state.apply(
-            RepairAction.make_edit(
-                0, new_src_lines=["edited"], new_tgt_lines=["translated"]
+            simple_state.make_action(
+                "edit", 0, new_src_lines=["edited"], new_tgt_lines=["translated"]
             )
         )
-        flagged = edited.apply(RepairAction.make_flag(0, "需要复查"))
-        updated = flagged.apply(RepairAction.make_flag(0, "拆分失败"))
+        flagged = edited.apply(edited.make_action("flag", 0, note="需要复查"))
+        updated = flagged.apply(flagged.make_action("flag", 0, note="拆分失败"))
 
         relation_id = simple_state.snapshot.relation_id(0)
         assert updated.flag_for_relation(relation_id).data["note"] == "拆分失败"
@@ -158,8 +158,8 @@ class TestApplyUndo:
     def test_new_content_decision_replaces_stale_append_only_decision(
         self, simple_state
     ):
-        deletion = RepairAction.make_delete(0, source="auto")
-        edit = RepairAction.make_edit(0, source="ai", new_tgt_lines=["fixed"])
+        deletion = simple_state.make_action("delete", 0, source="auto")
+        edit = simple_state.make_action("edit", 0, source="ai", new_tgt_lines=["fixed"])
 
         normalized = normalize_repair_log([deletion, edit])
         restored = RepairState(simple_state.snapshot, [deletion, edit])
@@ -170,9 +170,9 @@ class TestApplyUndo:
         assert restored.current.group(0).rows[0].tgt_text == "fixed"
 
     def test_meta_decisions_survive_a_compatible_content_decision(self):
-        edit = RepairAction.make_edit(0, source="ai", new_tgt_lines=["fixed"])
-        flag = RepairAction.make_flag(0, "review")
-        approval = RepairAction.make_ok(0)
+        edit = RepairAction.make_edit("L000001", source="ai", new_tgt_lines=["fixed"])
+        flag = RepairAction.make_flag("L000001", "review")
+        approval = RepairAction.make_ok("L000001")
 
         assert normalize_repair_log([edit, flag, approval]) == [
             edit,
@@ -344,23 +344,23 @@ class TestRepairAction:
             kind="edit",
             sub_count=1,
             data={"new_src_lines": ["X"], "new_tgt_lines": ["Y"]},
-            operation_indices=(0,),
+            relation_ids=("L000001",),
         )
         d = action.to_dict()
         assert d["kind"] == "edit"
         assert d["data"]["new_src_lines"] == ["X"]
 
     def test_deserialize(self):
-        d = {"kind": "edit", "op_index": 0, "data": {"X": 1}}
+        d = {"kind": "edit", "relation_ids": ["L000001"], "data": {"X": 1}}
         action = RepairAction.from_dict(d)
         assert action.kind == "edit"
 
     def test_invalid_kind_raises(self):
         with pytest.raises(ValueError):
-            RepairAction(kind="invalid_kind", operation_indices=(0,))
+            RepairAction(kind="invalid_kind", relation_ids=("L000001",))
 
     def test_auto_timestamp(self):
-        action = RepairAction(kind="ok", operation_indices=(0,))
+        action = RepairAction(kind="ok", relation_ids=("L000001",))
         assert len(action.timestamp) > 0
         assert "T" in action.timestamp
 
@@ -368,7 +368,7 @@ class TestRepairAction:
 class TestActionEdgeCases:
     def test_delete_snap(self, simple_state):
         """删除操作将 marker 设为 [D]，groups 数不变但 marker 变化。"""
-        state2 = simple_state.apply(RepairAction(kind="delete", operation_indices=(0,)))
+        state2 = simple_state.apply(simple_state.make_action("delete", 0))
         g0 = state2.current.group(0)
         assert g0 is not None
         # 删除操作给 group 打上 [D] 标记
@@ -377,13 +377,13 @@ class TestActionEdgeCases:
     def test_action_for_relation(self, simple_state):
         relation_id = simple_state.snapshot.relation_id(0)
         assert simple_state.action_for_relation(relation_id) is None
-        action = RepairAction(kind="ok", operation_indices=(0,))
+        action = simple_state.make_action("ok", 0)
         state2 = simple_state.apply(action)
         assert state2.action_for_relation(relation_id) is not None
 
     def test_repair_log_property(self, simple_state):
         assert simple_state.repair_log == []
-        state2 = simple_state.apply(RepairAction(kind="ok", operation_indices=(0,)))
+        state2 = simple_state.apply(simple_state.make_action("ok", 0))
         assert len(state2.repair_log) == 1
         # 原始 state 不受影响
         assert simple_state.repair_log == []
@@ -521,7 +521,8 @@ class TestRenderRows:
     def test_edit(self, multi_state):
         """[E] 校订：替换为自定义文本。"""
         repaired = multi_state.apply(
-            RepairAction.make_edit(
+            multi_state.make_action(
+                "edit",
                 1,
                 new_src_lines=["X", "Y"],
                 new_tgt_lines=["x", "y"],
@@ -547,7 +548,7 @@ class TestRenderRows:
 
     def test_delete(self, multi_state):
         """[D] 删除：跳过不输出。"""
-        repaired = multi_state.apply(RepairAction.make_delete(1))
+        repaired = multi_state.apply(multi_state.make_action("delete", 1))
         src, tgt = RepairService.render_rows(repaired)
         assert "B" not in src, "deleted snap text should not appear"
         group = repaired.current.group(1)
@@ -572,14 +573,14 @@ class TestRenderRows:
 
     def test_flag_preserves_text(self, multi_state):
         """[F] 标记：文本不变。"""
-        repaired = multi_state.apply(RepairAction.make_flag(1))
+        repaired = multi_state.apply(multi_state.make_action("flag", 1))
         src_before, _ = RepairService.render_rows(multi_state)
         src_after, _ = RepairService.render_rows(repaired)
         assert src_before == src_after, "flag should not change text"
 
     def test_ok_preserves_text(self, multi_state):
         """[OK] 确认：文本不变。"""
-        repaired = multi_state.apply(RepairAction.make_ok(1))
+        repaired = multi_state.apply(multi_state.make_action("ok", 1))
         src_before, _ = RepairService.render_rows(multi_state)
         src_after, _ = RepairService.render_rows(repaired)
         assert src_before == src_after, "ok should not change text"
@@ -596,7 +597,7 @@ class TestRenderRows:
 
     def test_delete_and_merge_preserves_order(self, multi_state):
         """删除后再合并，顺序保持正确。"""
-        s1 = multi_state.apply(RepairAction.make_delete(0))
+        s1 = multi_state.apply(multi_state.make_action("delete", 0))
         s2 = RepairService.repair_bundle_relations(s1, [1, 2])
         src, tgt = RepairService.render_rows(s2)
         # [D]skip snap0 + bundle snap1+snap2=1行 + snap3(2) = 3
@@ -606,7 +607,7 @@ class TestRenderRows:
     def test_render_after_full_reset(self, multi_state):
         """重置所有操作后文本恢复原始。"""
         s1 = RepairService.repair_merge(multi_state, 1)
-        s2 = s1.apply(RepairAction.make_delete(0))
+        s2 = s1.apply(s1.make_action("delete", 0))
         src_reset, _ = RepairService.render_rows(s2.reset())
         assert src_reset == [
             "A",

@@ -2,7 +2,7 @@
 Dualign — AI 校订 Agent 工具可靠性测试
 
 覆盖本次修复:
-  1. 工具参数统一为 target（兼容旧参数名 snap_range/snap_id/pair_spec）
+  1. 工具参数统一为唯一的 target
   2. done 被拒绝时不再强制退出循环，模型可继续修复
   3. done(force=true) 跳过剩余项
   4. 范围 edit 行数校验
@@ -60,23 +60,22 @@ def _call(name, args):
 
 
 class TestTargetParamUnification:
-    """核心回归：模型误用旧参数名 / int 类型也必须成功。"""
+    """核心回归：target 同时接受单个整数与范围字符串。"""
 
-    def test_edit_with_legacy_snap_id(self, reviewable_ctx):
+    def test_edit_with_target_int(self, reviewable_ctx):
         ex = _executor(reviewable_ctx)
-        # 本次事故现场：edit 传了 snap_id 而不是 snap_range
-        result = ex.execute(_call("edit", {"snap_id": 1, "new_tgt": ["新译文"]}))
+        result = ex.execute(_call("edit", {"target": 1, "new_tgt": ["新译文"]}))
         assert "✏️ 编辑" in result, result
         assert 1 in ex.reviewed_ids
 
-    def test_edit_with_target_int(self, reviewable_ctx):
+    def test_edit_with_target_range_member(self, reviewable_ctx):
         ex = _executor(reviewable_ctx)
         result = ex.execute(_call("edit", {"target": 5, "new_src": ["A", "B"]}))
         assert "✏️ 编辑" in result, result
 
-    def test_merge_with_legacy_snap_range(self, reviewable_ctx):
+    def test_merge_with_target(self, reviewable_ctx):
         ex = _executor(reviewable_ctx)
-        result = ex.execute(_call("merge", {"snap_range": "1"}))
+        result = ex.execute(_call("merge", {"target": "1"}))
         assert "🔗 合并" in result, result
 
     def test_delete_with_target(self, reviewable_ctx):
@@ -178,8 +177,8 @@ class TestDoneFlow:
         """本次事故场景：先处理 2/3，调用 done 被拒绝 → 循环必须继续而非退出。"""
         t1 = LLMResponse(
             tool_calls=[
-                ToolCall("a", "edit", {"snap_id": 1, "new_tgt": ["新译文"]}),
-                ToolCall("b", "delete", {"snap_id": 3}),
+                ToolCall("a", "edit", {"target": 1, "new_tgt": ["新译文"]}),
+                ToolCall("b", "delete", {"target": 3}),
                 ToolCall("c", "done", {}),
             ]
         )
@@ -190,7 +189,10 @@ class TestDoneFlow:
             ]
         )
         agent, actions = _run_agent(reviewable_ctx, [t1, t2])
-        kinds = sorted((a.ordinal, a.kind) for a in actions)
+        kinds = sorted(
+            (reviewable_ctx.snapshot.operation_index(a.relation_ids[0]), a.kind)
+            for a in actions
+        )
         assert (1, "edit") in kinds, kinds
         assert (3, "delete") in kinds, kinds
         assert (5, "ok") in kinds, kinds

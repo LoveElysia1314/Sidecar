@@ -11,10 +11,10 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
 from dualign.models.state import AlignmentSnapshot, MISSING
+from dualign.models.relation_identity import normalize_relation_ids
 from dualign.models.action import (
     AiProposalStore,
     RepairAction,
-    project_action_to_relation_order,
 )
 from dualign.models.marker import (
     is_merge,
@@ -46,6 +46,7 @@ def review_flags_for_uncertain_regions(
     regions: tuple[tuple[tuple[int, int], tuple[int, int]], ...] | list,
     *,
     alternative_operations: list | None = None,
+    relation_ids: tuple[str, ...] | list[str] = (),
 ) -> list[RepairAction]:
     """Attach review flags only to relations whose assignment is disputed.
 
@@ -119,6 +120,7 @@ def review_flags_for_uncertain_regions(
         pair_incidence(alternative_operations) if alternative_operations else set()
     )
 
+    snapshot_relation_ids = normalize_relation_ids(len(operations), relation_ids)
     actions: list[RepairAction] = []
     for region_index, (start, end) in enumerate(regions, start=1):
         current_region = inside_region(indexed_ops, start, end)
@@ -169,7 +171,7 @@ def review_flags_for_uncertain_regions(
                 selected_indices = focused
 
         for ordinal in sorted(selected_indices):
-            action = RepairAction.make_flag(ordinal, note)
+            action = RepairAction.make_flag(snapshot_relation_ids[ordinal], note)
             action.source = "auto"
             action.data["reason"] = "composition_disagreement"
             action.data["uncertain_region"] = region_data
@@ -466,15 +468,16 @@ def replay(snapshot: AlignmentSnapshot, log: List[RepairAction]) -> ChapterState
     state = ChapterState.from_snapshot(snapshot)
 
     for act in log:
-        ordinal = act.ordinal
-        if ordinal < 0 or ordinal >= len(snapshot.original_ops):
+        try:
+            operation_indices = list(snapshot.operation_indices(act.relation_ids))
+        except KeyError:
             continue
+        ordinal = operation_indices[0]
 
         # ── marker 由 RepairAction.marker 统一构建（含来源前缀）──
         _marker = act.marker
 
         # 多关系操作
-        operation_indices = list(act.operation_indices)
         if len(operation_indices) > 1:
             if act.kind == "merge":
                 state = _apply_multi_relation_merge(state, act, operation_indices)
@@ -521,9 +524,7 @@ def normalize_repair_log(actions) -> list[RepairAction]:
     """
 
     def targets(action: RepairAction) -> set[tuple[str, object]]:
-        if action.relation_ids:
-            return {("relation", relation_id) for relation_id in action.relation_ids}
-        return {("ordinal", ordinal) for ordinal in action.operation_indices}
+        return {("relation", relation_id) for relation_id in action.relation_ids}
 
     normalized: list[RepairAction] = []
     for action in actions:
@@ -559,16 +560,22 @@ class RepairState:
         default=None, init=False, repr=False, compare=False
     )
 
-    def _project_action(self, action: RepairAction) -> RepairAction:
-        """Bind identity and derive the current ordinal projection."""
+    def validate_action(self, action: RepairAction) -> RepairAction:
+        """Validate that every action identity belongs to this snapshot."""
 
-        return project_action_to_relation_order(action, self._snapshot.relation_ids)
+        try:
+            self._snapshot.operation_indices(action.relation_ids)
+        except KeyError as exc:
+            raise ValueError(str(exc)) from exc
+        return action
 
     def __post_init__(self):
-        bound_actions = [self._project_action(action) for action in self._repair_log]
-        self._repair_log = normalize_repair_log(bound_actions)
-        self._ai_proposal_store = self._ai_proposal_store.project_actions(
-            self._project_action
+        validated_actions = [
+            self.validate_action(action) for action in self._repair_log
+        ]
+        self._repair_log = normalize_repair_log(validated_actions)
+        self._ai_proposal_store = self._ai_proposal_store.validated_copy(
+            self.validate_action
         )
 
     # ── 属性 ──
@@ -604,10 +611,37 @@ class RepairState:
     def ai_proposal_store(self) -> AiProposalStore:
         return self._ai_proposal_store
 
-    def bind_action(self, action: RepairAction) -> RepairAction:
-        """Return an action whose stable identity and ordinal projection agree."""
+    def action_ordinals(self, action: RepairAction) -> tuple[int, ...]:
+        """Project one action into the immutable snapshot order."""
 
-        return self._project_action(action)
+        return self._snapshot.operation_indices(action.relation_ids)
+
+    def action_ordinal(self, action: RepairAction) -> int:
+        """Return the projected anchor ordinal of one action."""
+
+        return self.action_ordinals(action)[0]
+
+    def make_action(
+        self,
+        kind: str,
+        ordinal: int,
+        *,
+        ordinals: tuple[int, ...] | list[int] = (),
+        sub_count: int = 1,
+        source: str = "",
+        **data,
+    ) -> RepairAction:
+        """Create an identity-bound action from a transient UI/solver position."""
+
+        positions = tuple(ordinals) or (ordinal,)
+        relation_ids = tuple(self._snapshot.relation_id(value) for value in positions)
+        return RepairAction(
+            kind=kind,
+            sub_count=sub_count,
+            source=source,
+            data=data,
+            relation_ids=relation_ids,
+        )
 
     def set_ai_proposal_store(self, store: AiProposalStore) -> RepairState:
         """返回一个替换了 AI 建议存储的新 RepairState 实例。
@@ -623,7 +657,6 @@ class RepairState:
 
         动作进入状态时绑定稳定关系身份；统一规范化器负责替换冲突决策。
         """
-        action = self._project_action(action)
         return RepairState(
             self._snapshot,
             [*self._repair_log, action],
@@ -830,7 +863,7 @@ class RepairService:
 
         if unresolved_only:
             for action in state.repair_log:
-                affected = set(action.operation_indices)
+                affected = set(state.action_ordinals(action))
                 if action.kind == "flag":
                     for affected_index in affected:
                         flags_by_ordinal.setdefault(affected_index, []).append(action)
@@ -899,21 +932,21 @@ class RepairService:
         s_idx, t_idx, _sc = state.snapshot.original_ops[ordinal]
         sub_count = max(len(s_idx), len(t_idx))
         return state.apply(
-            RepairAction.make_merge(ordinal, sub_count=sub_count, source="auto")
+            state.make_action("merge", ordinal, sub_count=sub_count, source="auto")
         )
 
     @staticmethod
     def repair_delete(state: RepairState, ordinal: int) -> RepairState:
         """删除文本对。"""
-        return state.apply(RepairAction.make_delete(ordinal, source="auto"))
+        return state.apply(state.make_action("delete", ordinal, source="auto"))
 
     @staticmethod
     def repair_placeholder(state: RepairState, ordinal: int, side: str) -> RepairState:
         """占位符：保留非空侧，空侧填 MISSING。"""
         if side == "src":
-            action = RepairAction.make_placeholder_src(ordinal, source="auto")
+            action = state.make_action("placeholder_src", ordinal, source="auto")
         else:
-            action = RepairAction.make_placeholder_tgt(ordinal, source="auto")
+            action = state.make_action("placeholder_tgt", ordinal, source="auto")
         return state.apply(action)
 
     # ── 拆分 ──
@@ -1014,7 +1047,8 @@ class RepairService:
             return SplitAttempt(state, SPLIT_FAILURE_REALIGN)
 
         # 3. 每条局部语义关系展平为一个双边非空输出行。
-        action = RepairAction.make_split(
+        action = state.make_action(
+            "split",
             ordinal,
             new_src_lines=new_src,
             new_tgt_lines=new_tgt,
@@ -1052,10 +1086,7 @@ class RepairService:
             if kind not in ("edit",):
                 state = state.reset_relation(relation_id)
 
-        action = RepairAction(
-            kind="merge",
-            operation_indices=tuple(ordinals),
-        )
+        action = state.make_action("merge", ordinals[0], ordinals=ordinals)
         return state.apply(action)
 
     @staticmethod
@@ -1121,9 +1152,10 @@ class RepairService:
             return state
 
         anchor = ordinals[0]
-        action = RepairAction.make_edit(
+        action = state.make_action(
+            "edit",
             anchor,
-            operation_indices=ordinals,
+            ordinals=ordinals,
             new_src_lines=new_src_lines,
             new_tgt_lines=new_tgt_lines,
             inherited_scores=scores or [],
@@ -1166,7 +1198,7 @@ class RepairService:
                 # merge: 原文译文均合并为一行
                 # 检查是否为跨关系合并（bundle merge）
                 action = state.action_for_relation(g.relation_id)
-                operation_indices = action.operation_indices if action else ()
+                operation_indices = state.action_ordinals(action) if action else ()
                 if len(operation_indices) > 1:
                     # 跨关系合并：收集所有被捆绑关系的文本再拼接
                     src_parts: List[str] = []

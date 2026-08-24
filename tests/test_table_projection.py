@@ -17,8 +17,8 @@ class Row:
 
 def test_projection_separates_initial_segments_from_current_bundle():
     rows = [
-        Row(0, 0, "snap 0\n1:1", 2, 1, "[M]"),
-        Row(0, 1, "snap 1\n1:0", 2, 1, "[M]"),
+        Row(0, 0, "关系 0\n1:1", 2, 1, "[M]"),
+        Row(0, 1, "关系 1\n1:0", 2, 1, "[M]"),
     ]
 
     projection = project_table_cells(rows, col_offset=1, relation_col=0)
@@ -34,7 +34,7 @@ def test_projection_separates_initial_segments_from_current_bundle():
 
 def test_projection_preserves_independent_current_edit_rows():
     rows = [
-        Row(0, 0, "snap 0\n1:1\n---\nsnap 1\n2:1", 2, 2, "[E]"),
+        Row(0, 0, "关系 0\n1:1\n---\n关系 1\n2:1", 2, 2, "[E]"),
         Row(0, 1, "", 2, 2, "[E]"),
     ]
 
@@ -50,8 +50,8 @@ def test_projection_preserves_independent_current_edit_rows():
 
 def test_identical_initial_labels_do_not_fuse_explicit_segments():
     rows = [
-        Row(0, 0, "snap 0\n1:1", 2, 2, "[M]"),
-        Row(0, 1, "snap 0\n1:1", 2, 2, "[M]"),
+        Row(0, 0, "关系 0\n1:1", 2, 2, "[M]"),
+        Row(0, 1, "关系 0\n1:1", 2, 2, "[M]"),
     ]
 
     projection = project_table_cells(rows, col_offset=1, relation_col=0)
@@ -60,7 +60,7 @@ def test_identical_initial_labels_do_not_fuse_explicit_segments():
     assert (0, 2) not in projection.spans
 
 
-def test_two_suggestions_for_same_snap_remain_separate_display_groups():
+def test_two_suggestions_for_same_relation_remain_separate_display_groups():
     rows = [
         Row(3, 0, "2:1", 2, 1, "[M]", (3, "proposal-a")),
         Row(3, 1, "", 2, 1, "[M]", (3, "proposal-a")),
@@ -75,5 +75,5 @@ def test_two_suggestions_for_same_snap_remain_separate_display_groups():
 
 
 def test_relation_color_reads_semantics_from_bundled_display_label():
-    assert type_cl("snap 0\n1:1\n---\nsnap 1\n2:1").name() == TYPE_CL_NON11.name()
-    assert type_cl("snap 0\n1:1\n---\nsnap 1\n1:0").name() == TYPE_CL_10_01.name()
+    assert type_cl("关系 0\n1:1\n---\n关系 1\n2:1").name() == TYPE_CL_NON11.name()
+    assert type_cl("关系 0\n1:1\n---\n关系 1\n1:0").name() == TYPE_CL_10_01.name()

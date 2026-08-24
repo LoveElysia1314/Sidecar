@@ -77,7 +77,9 @@ class FocusManager(QObject):
         finally:
             self._sync_lock = False
 
-    def focus_action(self, action: Optional[RepairAction]):
+    def focus_action(
+        self, action: Optional[RepairAction], ordinals: tuple[int, ...] = ()
+    ):
         """聚焦一条 AI 建议。
 
         设置 force_show_ordinals 并发出动作焦点，
@@ -89,7 +91,7 @@ class FocusManager(QObject):
         try:
             if action is not None:
                 self.source = "ai"
-                self.force_show_ordinals = set(action.operation_indices)
+                self.force_show_ordinals = set(ordinals)
             else:
                 self.force_show_ordinals = set()
             self.action_focused.emit(action)

@@ -731,14 +731,27 @@ class ToolExecutor:
 
     @staticmethod
     def _get_target(args: dict) -> object | None:
-        """Read the relation target; accept historical parameter names."""
-        v = args.get("target")
-        if v is None:
-            for old in ("snap_range", "snap_id", "pair_spec"):
-                if old in args and args[old] is not None:
-                    v = args[old]
-                    break
-        return v
+        """Read the sole relation-target parameter exposed by current tools."""
+
+        return args.get("target")
+
+    def _make_action(
+        self,
+        kind: str,
+        ordinals: list[int],
+        *,
+        source: str = "ai",
+        **data,
+    ) -> RepairAction:
+        relation_ids = tuple(
+            self.ctx.snapshot.relation_id(ordinal) for ordinal in ordinals
+        )
+        return RepairAction(
+            kind=kind,
+            source=source,
+            data=data,
+            relation_ids=relation_ids,
+        )
 
     def _progress(self) -> str:
         total = len(self.ctx.reviewable_ids)
@@ -813,8 +826,8 @@ class ToolExecutor:
             return None
         state = self._replay_reviewed_actions()
         META_KINDS = {"ok", "flag"}
-        for a in reversed(state._repair_log):
-            if a.ordinal == ordinal and a.kind not in META_KINDS:
+        for a in reversed(state.repair_log):
+            if state.action_ordinal(a) == ordinal and a.kind not in META_KINDS:
                 return a
         return None
 
@@ -835,16 +848,11 @@ class ToolExecutor:
         existing = self._get_current_relation_action(ordinal)
         if existing:
             # 复制原操作的数据（split/edit 需要 new_src_lines 等）
-            ra = RepairAction(
-                kind=existing.kind,
-                source="ai",
-                data=dict(existing.data),
-                operation_indices=(anchor,),
-            )
+            ra = self._make_action(existing.kind, [anchor], **existing.data)
             decision = f"通过拟修复 {existing.kind}"
         else:
             # 无拟修复 → 确认原始对齐关系，不虚构修改。
-            ra = RepairAction(kind="ok", source="ai", operation_indices=(anchor,))
+            ra = self._make_action("ok", [anchor])
             decision = "确认原始对齐关系（无修改）"
 
         self._record_review(ordinals, ra)
@@ -941,11 +949,8 @@ class ToolExecutor:
                     continue
                 _src = [new_src[i]] if i < len(new_src) and new_src[i] else []
                 _tgt = [new_tgt[i]] if i < len(new_tgt) and new_tgt[i] else []
-                ra = RepairAction(
-                    kind="edit",
-                    source="ai",
-                    data={"new_src_lines": _src, "new_tgt_lines": _tgt},
-                    operation_indices=(si,),
+                ra = self._make_action(
+                    "edit", [si], new_src_lines=_src, new_tgt_lines=_tgt
                 )
                 self.reviewed_ids.add(si)
                 self.reviewed_actions[si] = ra
@@ -958,11 +963,11 @@ class ToolExecutor:
                         new_src = [s for s in info.src_text.split("\n") if s]
                     if not new_tgt:
                         new_tgt = [t for t in info.tgt_text.split("\n") if t]
-            ra = RepairAction(
-                kind="edit",
-                source="ai",
-                data={"new_src_lines": new_src, "new_tgt_lines": new_tgt},
-                operation_indices=(anchor,),
+            ra = self._make_action(
+                "edit",
+                [anchor],
+                new_src_lines=new_src,
+                new_tgt_lines=new_tgt,
             )
             self._record_review(ordinals, ra)
 
@@ -980,15 +985,11 @@ class ToolExecutor:
         already = [si for si in ordinals if si in self.reviewed_ids]
         anchor = ordinals[0]
         if len(ordinals) > 1:
-            ra = RepairAction(
-                kind="merge",
-                source="ai",
-                operation_indices=tuple(ordinals),
-            )
+            ra = self._make_action("merge", ordinals)
             self.reviewed_ids.update(ordinals)
             self.reviewed_actions[anchor] = ra
         else:
-            ra = RepairAction.make_merge(anchor, source="ai")
+            ra = self._make_action("merge", [anchor])
             self._record_review(ordinals, ra)
         suffix = " (已覆盖之前的审校决定)" if already else ""
         return f"### 🔗 合并 — 关系 {ordinals}{suffix}\n\n{self._progress()}"
@@ -1004,15 +1005,11 @@ class ToolExecutor:
         already = [si for si in ordinals if si in self.reviewed_ids]
         anchor = ordinals[0]
         if len(ordinals) > 1:
-            ra = RepairAction(
-                kind="delete",
-                source="ai",
-                operation_indices=tuple(ordinals),
-            )
+            ra = self._make_action("delete", ordinals)
             self.reviewed_ids.update(ordinals)
             self.reviewed_actions[anchor] = ra
         else:
-            ra = RepairAction.make_delete(anchor, source="ai")
+            ra = self._make_action("delete", [anchor])
             self._record_review(ordinals, ra)
         suffix = " (已覆盖之前的审校决定)" if already else ""
         return f"### 🗑️ 删除 — 关系 {ordinals}{suffix}\n\n{self._progress()}"
@@ -1029,8 +1026,7 @@ class ToolExecutor:
             return "❌ flag 只接受单个关系，请用 target='7' 指定一个编号。"
         already = [si for si in ordinals if si in self.reviewed_ids]
         note = args.get("note", "")
-        ra = RepairAction.make_flag(ordinals[0], note=note)
-        ra.source = "ai"
+        ra = self._make_action("flag", ordinals, note=note)
         self._record_review(ordinals, ra)
         suffix = " (已覆盖之前的审校决定)" if already else ""
         return f"### 🚩 标记 — 关系 {ordinals}{suffix}\n\n{self._progress()}"
@@ -1445,9 +1441,14 @@ def format_action(a, ctx=None) -> str:
     """格式化一条操作为人类可读字符串。"""
     kind = a.kind
     icon = _ACTION_ICON.get(kind, "❓")
+    ordinals: tuple[int, ...] = (
+        ctx.snapshot.operation_indices(a.relation_ids) if ctx is not None else ()
+    )
+    anchor = ordinals[0] if ordinals else a.relation_ids[0]
+    targets = list(ordinals) if ordinals else list(a.relation_ids)
 
     if kind == "ok" and ctx is not None:
-        ss = ctx.get_relation_status(a.ordinal)
+        ss = ctx.get_relation_status(ordinals[0])
         resolved = (
             compute_auto_action_kind(ss, getattr(ctx, "strategy", "src"))
             if ss
@@ -1455,8 +1456,8 @@ def format_action(a, ctx=None) -> str:
         )
         if resolved:
             resolved_icon = _ACTION_ICON.get(resolved, "❓")
-            return f"  {resolved_icon} 关系[{a.ordinal}]  ok \u2192 {resolved}"
-        return f"  {icon} 关系[{a.ordinal}] {kind}"
+            return f"  {resolved_icon} 关系[{anchor}]  ok \u2192 {resolved}"
+        return f"  {icon} 关系[{anchor}] {kind}"
 
     detail = ""
     if kind == "edit":
@@ -1473,16 +1474,13 @@ def format_action(a, ctx=None) -> str:
         elif new_src:
             detail += f" {side_label}={new_src[0]}"
     elif kind == "merge":
-        positions = a.operation_indices
-        detail += (
-            f" {'合并' + str(list(positions)) if len(positions) > 1 else '单关系'}"
-        )
+        detail += f" {'合并' + str(targets) if len(targets) > 1 else '单关系'}"
     elif kind == "delete":
-        detail += " 批量" if len(a.operation_indices) > 1 else ""
+        detail += " 批量" if len(a.relation_ids) > 1 else ""
     elif kind == "flag":
         detail += f" note={a.data.get('note', '')}"
 
-    return f"  {icon} 关系[{a.ordinal}] {kind}{detail}"
+    return f"  {icon} 关系[{anchor}] {kind}{detail}"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1637,7 +1635,12 @@ def dump_agent_raw(
             "completion": completion_tokens,
         },
         "final_actions": [
-            {"ordinal": a.ordinal, "kind": a.kind, "source": a.source, "data": a.data}
+            {
+                "relation_ids": list(a.relation_ids),
+                "kind": a.kind,
+                "source": a.source,
+                "data": a.data,
+            }
             for a in actions
         ],
         "turn_log": turn_log,

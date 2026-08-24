@@ -109,7 +109,7 @@ def test_reset_work_state_reuses_alignment_but_discards_review_markers(tmp_path)
     first = align_documents(str(source), str(target), str(report), model=encoder)
     original_ops = first["ops"]
     stale = load_report(report)
-    stale["repair_log"] = [RepairAction.make_flag(0, "旧标记").to_dict()]
+    stale["repair_log"] = [RepairAction.make_flag("L000001", "旧标记").to_dict()]
     stale["ai_review"] = {"status": "completed"}
     stale["scores"] = {"0": 0.1}
     stale["history"] = [{"type": "old"}]
@@ -142,7 +142,7 @@ def test_disabling_alignment_reuse_recomputes_and_replaces_old_report(tmp_path):
     ]
     stale = load_report(report)
     stale["ops"] = [{"s": [0, 1], "t": [0, 1], "sc": 0.01}]
-    stale["repair_log"] = [RepairAction.make_flag(0, "旧标记").to_dict()]
+    stale["repair_log"] = [RepairAction.make_flag("L000001", "旧标记").to_dict()]
     save_report(stale, report)
 
     rebuilt_result = align_documents(
@@ -171,8 +171,8 @@ def test_preserved_work_state_repairs_only_unresolved_relations(tmp_path):
         {"s": [], "t": [1], "sc": 0.0},
     ]
     stale["repair_log"] = [
-        RepairAction.make_flag(0, "仍需人工确认").to_dict(),
-        RepairAction.make_ok(1).to_dict(),
+        RepairAction.make_flag("L000001", "仍需人工确认").to_dict(),
+        RepairAction.make_ok("L000002").to_dict(),
     ]
     save_report(stale, report)
 

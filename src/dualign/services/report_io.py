@@ -159,6 +159,22 @@ def _canonical_ai_proposals(
     return result
 
 
+def _canonicalize_relation_state(data: dict[str, Any]) -> None:
+    """Normalize every relation-owned payload at the report boundary."""
+
+    relation_ids = relation_ids_from_report(data)
+    data["repair_log"] = [
+        _repair_action_payload(action, relation_ids)
+        for action in data.get("repair_log", ())
+    ]
+    data["ai_proposals"] = _canonical_ai_proposals(
+        data.get("ai_proposals"), relation_ids
+    )
+    data["scores"] = RelationScoreCache.from_dict(
+        data.get("scores"), relation_ids
+    ).to_dict()
+
+
 def build_report(
     *,
     chapter_id: str,
@@ -241,17 +257,7 @@ def save_report(report: Mapping[str, Any], path: str | Path) -> Path:
     if data.get("format") != REPORT_FORMAT:
         raise ReportError("拒绝写入无法识别的 Dualign 报告")
     operations_from_report(data)
-    relation_ids = relation_ids_from_report(data)
-    data["repair_log"] = [
-        _repair_action_payload(action, relation_ids)
-        for action in data.get("repair_log", ())
-    ]
-    data["ai_proposals"] = _canonical_ai_proposals(
-        data.get("ai_proposals"), relation_ids
-    )
-    data["scores"] = RelationScoreCache.from_dict(
-        data.get("scores"), relation_ids
-    ).to_dict()
+    _canonicalize_relation_state(data)
     data["updated_at"] = _now()
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -287,6 +293,7 @@ def load_report(path: str | Path) -> dict[str, Any]:
     if not isinstance(data, dict) or data.get("format") != REPORT_FORMAT:
         raise ReportError("报告格式已过时，请重新对齐文档")
     operations_from_report(data)
+    _canonicalize_relation_state(data)
     # Reports written before the decision contract represent completed legacy
     # alignments.  Keep them readable without pretending they passed mdl-v1.
     if "alignment" not in data:

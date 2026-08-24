@@ -215,7 +215,7 @@ def test_report_can_store_identity_anchored_action_without_materialized_files(tm
     data = json.loads(report.read_text(encoding="utf-8"))
     relation_id = "manual-relation"
     data["ops"] = [{"id": relation_id, "s": [0], "t": [0], "sc": 0.8}]
-    action = RepairAction.make_ok(0, relation_ids=[relation_id])
+    action = RepairAction.make_ok(relation_id)
     action.source = "user"
     data["repair_log"] = [action.to_dict()]
     from dualign.services.report_io import save_report
