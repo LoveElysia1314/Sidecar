@@ -7,13 +7,14 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
-from dualign.version import __version__
-
 Operation = Tuple[Tuple[int, ...], Tuple[int, ...], float]
 
 ALGORITHM_MDL_V1 = "mdl-v1"
-ALIGN_CORE_VERSION = __version__
 ALIGN_CACHE_REVISION = "mdl-gated-composition.3"
+# Kept under the historical public name, but this is a semantic algorithm
+# revision rather than the package release. Patch releases must not invalidate
+# reusable alignments when their relations are unchanged.
+ALIGN_CORE_VERSION = ALIGN_CACHE_REVISION
 
 
 @dataclass(frozen=True)

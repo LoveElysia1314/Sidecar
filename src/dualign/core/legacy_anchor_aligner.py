@@ -36,8 +36,6 @@ from typing import Callable, ClassVar, Dict, Iterator, List, Optional, Set, Tupl
 
 import numpy as np
 
-from dualign.version import __version__
-
 from .text import op_type_str, smart_join_lines as _smart_join_lines
 
 ALGORITHM_NAME = "legacy-anchor-v1"
@@ -58,10 +56,9 @@ elif not logger.handlers:
     logger.propagate = False
 
 
-# Public core version follows package metadata.  The cache revision changes
-# independently whenever relations can change without a config change.
-ALIGN_CORE_VERSION = __version__
 ALIGN_CACHE_REVISION = "coverage-combos.1"
+# The legacy report identity follows relation semantics, not package releases.
+ALIGN_CORE_VERSION = ALIGN_CACHE_REVISION
 
 # ── 双边信任余量锚点参数 ──
 ANCHOR_MARGIN_SLOPE = 0.10

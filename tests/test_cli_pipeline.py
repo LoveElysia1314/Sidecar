@@ -11,7 +11,12 @@ from dualign.services.cli_pipeline import align_documents as _align_documents
 from dualign.services.cli_pipeline import _auto_repair_state
 from dualign.models.state import AlignmentSnapshot
 from dualign.services.repair import RepairService, RepairState
-from dualign.services.report_io import load_report, materialize_reader_rows, save_report
+from dualign.services.report_io import (
+    AlignmentKey,
+    load_report,
+    materialize_reader_rows,
+    save_report,
+)
 
 
 class MockEncoder:
@@ -164,6 +169,50 @@ def test_tool_release_metadata_does_not_invalidate_same_alignment(tmp_path):
     reused = align_documents(str(source), str(target), str(report), model=encoder)
 
     assert reused["cache_hit"] is True
+
+
+def test_historical_package_coupled_revision_reuses_same_cache_revision(tmp_path):
+    source, target = _pair(tmp_path)
+    report = tmp_path / "chapter.report.json"
+    encoder = MockEncoder()
+    assert align_documents(str(source), str(target), str(report), model=encoder)[
+        "success"
+    ]
+    data = load_report(report)
+    data["provenance"]["algorithm"]["revision"] = "0.9.2"
+    documents = data["documents"]
+    data["alignment_key"] = AlignmentKey.from_values(
+        documents["a"]["sha256"],
+        documents["b"]["sha256"],
+        data["provenance"],
+    ).to_dict()
+    save_report(data, report)
+
+    reused = align_documents(str(source), str(target), str(report), model=encoder)
+
+    assert reused["cache_hit"] is True
+
+
+def test_changed_algorithm_cache_revision_still_invalidates_report(tmp_path):
+    source, target = _pair(tmp_path)
+    report = tmp_path / "chapter.report.json"
+    encoder = MockEncoder()
+    assert align_documents(str(source), str(target), str(report), model=encoder)[
+        "success"
+    ]
+    data = load_report(report)
+    data["provenance"]["algorithm"]["cache_revision"] = "different-relations"
+    documents = data["documents"]
+    data["alignment_key"] = AlignmentKey.from_values(
+        documents["a"]["sha256"],
+        documents["b"]["sha256"],
+        data["provenance"],
+    ).to_dict()
+    save_report(data, report)
+
+    rebuilt = align_documents(str(source), str(target), str(report), model=encoder)
+
+    assert rebuilt["success"] and not rebuilt["cache_hit"]
 
 
 def test_reset_work_state_reuses_alignment_but_discards_review_markers(tmp_path):

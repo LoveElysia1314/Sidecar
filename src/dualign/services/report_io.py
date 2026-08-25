@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,9 +27,27 @@ from dualign.services.repair import RepairService, RepairState
 
 REPORT_FORMAT = "dualign-report/v1"
 
+# Windows refuses to replace an existing file while a reader, indexer, or
+# antivirus scanner briefly holds a handle without delete sharing.  The report
+# remains safely staged in the same directory while these bounded retries run.
+_REPLACE_RETRY_DELAYS = (0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.5, 0.5)
+
 
 class ReportError(ValueError):
     """Raised when a work report is malformed or no longer matches its inputs."""
+
+
+def _replace_report(temporary: Path, target: Path) -> None:
+    """Atomically replace ``target``, tolerating transient Windows readers."""
+
+    for delay in (*_REPLACE_RETRY_DELAYS, None):
+        try:
+            os.replace(temporary, target)
+            return
+        except PermissionError:
+            if delay is None:
+                raise
+            time.sleep(delay)
 
 
 def _semantic_provenance(provenance: Mapping[str, Any]) -> dict[str, Any]:
@@ -43,6 +62,22 @@ def _semantic_provenance(provenance: Mapping[str, Any]) -> dict[str, Any]:
         "algorithm": dict(provenance.get("algorithm") or {}),
         "embedding": dict(provenance.get("embedding") or {}),
     }
+
+
+def _reuse_provenance(provenance: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize historical package-coupled algorithm revisions for reuse.
+
+    Reports written before 0.9.3 used the package version as ``revision`` even
+    though ``cache_revision`` already carried the relation-changing identity.
+    Ignore only that redundant field when both sides have a cache revision;
+    reports without one retain the stricter historical comparison.
+    """
+
+    result = _semantic_provenance(provenance)
+    algorithm = result["algorithm"]
+    if algorithm.get("cache_revision"):
+        algorithm.pop("revision", None)
+    return result
 
 
 @dataclass(frozen=True)
@@ -277,7 +312,7 @@ def save_report(report: Mapping[str, Any], path: str | Path) -> Path:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, target)
+        _replace_report(temporary, target)
         temporary = None
     finally:
         if temporary is not None:
@@ -354,7 +389,16 @@ def report_matches_alignment(
         expected = expected_alignment_key(document_a_path, document_b_path, provenance)
     except OSError:
         return False
-    return actual == expected
+    if actual == expected:
+        return True
+    if (
+        actual.document_a_sha256 != expected.document_a_sha256
+        or actual.document_b_sha256 != expected.document_b_sha256
+    ):
+        return False
+    return _canonical_sha256(
+        _reuse_provenance(report.get("provenance") or {})
+    ) == _canonical_sha256(_reuse_provenance(provenance))
 
 
 def repair_state_from_report(
