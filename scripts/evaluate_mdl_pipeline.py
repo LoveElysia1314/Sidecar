@@ -121,15 +121,17 @@ def _operation_counts(operations):
 
 
 def _gate_payload(gate):
+    order = gate.order
     return {
-        "status": gate.status,
+        "status": "accepted" if gate.accepted else "rejected",
+        "reason": gate.reason or None,
         "existence_score": round(gate.existence_score, 6),
         "existence_p": gate.existence_p,
-        "order_coverage": gate.order.coverage,
         "order_compatibility_p": gate.order_compatibility_p,
-        "mutual_pairs": gate.order.mutual_pairs,
-        "chain_length": gate.order.chain_length,
-        "kendall_tau": gate.order.kendall_tau,
+        "order_free_evidence_bits": order.order_free_bits if order else None,
+        "monotone_evidence_bits": order.monotone_bits if order else None,
+        "monotone_evidence_loss": order.relative_loss if order else None,
+        "monotone_pairs": len(order.monotone_pairs) if order else 0,
     }
 
 
@@ -149,15 +151,9 @@ def main() -> int:
         [item["nearest_score"] for item in calibration_artifact["nonparallel"]],
         dtype=np.float64,
     )
-    order_counts = np.array(
-        [
-            [
-                item["order"]["mutual_pairs"] - item["order"]["chain_length"],
-                item["order"]["mutual_pairs"],
-            ]
-            for item in calibration_artifact["parallel"]
-        ],
-        dtype=np.int32,
+    acceptable_monotone_losses = np.array(
+        calibration_artifact["order_model"]["acceptable_monotone_losses"],
+        dtype=np.float64,
     )
     documents = list(enumerate(inventory["documents"], 1))
     if args.numbers:
@@ -185,7 +181,7 @@ def main() -> int:
             before_hits, before_misses = encoder.hit_count, encoder.miss_count
             calibration = AlignmentCalibration(
                 existence_null=existence_null,
-                parallel_order_counts=order_counts,
+                acceptable_monotone_losses=acceptable_monotone_losses,
                 alpha=args.alpha,
             )
             result = align_mdl_pipeline(
@@ -196,7 +192,7 @@ def main() -> int:
                 encoder.encode,
                 calibration,
             )
-            gate_counts[result.gate.status] += 1
+            gate_counts["accepted" if result.gate.accepted else "rejected"] += 1
             exact_new = {
                 (tuple(source), tuple(target))
                 for source, target, _score in result.all_ops
@@ -295,7 +291,8 @@ def main() -> int:
             )
             print(
                 f"[{sequence}/{len(documents)}] {report_path.name} "
-                f"gate={result.gate.status} result={result.status} islands={len(islands)} "
+                f"gate={'accepted' if result.gate.accepted else 'rejected'} "
+                f"result={result.status} islands={len(islands)} "
                 f"composition={result.composition.encoded_texts if result.composition else 0}",
                 flush=True,
             )

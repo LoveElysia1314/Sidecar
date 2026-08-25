@@ -179,6 +179,31 @@ class RelationStatus:
         return bool(self.current_anomaly_types)
 
     @property
+    def is_manual_review_subject(self) -> bool:
+        """Whether this relation belongs to the human-review workload.
+
+        Initial anomalies remain relevant after an automatic or agent repair has
+        made the current shape look regular.  Conversely, an ordinary untouched
+        1:1 relation is not review work merely because its approval is ``none``.
+        Deleted relations have no remaining relation to approve.
+        """
+
+        if self.is_deleted:
+            return False
+        return bool(
+            self.initial_anomaly_types
+            or self.current_anomaly_types
+            or self.approval != APPROVAL_NONE
+            or self.repair_count
+        )
+
+    @property
+    def requires_manual_review(self) -> bool:
+        """Whether a user decision is still required for this relation."""
+
+        return self.is_manual_review_subject and self.approval != APPROVAL_USER
+
+    @property
     def signals(self) -> List[str]:
         """自然语言状态信号（供 AI 和 GUI 展示）。"""
         signals = []
@@ -309,6 +334,30 @@ class RelationAnomaly:
     @property
     def ordinal(self) -> int | None:
         return self.ordinals[0] if self.ordinals else None
+
+
+@dataclass(frozen=True, slots=True)
+class ManualReviewCounts:
+    """Chapter-level counts derived from the current relation projection."""
+
+    subjects: int = 0
+    required: int = 0
+
+    @property
+    def completed(self) -> int:
+        return self.subjects - self.required
+
+    @property
+    def is_complete(self) -> bool:
+        return self.required == 0
+
+
+def manual_review_counts(statuses: List[RelationStatus]) -> ManualReviewCounts:
+    """Aggregate the sole relation-status projection into review counts."""
+
+    subjects = sum(status.is_manual_review_subject for status in statuses)
+    required = sum(status.requires_manual_review for status in statuses)
+    return ManualReviewCounts(subjects=subjects, required=required)
 
 
 # ═══════════════════════════════════════════════════════════════

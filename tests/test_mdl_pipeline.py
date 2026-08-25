@@ -1,10 +1,10 @@
 import numpy as np
+import pytest
 
 from dualign.algorithms.mdl import (
     AlignmentCalibration,
     align_mdl_pipeline,
     assess_alignment_applicability,
-    mutual_rank_code_evidence,
 )
 from dualign.algorithms.mdl.pipeline import (
     _reviewable_uncertain_regions,
@@ -16,7 +16,7 @@ from dualign.core.aligner import _gate_payload
 def _calibration():
     return AlignmentCalibration(
         existence_null=np.array([0.8, 0.8, 0.8]),
-        parallel_order_counts=np.array([[1, 100], [2, 100], [1, 80]]),
+        acceptable_monotone_losses=np.array([0.0, 0.01, 0.02]),
         alpha=0.30,
     )
 
@@ -34,9 +34,31 @@ def test_pipeline_abstains_before_alignment_when_correspondence_is_absent():
         _calibration(),
     )
 
-    assert result.gate.status == "rejected_no_correspondence"
+    assert not result.gate.accepted
+    assert result.gate.reason == "no_correspondence"
     assert result.all_ops == []
     assert result.centered is None
+
+
+def test_correspondence_rejection_skips_rank_and_order_work(monkeypatch):
+    def unexpected_rank(_scores):
+        raise AssertionError("不存在对应关系时不应计算秩证据")
+
+    monkeypatch.setattr(
+        "dualign.algorithms.mdl.pipeline.mutual_rank_code_evidence",
+        unexpected_rank,
+    )
+
+    gate = assess_alignment_applicability(
+        np.full((3, 3), 0.1),
+        _calibration(),
+    )
+
+    assert not gate.accepted
+    assert gate.reason == "no_correspondence"
+    assert gate.order is None
+    assert gate.order_compatibility_p is None
+    assert "order_compatibility_p" not in _gate_payload(gate)
 
 
 def test_pipeline_uses_rank_scaffold_and_returns_complete_alignment():
@@ -66,26 +88,38 @@ def test_single_line_parallel_document_is_not_rejected_for_lack_of_permutation_p
 
     gate = assess_alignment_applicability(
         scores,
-        mutual_rank_code_evidence(scores),
         _calibration(),
     )
 
     assert gate.accepted
-    assert gate.order.mutual_pairs == 1
-    assert gate.order.out_of_chain_pairs == 0
+    assert gate.order is not None
+    assert gate.order.relative_loss == 0.0
 
 
-def test_gate_payload_serializes_the_order_chain_length():
+def test_large_order_loss_rejects_without_a_third_gate_state():
+    gate = assess_alignment_applicability(
+        np.fliplr(np.eye(4)),
+        _calibration(),
+    )
+
+    assert not gate.accepted
+    assert gate.reason == "order_incompatible"
+    assert gate.order is not None
+    assert gate.order.relative_loss == pytest.approx(0.75)
+
+
+def test_gate_payload_serializes_monotone_evidence_loss():
     scores = np.eye(3)
     gate = assess_alignment_applicability(
         scores,
-        mutual_rank_code_evidence(scores),
         _calibration(),
     )
 
     payload = _gate_payload(gate)
 
-    assert payload["longest_chain_pairs"] == gate.order.chain_length == 3
+    assert gate.order is not None
+    assert payload["monotone_evidence_loss"] == gate.order.relative_loss == 0.0
+    assert payload["monotone_pairs"] == len(gate.order.monotone_pairs) == 3
 
 
 def test_composition_disagreement_is_returned_as_one_review_region():

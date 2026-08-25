@@ -28,29 +28,25 @@ def load_env(env_path: str | None = None) -> None:
         env_path: .env 文件路径。默认为项目根目录下的 .env。
     """
     if env_path is None:
-        # 定位到项目根目录（本文件在 scripts/ 下）
         env_path = str(Path(__file__).resolve().parent.parent / ".env")
 
     env_file = Path(env_path)
     if not env_file.is_file():
-        return  # .env 不存在时静默跳过
+        return
 
-    # KEY=VALUE 或 KEY="VALUE"
     pattern = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
 
-    with open(env_file, "r", encoding="utf-8") as f:
-        for line in f:
+    with env_file.open("r", encoding="utf-8") as handle:
+        for line in handle:
             line = line.strip()
-            # 跳过空行和注释
             if not line or line.startswith("#"):
                 continue
-            m = pattern.match(line)
-            if m:
-                key = m.group(1)
-                value = m.group(2)
-                # 去掉可选的外层引号
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-                    value = value[1:-1]
-                # 不覆盖已有环境变量
-                if key not in os.environ:
-                    os.environ[key] = value
+            match = pattern.match(line)
+            if match is None:
+                continue
+            key = match.group(1)
+            value = match.group(2)
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            if key not in os.environ:
+                os.environ[key] = value

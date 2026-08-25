@@ -52,7 +52,7 @@ def embedding_identity(model=None) -> EmbeddingIdentity:
 
 def _load_resources() -> list[dict]:
     resource = files("dualign.resources").joinpath(
-        "alignment_calibration_harrier_0_6b_v1.json"
+        "alignment_calibration_harrier_0_6b_v2.json"
     )
     return [json.loads(resource.read_text(encoding="utf-8"))]
 
@@ -80,8 +80,8 @@ def resolve_alignment_calibration(
 
     calibration = AlignmentCalibration(
         existence_null=np.asarray(metadata["existence_null"], dtype=np.float64),
-        parallel_order_counts=np.asarray(
-            metadata["parallel_order_counts"], dtype=np.int64
+        acceptable_monotone_losses=np.asarray(
+            metadata["acceptable_monotone_losses"], dtype=np.float64
         ),
         alpha=float(metadata["alpha"]),
     )

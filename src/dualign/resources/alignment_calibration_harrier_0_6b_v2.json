@@ -1,5 +1,5 @@
 {
-  "id": "harrier-0.6b.zh-ja-real20.v1",
+  "id": "harrier-0.6b.zh-ja-real21.v2",
   "status": "provisional",
   "provider": "ollama",
   "model": "leoipulsar/harrier-0.6b",
@@ -28,15 +28,33 @@
     0.6215448550266953,
     0.6115639300058742
   ],
-  "parallel_order_counts": [
-    [1, 241], [12, 1076], [0, 186], [3, 572], [2, 472],
-    [3, 331], [0, 152], [3, 383], [5, 414], [0, 166],
-    [2, 308], [0, 92], [2, 348], [12, 525], [2, 399],
-    [2, 618], [3, 227], [4, 315], [0, 253], [7, 345]
+  "acceptable_monotone_losses": [
+    0.0008125917040195306,
+    0.002566305857293155,
+    0.0003327562693770512,
+    0.0006406863835863287,
+    0.0013846667812201453,
+    0.0044302358873953415,
+    0.0,
+    0.005266791365619739,
+    0.004918866414972455,
+    0.0000000000000033015531402845165,
+    0.00027754066406040974,
+    0.0034410440386790525,
+    0.00007719922767766857,
+    0.0036377583973691233,
+    0.0031659229040800025,
+    0.0013530100960144455,
+    0.002367847785011835,
+    0.0031769476795628798,
+    0.0,
+    0.0072359739349252515,
+    0.026158237131518155
   ],
-  "sample_scope": "20 reviewed zh-ja light-novel chapter pairs",
+  "sample_scope": "20 reviewed zh-ja light-novel chapter pairs plus one reviewed localized-reorder hard positive",
   "limitations": [
-    "The minimum attainable conformal p-value is 1/21.",
+    "The minimum attainable existence p-value is 1/21 and order p-value is 1/22.",
+    "The single localized-reorder hard positive bounds only the currently reviewed failure mode and is not a held-out accuracy estimate.",
     "The corpus is single-domain and does not establish cross-domain calibration.",
     "The source experiment did not persist its embedding identity; this resource is bound to the recorded default runner configuration and remains provisional."
   ]

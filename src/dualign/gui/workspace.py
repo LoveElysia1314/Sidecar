@@ -139,15 +139,15 @@ class WorkspacePanel(QWidget):
         self._qc = QLabel("文件 (0)")
         h.addWidget(self._qc)
         h.addStretch()
-        for tx, sig, tip in [
-            ("◀ 上一章", "prev", "切换到上一章"),
-            ("▶ 下一章", "next", "切换到下一章"),
-            ("删除", "delete", "删除选中"),
+        for tx, handler, tip in [
+            ("◀ 上一章", self._on_prev_chapter, "切换到上一章"),
+            ("▶ 下一章", self._on_next_chapter, "切换到下一章"),
+            ("删除", self._on_remove_selected, "从列表移除选中文件对"),
         ]:
             b = QPushButton(tx)
             b.setFixedHeight(22)
             b.setToolTip(tip)
-            b.clicked.connect(lambda v=sig: self._on_list_action(v))
+            b.clicked.connect(handler)
             h.addWidget(b)
         ql.addLayout(h)
 
@@ -261,22 +261,14 @@ class WorkspacePanel(QWidget):
                     self._qlw.setCurrentRow(i)
                     break
 
-    def _on_list_action(self, action: str):
-        """文件列表操作按钮回调：prev/next/delete。"""
-        if action in ("prev", "next"):
-            self.chapter_nav_requested.emit(-1 if action == "prev" else 1)
-            return
-        if action == "delete":
-            # 优先用当前选中项（_selected），若焦点丢失则用 QListWidget 选中项
-            target = self._selected
-            if target is None:
-                sel = self._qlw.selectedItems()
-                if sel:
-                    target = sel[0].data(Qt.ItemDataRole.UserRole)
-            if target is not None and target in self._queue:
-                self._queue.remove(target)
-                self._selected = None
-                self._rebuild()
+    def _on_prev_chapter(self):
+        self.chapter_nav_requested.emit(-1)
+
+    def _on_next_chapter(self):
+        self.chapter_nav_requested.emit(1)
+
+    def _on_remove_selected(self):
+        self.remove_selected()
 
     def _on_item_clicked(self, item):
         it = item.data(Qt.ItemDataRole.UserRole)
@@ -365,8 +357,13 @@ class WorkspacePanel(QWidget):
         self._add_to_recent(item.label, item.src_path, item.tgt_path)
 
     def remove_selected(self):
-        if self._selected and self._selected in self._queue:
-            self._queue.remove(self._selected)
+        target = self._selected
+        if target is None:
+            selected = self._qlw.selectedItems()
+            if selected:
+                target = selected[0].data(Qt.ItemDataRole.UserRole)
+        if target is not None and target in self._queue:
+            self._queue.remove(target)
             self._selected = None
             self._rebuild()
 

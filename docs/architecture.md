@@ -1,7 +1,7 @@
 # Dualign 工作报告架构
 
-状态：当前实现  
-更新日期：2026-08-24
+状态：当前实现\
+更新日期：2026-08-25
 
 ## 产品边界
 
@@ -27,9 +27,44 @@ chapter.report.json
 - 只以稳定关系 ID 持久化身份的 `repair_log`；
 - AI 建议、人工审核状态、评分和固化历史。
 
+### 人工审阅完成语义
+
+审批值表达动作来源形成的四态管线：`none → auto → agent → user`。`auto` 是自动
+拟修复，`agent` 是 AI 审校；二者都不等于用户已经人工审阅。普通无异常的 1:1 关系
+可以一直保持 `none`，且不因此成为人工审阅工作。
+
+`project_relation_statuses()` 是关系状态的唯一投影。一个仍存在的关系，只要具有初始
+异常、当前异常、flag、修复动作或非 `none` 审批，就属于人工审阅范围；其中只有
+`approval=user` 才关闭人工审阅要求。删除后的关系不再存在，因而不再要求审批。
+`manual_review_counts()` 从同一投影派生章节级 `subjects / required / completed` 计数。
+GUI 自动跳转和 Reader 的报告摘要都消费这套计数，不再比较历史字符串
+`unreviewed`，也不从审批状态集合猜测整章是否完成。
+
+整章 AI 审校只消费仍需处理且 `approval != user` 的关系。用户标记 OK 的异常关系，以及
+没有异常但已经人工校订过的关系，都属于已经做出的人工决定，默认不再交给 AI 推翻；用户
+显式点击“审校本条”时则以这次明确意图为准，可以重新送审。该差异是输入集合语义，不是
+GUI 特判。
+
+`ai_review.status` 的完成状态只有 `completed` 与无待审项时的 `skipped`。`partial` 表示
+轮数用尽后仍有待审关系，`failed/error` 表示调用失败，`forced` 表示模型显式要求带未处理项
+结束。报告还保存 reviewed/pending 计数与 ID、轮数、模型和提示词工具契约 SHA-256；这些
+字段都是可从权威报告重建/审计的运行摘要，不能替代 `repair_log` 的关系级事实。
+
 报告不复制完整正文。每条 `ops` 关系保存 `id/s/t/sc`，修复动作只持久化 `relation_ids`。运行期 `RepairAction` 也只含关系 ID；重放、GUI 和固化需要位置时，统一经 `AlignmentSnapshot.operation_indices()` 即时投影。回放层使用 `RelationGroup(relation_id, ordinal, rows)`：ID 是身份，ordinal 只是当前快照地址。`RepairState` 总是从原始关系重放操作，因此编辑、撤销和重新编辑不会造成后续关系身份漂移。源文档哈希或模型配置不匹配时，报告失效并要求重新对齐。
 
 旧报告不迁移：只有 `format: dualign-report/v1` 满足当前持久化契约；未版本化或其他版本的文件一律失效并重新对齐。嵌入向量 SQLite 缓存独立保留，可以显著降低重新生成报告的成本。
+
+### 拒绝结果的 GUI 能力
+
+`rejected` 报告没有可靠的关系投影，因此自动修复、AI 校订、人工关系校订和固化均禁用。
+拒绝不代表两份 Markdown 不可阅读：GUI 仍加载原始行并进入逐行预览，保留“预览”按钮，
+只禁用“校订”模式。缓存命中与新计算必须走相同的预览语义；恢复已有拒绝报告时只读取
+报告，不因打开文件而重写它。
+
+统计门控的工作流决定只有通过或拒绝；`no_correspondence` 与 `order_incompatible` 只作为
+可重建的诊断原因和原始统计量写入报告，不派生不同 GUI 状态。门控通过后才由组合证据
+决定 `aligned / needs_review`，其中 `needs_review` 仍有可消费的暂定关系。缺少校准、
+执行错误或资源不足表示未能评估，不能伪装成内容判断，也不得静默回退 legacy。
 
 报告序列化只由 `report_io` 负责。运行期 `AlignmentSnapshot/RepairState` 不提供另一套
 `to_dict/from_dict` 快照格式，避免内部撤销状态和正式报告演变成两个可持久化权威来源。

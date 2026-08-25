@@ -252,6 +252,38 @@ def _repair_mode(strategy: str, model, quality: dict) -> tuple[str, object]:
     return strategy, model
 
 
+def _auto_repair_state(
+    state,
+    strategy: str,
+    model,
+    quality: dict,
+    *,
+    unresolved_only: bool = False,
+):
+    """Apply the selected policy and cache embeddings required by split repair."""
+
+    from dualign.services.repair import RepairService
+    from dualign.services.repair_policy import choose_auto_repair
+
+    repair_strategy, repair_model = _repair_mode(strategy, model, quality)
+    kwargs = {
+        "strategy": repair_strategy,
+        "model": repair_model,
+        "unresolved_only": unresolved_only,
+    }
+    needs_embeddings = repair_model is not None and any(
+        (plan := choose_auto_repair(len(source), len(target), repair_strategy))
+        is not None
+        and plan.requires_model
+        for source, target, _score in state.snapshot.original_ops
+    )
+    if not needs_embeddings:
+        return RepairService.auto_repair(state, **kwargs)
+
+    with EmbeddingCache(get_embedding_cache_path()) as cache:
+        return RepairService.auto_repair(state, cache=cache, **kwargs)
+
+
 def align_documents(
     document_a_path: str,
     document_b_path: str,
@@ -306,7 +338,7 @@ def align_documents(
                 if reset_work_state:
                     from dualign.models.action import RepairAction
                     from dualign.models.state import AlignmentSnapshot
-                    from dualign.services.repair import RepairService, RepairState
+                    from dualign.services.repair import RepairState
 
                     existing_actions = (
                         [
@@ -328,13 +360,11 @@ def align_documents(
                             ),
                             existing_actions,
                         )
-                        repair_strategy, repair_model = _repair_mode(
-                            strategy, encoder, quality
-                        )
-                        repair_log = RepairService.auto_repair(
+                        repair_log = _auto_repair_state(
                             state,
-                            strategy=repair_strategy,
-                            model=repair_model,
+                            strategy,
+                            encoder,
+                            quality,
                             unresolved_only=preserve_work_state,
                         ).repair_log
                     elif cached_alignment.get("status") == "needs_review":
@@ -404,15 +434,12 @@ def align_documents(
     repair_log = []
     if result.status == "aligned" and result.all_ops:
         from dualign.models.state import AlignmentSnapshot
-        from dualign.services.repair import RepairService, RepairState
+        from dualign.services.repair import RepairState
 
         state = RepairState(
             AlignmentSnapshot.from_alignment(result.all_ops, lines_a, lines_b)
         )
-        repair_strategy, repair_model = _repair_mode(strategy, encoder, quality)
-        repair_log = RepairService.auto_repair(
-            state, strategy=repair_strategy, model=repair_model
-        ).repair_log
+        repair_log = _auto_repair_state(state, strategy, encoder, quality).repair_log
     elif result.status == "needs_review" and result.all_ops:
         from dualign.services.repair import review_flags_for_uncertain_regions
 

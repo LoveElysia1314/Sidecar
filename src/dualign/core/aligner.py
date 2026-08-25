@@ -13,7 +13,7 @@ Operation = Tuple[Tuple[int, ...], Tuple[int, ...], float]
 
 ALGORITHM_MDL_V1 = "mdl-v1"
 ALIGN_CORE_VERSION = __version__
-ALIGN_CACHE_REVISION = "mdl-gated-composition.2"
+ALIGN_CACHE_REVISION = "mdl-gated-composition.3"
 
 
 @dataclass(frozen=True)
@@ -44,14 +44,22 @@ class AlignmentResult:
 
 def _gate_payload(gate) -> dict:
     order = gate.order
-    return {
+    payload = {
         "existence_score": float(gate.existence_score),
         "existence_p": float(gate.existence_p),
-        "order_compatibility_p": float(gate.order_compatibility_p),
-        "mutual_pairs": int(order.mutual_pairs),
-        "out_of_chain_pairs": int(order.out_of_chain_pairs),
-        "longest_chain_pairs": int(order.chain_length),
     }
+    if order is not None:
+        payload.update(
+            {
+                "order_compatibility_p": float(gate.order_compatibility_p),
+                "order_free_evidence_bits": float(order.order_free_bits),
+                "monotone_evidence_bits": float(order.monotone_bits),
+                "monotone_evidence_loss": float(order.relative_loss),
+                "order_free_pairs": len(order.order_free_pairs),
+                "monotone_pairs": len(order.monotone_pairs),
+            }
+        )
+    return payload
 
 
 def align(
@@ -102,7 +110,7 @@ def align(
         calibration,
     )
     gate = _gate_payload(candidate.gate)
-    if candidate.status.startswith("rejected_"):
+    if candidate.status == "rejected":
         return AlignmentResult(
             all_ops=[],
             stats={
@@ -112,7 +120,7 @@ def align(
                 **candidate.stats,
             },
             status="rejected",
-            reason=candidate.status.removeprefix("rejected_"),
+            reason=candidate.gate.reason,
             gate=gate,
             algorithm=ALGORITHM_MDL_V1,
         )

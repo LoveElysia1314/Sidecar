@@ -408,3 +408,10 @@ class StatusBar(QFrame):
             self._mode_wrapper.setToolTip("")
         else:
             self._mode_wrapper.setToolTip("文本准备完成后将自动进入校订模式")
+
+    def set_preview_only(self):
+        """Keep preview available while forbidding an unsupported edit view."""
+        self.set_view_mode(True)
+        self._edit_btn.setEnabled(False)
+        self._preview_btn.setEnabled(True)
+        self._mode_wrapper.setToolTip("拒绝对齐没有可靠的关系投影，只能预览原始文本")

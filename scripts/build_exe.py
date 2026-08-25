@@ -21,9 +21,9 @@ Dualign GUI 独立打包脚本 (PyInstaller)
     默认输出到 dist/dualign/，包含 dualign.exe 及所有依赖。
 
 注意事项:
+    - 本脚本只生成 PyInstaller 应用；完整发布制品使用 scripts/build.py
     - 本脚本默认打包 GUI 模式，入口为 dualign/__main__.py 的 gui 子命令
-    - 打包后需配合 Ollama 服务使用（需单独安装）
-    - AI 审校功能需在运行时设置 DEEPSEEK_API_KEY 环境变量
+    - 嵌入与 AI 审校提供方在应用设置中配置
 """
 
 from __future__ import annotations
@@ -328,11 +328,10 @@ def main():
     print(f"   内含 Demo 数据: {out / 'demo' / 'raw'}")
     print()
     print("📦 使用说明:")
-    print(f"   1. 确保已安装并启动 Ollama (默认 http://localhost:11434)")
-    print(f"   2. 已拉取嵌入模型: ollama pull leoipulsar/harrier-0.6b")
-    print(f"   3. 运行: .\\dualign.exe       (默认启动 GUI)")
-    print(f"   4. 或运行: .\\dualign.exe gui")
-    print(f"   5. 如需 AI 审校: set DEEPSEEK_API_KEY=your_key && .\\dualign.exe gui")
+    print(f"   1. 运行: .\\dualign.exe       (默认启动 GUI)")
+    print(f"   2. 或运行: .\\dualign.exe gui")
+    print(f"   3. 在设置中选择并检测嵌入提供方")
+    print(f"   4. 如需 AI 审校，在设置中配置兼容 Responses API 的提供方")
     print()
     print("💡 提示: 将输出目录添加到 PATH 后可直接在终端调用 dualign")
 

@@ -711,6 +711,13 @@ class WindowTableMixin:
 
     def _on_score_updated(self, ordinal: int, sub: int, new_score: float):
         """单子行分数就绪 → 持久化 + 更新单元格。"""
+        if self._repair_state is None or not (
+            0 <= ordinal < len(self._repair_state.snapshot.original_ops)
+        ):
+            # ScoreManager normally rejects results from an invalidated
+            # document generation.  Keep the GUI boundary defensive against
+            # third-party/custom score managers emitting stale ordinals.
+            return
         # 持久化
         relation_id = self._repair_state.snapshot.relation_id(ordinal)
         self._score_cache.set(relation_id, sub, new_score)
@@ -908,13 +915,13 @@ class WindowTableMixin:
         """
         self._rebuild_anomalies()
 
-        if self._repair_state is None:
-            return
-
         # 切换预览/普通模式 — 由 StatusBar 视图模式切换触发
         preview = self._preview_active
         if preview:
             self._render_preview()
+            return
+
+        if self._repair_state is None:
             return
 
         view = make_table_view(self._repair_state)

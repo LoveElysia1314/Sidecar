@@ -98,11 +98,15 @@ def test_save_records_content_edit_without_implicitly_overwriting_sources(tmp_pa
 def test_ai_review_uses_the_same_guarded_atomic_report_update(tmp_path):
     harness = _Harness(tmp_path)
 
-    harness._set_ai_review("completed", "checked")
+    harness._set_ai_review(
+        "completed", "checked", details={"pending_count": 0, "turns": 2}
+    )
 
     review = load_report(harness._report_path)["ai_review"]
     assert review["status"] == "completed"
     assert review["note"] == "checked"
+    assert review["pending_count"] == 0
+    assert review["turns"] == 2
     assert "updated_at" in review
     assert (
         harness._report_file_hash

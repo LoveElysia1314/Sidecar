@@ -4,19 +4,20 @@ Dualign — AiRepairAgent: Tool-Calling 智能校订代理
 设计原则:
   - 两层文本模型：初始文本（对齐器原始）+ 当前拟修复（待审校）
   - AI 只需要判断「当前文本每对 src/tgt 语义对应吗？」
-  - 所有工具操作的是初始文本，系统自动 re-repair 更新当前文本
+  - 工具以稳定关系 ID 绑定初始关系，在同一拟修复状态上确定性重放
   - 无 auto_note、无 would_*、无策略名暴露给 AI
 
 用法:
   from dualign.services.ai_repair_agent import AiRepairAgent, ChapterContext
   agent = AiRepairAgent(backend="deepseek")
   # initial_state 必须是构造 context 时的同一份拟修复状态。
-  actions = agent.run(chapter_context, initial_state=state)
+  result = agent.run(chapter_context, initial_state=state)
 """
 
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -67,6 +68,25 @@ def compute_cost(
 
 
 @dataclass
+class AgentRunResult:
+    """One review conversation's explicit completion state."""
+
+    status: str
+    actions: List[RepairAction] = field(default_factory=list)
+    reviewed_ids: tuple[int, ...] = ()
+    pending_ids: tuple[int, ...] = ()
+    turns: int = 0
+    forced: bool = False
+    note: str = ""
+    model_name: str = ""
+    prompt_sha256: str = ""
+
+    @property
+    def is_complete(self) -> bool:
+        return self.status == "completed" and not self.pending_ids
+
+
+@dataclass
 class AgentEvent:
     turn: int
     type: str
@@ -78,6 +98,7 @@ class AgentEvent:
     messages: List[dict] = field(default_factory=list)
     turn_log: List[dict] = field(default_factory=list)
     review_action: Optional[RepairAction] = None
+    run_result: Optional[AgentRunResult] = None
     error: str = ""
 
 
@@ -346,51 +367,58 @@ def _get_prompts_dir() -> str:
     )
 
 
-_tools_cache: tuple[list[dict], str] | None = None
+_tool_definitions_cache: list[dict] | None = None
+_tools_cache: list[dict] | None = None
 
 
-def _load_tools() -> tuple[list[dict], str]:
-    """从 tools.json 加载工具定义，返回 (TOOLS_OPENAI, TOOLS_TEXT_DESCRIPTION)。
+def _load_tool_definitions() -> list[dict]:
+    """Load the provider-neutral tool contract once."""
+    global _tool_definitions_cache
+    if _tool_definitions_cache is not None:
+        return _tool_definitions_cache
+    tools_path = os.path.join(_get_prompts_dir(), "tools.json")
+    with open(tools_path, "r", encoding="utf-8") as handle:
+        definitions = json.load(handle)
+    for tool in definitions:
+        tool.setdefault("parameters", {}).setdefault("additionalProperties", False)
+    _tool_definitions_cache = definitions
+    return definitions
 
-    懒加载：首次调用时解析 prompts 目录。
-    """
+
+def _load_tools() -> list[dict]:
+    """Load the Responses API tool contract lazily."""
     global _tools_cache
     if _tools_cache is not None:
         return _tools_cache
-    tools_path = os.path.join(_get_prompts_dir(), "tools.json")
-    with open(tools_path, "r", encoding="utf-8") as f:
-        tools = json.load(f)
-
-    # OpenAI Responses API 格式（扁平：name/description/parameters 直接挂在工具对象上）
     openai_tools = []
-    for t in tools:
+    for tool in _load_tool_definitions():
         openai_tools.append(
             {
                 "type": "function",
-                "name": t["name"],
-                "description": t["description"],
-                "parameters": t["parameters"],
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["parameters"],
             }
         )
-
-    # Ollama XML 文本描述格式
-    lines = ["## 工具", "使用 XML 格式调用工具。每轮可调多次，顺序不影响结果。", ""]
-    for t in tools:
-        name = t["name"]
-        desc = t["description"]
-        lines.append(f"### {name} — {desc}")
-        for ex in t.get("text_examples", []):
-            lines.append(f'<tool_call name="{name}">{ex}</tool_call>')
-        lines.append("")
-
-    result = (openai_tools, "\n".join(lines).strip())
-    _tools_cache = result
-    return result
+    _tools_cache = openai_tools
+    return openai_tools
 
 
 def _get_tools_openai() -> list[dict]:
     """懒加载 TOOLS_OPENAI。"""
-    return _load_tools()[0]
+    return _load_tools()
+
+
+def agent_contract_fingerprint(strategy: str = "src") -> str:
+    """Return a stable fingerprint of the prompt and tool contract."""
+    payload = {
+        "prompt": _load_system_prompt(strategy_for_ai_review(strategy)),
+        "tools": _load_tool_definitions(),
+    }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -719,6 +747,16 @@ class ToolExecutor:
             return json.dumps(
                 {"error": f"未知工具: {tool_call.name}"}, ensure_ascii=False
             )
+        allowed = {
+            tool["name"]: set(tool.get("parameters", {}).get("properties", {}))
+            for tool in _load_tool_definitions()
+        }.get(tool_call.name, set())
+        unknown = sorted(set(tool_call.arguments) - allowed)
+        if unknown:
+            return json.dumps(
+                {"error": f"工具 {tool_call.name} 包含未知参数: {unknown}"},
+                ensure_ascii=False,
+            )
         try:
             result = handler(tool_call.arguments)
             return (
@@ -773,12 +811,22 @@ class ToolExecutor:
             self.reviewed_ids.add(si)
             self.reviewed_actions[si] = action
 
+    def _unique_reviewed_actions(self) -> List[RepairAction]:
+        """Return range actions once even though every ordinal indexes them."""
+        actions: List[RepairAction] = []
+        seen: set[int] = set()
+        for action in self.reviewed_actions.values():
+            identity = id(action)
+            if identity not in seen:
+                seen.add(identity)
+                actions.append(action)
+        return actions
+
     def _replay_reviewed_actions(self):
         """Apply reviewed actions to the initial state in insertion order."""
         state = self._state
-        for action in self.reviewed_actions.values():
-            if action is not None:
-                state = state.apply(action)
+        for action in self._unique_reviewed_actions():
+            state = state.apply(action)
         return state
 
     def _handle_view(self, args: dict) -> str:
@@ -843,6 +891,15 @@ class ToolExecutor:
             return "❌ ok 只接受单个关系，请用 target='7' 指定一个编号。"
         ordinal = ordinals[0]
         anchor = ordinal
+
+        relation_infos = self._build_current_relation_infos()
+        if not 0 <= ordinal < len(relation_infos):
+            return f"❌ ok 指定的关系 {ordinal} 不存在。"
+        if relation_infos[ordinal].has_missing:
+            return (
+                "❌ **ok 拒绝**: 该关系仍包含 ⟢MISSING⟣，不能标记为通过。\n\n"
+                "请用 edit 补入真实文本，或用 flag 交由人工处理。"
+            )
 
         # 统一语义：若关系已有拟修复，AI 的 ok 等同于审核通过该方案。
         existing = self._get_current_relation_action(ordinal)
@@ -1074,7 +1131,7 @@ class ToolExecutor:
 
 
 class MaxTurnsExceeded(Exception):
-    """Raised when an agent exceeds its configured turn limit."""
+    """Legacy exception retained for import compatibility."""
 
 
 class AiRepairAgent:
@@ -1087,6 +1144,7 @@ class AiRepairAgent:
     def __init__(
         self,
         backend="deepseek",
+        llm_backend: LLMBackend | None = None,
         temperature=0.0,
         max_turns=20,
         verbose=True,
@@ -1097,20 +1155,34 @@ class AiRepairAgent:
         base_url: str = "https://api.deepseek.com",
         api_key: str = "",
         reasoning_effort: str = "low",
+        max_tokens: int = 8192,
+        request_timeout: float = 240.0,
     ):
         self.max_turns = max_turns
         self.verbose = verbose
         self._model = model
+        self._model_name = model_name
         self._strategy = strategy_for_ai_review(strategy)
         self._thinking = thinking
-        self._llm = DeepSeekNativeBackend(
-            temperature=temperature,
-            max_tokens=8192,
-            model=model_name,
-            base_url=base_url,
-            api_key=api_key,
-            reasoning_effort=reasoning_effort,
-        )
+        if llm_backend is not None:
+            self._llm = llm_backend
+        elif not isinstance(backend, str) and hasattr(backend, "chat"):
+            self._llm = backend
+        elif backend == "deepseek":
+            self._llm = DeepSeekNativeBackend(
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model=model_name,
+                base_url=base_url,
+                api_key=api_key,
+                reasoning_effort=reasoning_effort,
+                request_timeout=request_timeout,
+            )
+        else:
+            raise ValueError(
+                f"不支持的 AI 审校后端: {backend}；"
+                "请传入 llm_backend 或使用 deepseek"
+            )
         self._idle_turns = 0
 
     def run(
@@ -1118,7 +1190,7 @@ class AiRepairAgent:
         ctx: ChapterContext,
         on_event: Callable[[AgentEvent], None] | None = None,
         initial_state=None,
-    ) -> List[RepairAction]:
+    ) -> AgentRunResult:
         """initial_state: 启动时的 RepairState，view 用它重放已审校操作生成最新状态。"""
         executor = ToolExecutor(
             ctx, model=self._model, initial_state=initial_state, strategy=self._strategy
@@ -1129,6 +1201,41 @@ class AiRepairAgent:
         def _emit(evt_type, **kw):
             if on_event:
                 on_event(AgentEvent(type=evt_type, turn=kw.pop("turn", 0), **kw))
+
+        def _finish(
+            status: str,
+            *,
+            turn: int,
+            note: str = "",
+            forced: bool = False,
+        ) -> AgentRunResult:
+            pending = tuple(
+                ordinal
+                for ordinal in ctx.reviewable_ids
+                if ordinal not in executor.reviewed_ids
+            )
+            if status == "completed" and pending:
+                status = "partial"
+            result = AgentRunResult(
+                status=status,
+                actions=executor._unique_reviewed_actions(),
+                reviewed_ids=tuple(sorted(executor.reviewed_ids)),
+                pending_ids=pending,
+                turns=turn,
+                forced=forced,
+                note=note,
+                model_name=self._model_name,
+                prompt_sha256=agent_contract_fingerprint(self._strategy),
+            )
+            _emit(
+                "done",
+                turn=turn,
+                actions=result.actions,
+                messages=messages,
+                turn_log=turn_log,
+                run_result=result,
+            )
+            return result
 
         if self.verbose:
             logger.info(
@@ -1147,8 +1254,11 @@ class AiRepairAgent:
             ]
             # ── 更新/追加进度消息（用显式标记识别，避免脆弱的字符串匹配）──
             if remaining:
-                _new_progress = f"### 待审进度: {len(executor.reviewed_ids)}/{len(ctx.reviewable_ids)}"
-                f" | 剩余: {remaining}\n继续审校剩余关系。完成后调用 done。"
+                _new_progress = (
+                    f"### 待审进度: {len(executor.reviewed_ids)}/"
+                    f"{len(ctx.reviewable_ids)} | 剩余: {remaining}\n"
+                    "继续审校剩余关系。完成后调用 done。"
+                )
             else:
                 _new_progress = "### ✅ 待审列表已清空\n\n检查是否有遗漏的异常关系——若有，用 `append` 追加后继续审校。确认无遗漏后，调用 `done` 结束。"
             if messages[-1]["role"] == "user" and "### 待审" in messages[-1]["content"]:
@@ -1165,7 +1275,7 @@ class AiRepairAgent:
                 logger.error("LLM 调用失败 (Turn %d): %s", turn, err_msg)
                 if on_event:
                     on_event(AgentEvent(type="error", turn=turn, error=err_msg))
-                return []
+                return _finish("failed", turn=turn, note=err_msg)
 
             turn_record = {
                 "turn": turn,
@@ -1211,21 +1321,19 @@ class AiRepairAgent:
                             "强制退出" if remaining else "审校完成",
                             turn,
                         )
-                    all_actions = list(executor.reviewed_actions.values())
-                    _emit(
-                        "done",
-                        turn=turn,
-                        actions=all_actions,
-                        messages=messages,
-                        turn_log=turn_log,
-                    )
                     if remaining:
                         logger.warning(
                             "审校强制退出，仍有 %d 个待审关系未处理: %s",
                             len(remaining),
                             remaining,
                         )
-                    return all_actions
+                    return _finish(
+                        "partial" if remaining else "completed",
+                        turn=turn,
+                        note=(
+                            f"连续 {self._idle_turns} 轮无工具调用" if remaining else ""
+                        ),
+                    )
 
                 # 空闲提示：第 1 轮温和提醒，第 2 轮强调 done(force=true) 选项
                 if remaining:
@@ -1281,6 +1389,8 @@ class AiRepairAgent:
             messages.append(tc_msg)
 
             done_result = None
+            done_force = False
+            done_note = ""
             for tc in response.tool_calls:
                 _emit(
                     "tool_start", turn=turn, tool_name=tc.name, tool_args=tc.arguments
@@ -1304,6 +1414,13 @@ class AiRepairAgent:
                 )
                 if tc.name == "done":
                     done_result = result
+                    raw_force = tc.arguments.get("force", False)
+                    done_force = (
+                        raw_force.strip().lower() in ("true", "1", "yes")
+                        if isinstance(raw_force, str)
+                        else bool(raw_force)
+                    )
+                    done_note = str(tc.arguments.get("note", ""))
 
             # done 被接受才退出；被拒绝则继续让模型修复剩余关系。
             if done_result is not None:
@@ -1320,24 +1437,12 @@ class AiRepairAgent:
                     continue
                 if self.verbose:
                     logger.info("AI 调用 done，审校完成于 Turn %d", turn)
-                all_actions = list(executor.reviewed_actions.values())
-                _emit(
-                    "done",
+                return _finish(
+                    "forced" if done_force else "completed",
                     turn=turn,
-                    actions=all_actions,
-                    messages=messages,
-                    turn_log=turn_log,
+                    note=done_note,
+                    forced=done_force,
                 )
-                return all_actions
-
-        all_actions = list(executor.reviewed_actions.values())
-        _emit(
-            "done",
-            turn=self.max_turns,
-            actions=all_actions,
-            messages=messages,
-            turn_log=turn_log,
-        )
 
         # ── 审校后校验 ──
         unreviewed = [i for i in ctx.reviewable_ids if i not in executor.reviewed_ids]
@@ -1347,7 +1452,11 @@ class AiRepairAgent:
                 len(unreviewed),
                 unreviewed,
             )
-        return all_actions
+        return _finish(
+            "partial" if unreviewed else "completed",
+            turn=self.max_turns,
+            note=(f"达到最大轮数 {self.max_turns}" if unreviewed else ""),
+        )
 
     def _build_initial_messages(self, ctx: ChapterContext) -> List[dict]:
         prompt = _load_system_prompt(self._strategy)

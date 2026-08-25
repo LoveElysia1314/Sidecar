@@ -20,6 +20,7 @@ from dualign.services.ai_repair_agent import (
     LLMResponse,
     LLMBackend,
     AiRepairAgent,
+    agent_contract_fingerprint,
 )
 
 
@@ -93,6 +94,17 @@ class TestTargetParamUnification:
         result = ex.execute(_call("ok", {"target": "1-2"}))
         assert "只接受单个" in result, result
 
+    def test_ok_rejects_a_relation_with_missing_text(self):
+        state = RepairState.from_ops([((0,), (), 0.4)], ["source"], [])
+        state = state.apply(RepairAction.make_placeholder_tgt("L000001"))
+        ctx = ChapterContext.from_repair_state(state, skip_auto_repair=True)
+        ex = ToolExecutor(ctx, initial_state=state)
+
+        result = ex.execute(ToolCall("missing", "ok", {"target": "0"}))
+
+        assert result.startswith("❌")
+        assert not ex.reviewed_actions
+
     def test_flag_with_target(self, reviewable_ctx):
         ex = _executor(reviewable_ctx)
         result = ex.execute(_call("flag", {"target": "2", "note": "跨行从句"}))
@@ -152,6 +164,22 @@ class TestTargetParamUnification:
         result = ex.execute(_call("force_done", {"note": "x"}))
         assert "未知工具" in result, result
 
+    def test_unknown_tool_argument_is_rejected(self, reviewable_ctx):
+        ex = _executor(reviewable_ctx)
+
+        result = ex.execute(_call("ok", {"target": "1", "snap": 1}))
+
+        assert "未知参数" in result
+        assert not ex.reviewed_actions
+
+    def test_range_action_is_replayed_and_returned_once(self, reviewable_ctx):
+        ex = _executor(reviewable_ctx)
+
+        result = ex.execute(_call("delete", {"target": "1-3"}))
+
+        assert "删除" in result
+        assert len(ex._unique_reviewed_actions()) == 1
+
 
 class _ScriptedBackend(LLMBackend):
     """按脚本依次返回预置响应的假后端。"""
@@ -166,10 +194,11 @@ class _ScriptedBackend(LLMBackend):
 
 
 def _run_agent(ctx, script):
-    agent = AiRepairAgent(backend="deepseek", verbose=False, strategy="src")
-    agent._llm = _ScriptedBackend(script)
-    actions = agent.run(ctx, initial_state=None)
-    return agent, actions
+    agent = AiRepairAgent(
+        llm_backend=_ScriptedBackend(script), verbose=False, strategy="src"
+    )
+    result = agent.run(ctx, initial_state=None)
+    return agent, result
 
 
 class TestDoneFlow:
@@ -188,7 +217,8 @@ class TestDoneFlow:
                 ToolCall("e", "done", {}),
             ]
         )
-        agent, actions = _run_agent(reviewable_ctx, [t1, t2])
+        agent, result = _run_agent(reviewable_ctx, [t1, t2])
+        actions = result.actions
         kinds = sorted(
             (reviewable_ctx.snapshot.operation_index(a.relation_ids[0]), a.kind)
             for a in actions
@@ -197,21 +227,25 @@ class TestDoneFlow:
         assert (3, "delete") in kinds, kinds
         assert (5, "ok") in kinds, kinds
         assert len(actions) == 3, actions
+        assert result.is_complete
 
     def test_done_force_skips_remaining(self, reviewable_ctx):
         t1 = LLMResponse(
             tool_calls=[ToolCall("a", "done", {"force": True, "note": "跳过"})]
         )
-        agent, actions = _run_agent(reviewable_ctx, [t1])
-        assert actions == []
+        agent, result = _run_agent(reviewable_ctx, [t1])
+        assert result.actions == []
+        assert result.status == "forced"
+        assert result.pending_ids == (1, 3, 5)
 
     def test_done_rejected_then_force(self, reviewable_ctx):
         t1 = LLMResponse(tool_calls=[ToolCall("a", "done", {})])
         t2 = LLMResponse(
             tool_calls=[ToolCall("b", "done", {"force": True, "note": "重复项"})]
         )
-        agent, actions = _run_agent(reviewable_ctx, [t1, t2])
-        assert actions == []
+        agent, result = _run_agent(reviewable_ctx, [t1, t2])
+        assert result.actions == []
+        assert result.status == "forced"
         assert agent._llm.calls == 2
 
     def test_all_processed_done_accepted_single_turn(self, reviewable_ctx):
@@ -223,5 +257,40 @@ class TestDoneFlow:
                 ToolCall("d", "done", {}),
             ]
         )
-        agent, actions = _run_agent(reviewable_ctx, [t1])
-        assert len(actions) == 3, actions
+        agent, result = _run_agent(reviewable_ctx, [t1])
+        assert len(result.actions) == 3, result.actions
+        assert result.is_complete
+
+    def test_turn_limit_returns_partial_result(self, reviewable_ctx):
+        agent = AiRepairAgent(
+            llm_backend=_ScriptedBackend([LLMResponse(content="暂无决定")]),
+            verbose=False,
+            strategy="src",
+            max_turns=1,
+        )
+
+        result = agent.run(reviewable_ctx, initial_state=None)
+
+        assert result.status == "partial"
+        assert result.pending_ids == (1, 3, 5)
+        assert not result.is_complete
+
+    def test_public_backend_and_contract_audit(self, reviewable_ctx):
+        responses = [
+            LLMResponse(tool_calls=[ToolCall("done", "done", {"force": True})])
+        ]
+        agent = AiRepairAgent(
+            llm_backend=_ScriptedBackend(responses),
+            model_name="injected-model",
+            verbose=False,
+            strategy="src",
+        )
+
+        result = agent.run(reviewable_ctx)
+
+        assert result.model_name == "injected-model"
+        assert result.prompt_sha256 == agent_contract_fingerprint("src")
+
+    def test_unknown_named_backend_is_rejected(self):
+        with pytest.raises(ValueError, match="不支持"):
+            AiRepairAgent(backend="ollama", verbose=False)

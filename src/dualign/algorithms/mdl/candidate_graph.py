@@ -13,7 +13,6 @@ from dualign.algorithms.mdl.composition_mdl import (
 )
 from dualign.algorithms.mdl.mdl_aligner import (
     Operation,
-    _reconstruct_fixed_complexity,
     align_evidence_lattice_mdl,
 )
 
@@ -131,13 +130,12 @@ def align_centered_frontier_mdl(
             maximum_cells = window_cells
             maximum_shape = shape
 
-        local = align_evidence_lattice_mdl(local_evidence, scores_11=local_scores)
-        for complexity, _semantic, _structure, _objective in local.frontier:
-            path = _reconstruct_fixed_complexity(
-                local_evidence,
-                local_scores,
-                complexity,
-            )
+        local = align_evidence_lattice_mdl(
+            local_evidence,
+            scores_11=local_scores,
+            return_frontier_paths=True,
+        )
+        for complexity, path in local.frontier_paths:
             frontier_paths += 1
             cursor = start
             for operation in _offset_operations(path, source_start, target_start):

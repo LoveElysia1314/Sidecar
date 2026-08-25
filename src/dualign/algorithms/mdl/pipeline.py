@@ -10,7 +10,7 @@ import numpy as np
 
 from dualign.algorithms.mdl.composition_mdl import (
     CounterfactualCompositionResult,
-    align_counterfactual_composition_mdl,
+    align_counterfactual_composition_models_mdl,
     decision_relevant_candidates,
 )
 from dualign.algorithms.mdl.candidate_graph import (
@@ -23,12 +23,9 @@ from dualign.algorithms.mdl.mdl_aligner import (
     normalize_embeddings,
 )
 from dualign.algorithms.mdl.robustness import (
-    MonotoneOrderEvidence,
-    beta_binomial_upper_p,
+    MonotoneEvidenceComparison,
+    compare_monotone_evidence,
     conformal_upper_p,
-    fit_beta_binomial_order_model,
-    monotone_order_evidence,
-    mutual_monotone_chain,
     symmetric_nearest_score,
 )
 
@@ -38,21 +35,18 @@ class AlignmentCalibration:
     """Two empirical reference sets and one declared error rate."""
 
     existence_null: np.ndarray
-    parallel_order_counts: np.ndarray
+    acceptable_monotone_losses: np.ndarray
     alpha: float
 
 
 @dataclass(frozen=True)
 class AlignmentGateDecision:
-    status: str
+    accepted: bool
+    reason: str
     existence_score: float
     existence_p: float
-    order: MonotoneOrderEvidence
-    order_compatibility_p: float
-
-    @property
-    def accepted(self) -> bool:
-        return self.status == "accepted"
+    order: MonotoneEvidenceComparison | None
+    order_compatibility_p: float | None
 
 
 @dataclass(frozen=True)
@@ -72,43 +66,54 @@ class MDLPipelineResult:
 
 def assess_alignment_applicability(
     scores: np.ndarray,
-    evidence: np.ndarray,
     calibration: AlignmentCalibration,
 ) -> AlignmentGateDecision:
-    """Test correspondence, then compatibility with calibrated parallel order."""
+    """Test correspondence, then loss under the monotone evidence model."""
+
+    decision, _evidence = _assess_alignment_applicability(scores, calibration)
+    return decision
+
+
+def _assess_alignment_applicability(
+    scores: np.ndarray,
+    calibration: AlignmentCalibration,
+) -> tuple[AlignmentGateDecision, np.ndarray | None]:
+    """Return the gate decision and rank evidence only when correspondence exists."""
 
     if not 0.0 < calibration.alpha < 1.0:
         raise ValueError("显著性水平 alpha 必须位于 (0, 1)")
     existence_score = symmetric_nearest_score(scores)
     existence_p = conformal_upper_p(existence_score, calibration.existence_null)
-    order = monotone_order_evidence(scores, evidence)
-    order_alpha, order_beta = fit_beta_binomial_order_model(
-        calibration.parallel_order_counts
-    )
-    order_compatibility_p = (
-        beta_binomial_upper_p(
-            order.out_of_chain_pairs,
-            order.mutual_pairs,
-            order_alpha,
-            order_beta,
-        )
-        if order.mutual_pairs
-        else 0.0
-    )
     if existence_p > calibration.alpha:
-        status = "rejected_no_correspondence"
-    elif not order.mutual_pairs:
-        status = "rejected_order_unidentifiable"
-    elif order_compatibility_p <= calibration.alpha:
-        status = "rejected_order_incompatible"
-    else:
-        status = "accepted"
-    return AlignmentGateDecision(
-        status=status,
-        existence_score=existence_score,
-        existence_p=existence_p,
-        order=order,
-        order_compatibility_p=order_compatibility_p,
+        return (
+            AlignmentGateDecision(
+                accepted=False,
+                reason="no_correspondence",
+                existence_score=existence_score,
+                existence_p=existence_p,
+                order=None,
+                order_compatibility_p=None,
+            ),
+            None,
+        )
+
+    evidence = mutual_rank_code_evidence(scores)
+    order = compare_monotone_evidence(evidence)
+    order_compatibility_p = conformal_upper_p(
+        order.relative_loss,
+        calibration.acceptable_monotone_losses,
+    )
+    accepted = order_compatibility_p > calibration.alpha
+    return (
+        AlignmentGateDecision(
+            accepted=accepted,
+            reason="" if accepted else "order_incompatible",
+            existence_score=existence_score,
+            existence_p=existence_p,
+            order=order,
+            order_compatibility_p=order_compatibility_p,
+        ),
+        evidence,
     )
 
 
@@ -136,21 +141,31 @@ def _uncertain_regions(
         first_vertices & second_vertices,
         key=lambda item: (sum(item), item[0]),
     )
+
+    def segmented_signatures(edges):
+        signatures = []
+        edge_index = 0
+        for start, end in zip(shared, shared[1:]):
+            signature = []
+            cursor = start
+            while cursor != end:
+                if edge_index >= len(edges) or edges[edge_index][0] != cursor:
+                    raise ValueError("路径边与共享顶点不连续")
+                _edge_start, edge_end, source, target = edges[edge_index]
+                signature.append((source, target))
+                cursor = edge_end
+                edge_index += 1
+            signatures.append(tuple(signature))
+        if edge_index != len(edges):
+            raise ValueError("路径在共同终点之后仍有剩余边")
+        return signatures
+
+    first_signatures = segmented_signatures(first_edges)
+    second_signatures = segmented_signatures(second_edges)
     regions = []
     region_start = None
-    for start, end in zip(shared, shared[1:]):
-
-        def signature(edges):
-            return tuple(
-                (source, target)
-                for edge_start, edge_end, source, target in edges
-                if edge_start[0] >= start[0]
-                and edge_start[1] >= start[1]
-                and edge_end[0] <= end[0]
-                and edge_end[1] <= end[1]
-            )
-
-        agrees = signature(first_edges) == signature(second_edges)
+    for index, (start, _end) in enumerate(zip(shared, shared[1:])):
+        agrees = first_signatures[index] == second_signatures[index]
         if not agrees and region_start is None:
             region_start = start
         if agrees and region_start is not None:
@@ -206,12 +221,11 @@ def align_mdl_pipeline(
         raise ValueError("统计门控研究管线要求两侧文档均非空")
 
     scores = np.dot(source_vectors, target_vectors.T)
-    evidence = mutual_rank_code_evidence(scores)
-    gate = assess_alignment_applicability(scores, evidence, calibration)
+    gate, evidence = _assess_alignment_applicability(scores, calibration)
     gate_seconds = time.perf_counter() - started
     if not gate.accepted:
         return MDLPipelineResult(
-            status=gate.status,
+            status="rejected",
             gate=gate,
             all_ops=[],
             alternative_ops=[],
@@ -224,10 +238,11 @@ def align_mdl_pipeline(
             stats={"gate_seconds": round(gate_seconds, 6)},
         )
 
-    chain = mutual_monotone_chain(scores, evidence)
+    if evidence is None or gate.order is None:
+        raise RuntimeError("通过的统计门控缺少单调证据")
     scaffold = [
         ((source,), (target,), float(scores[source, target]))
-        for source, target, _weight in chain
+        for source, target, _weight in gate.order.monotone_pairs
     ]
     centered_started = time.perf_counter()
     centered = align_centered_frontier_mdl(evidence, scores, scaffold)
@@ -249,7 +264,7 @@ def align_mdl_pipeline(
             encoded_cache.update(zip(missing, vectors))
         return np.vstack([encoded_cache[text] for text in texts])
 
-    posterior = align_counterfactual_composition_mdl(
+    posterior, composition = align_counterfactual_composition_models_mdl(
         lines_a,
         lines_b,
         source_vectors,
@@ -258,18 +273,6 @@ def align_mdl_pipeline(
         evidence,
         composition_candidates,
         cached_encode,
-        evidence_model="posterior_reweight",
-    )
-    composition = align_counterfactual_composition_mdl(
-        lines_a,
-        lines_b,
-        source_vectors,
-        target_vectors,
-        scores,
-        evidence,
-        composition_candidates,
-        cached_encode,
-        evidence_model="counterfactual_dld",
     )
     composition_seconds = time.perf_counter() - composition_started
     uncertain_regions = _reviewable_uncertain_regions(

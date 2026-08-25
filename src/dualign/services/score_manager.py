@@ -50,46 +50,47 @@ class _ScoreEntry:
 class ScoreWorker(QObject):
     finished = Signal(object, int)
     error = Signal(str, int)
-    _trigger = Signal()
+    _trigger = Signal(object, int)
 
     def __init__(self, scorer: SimilarityScorer, parent=None):
         super().__init__(parent)
         self._scorer = scorer
-        self._pairs: list = []
-        self._request_seq: int = 0
-        self._cancelled = False
-
-    def assign(self, pairs: list, request_seq: int):
-        self._pairs = pairs
-        self._request_seq = request_seq
         self._cancelled = False
 
     def cancel(self):
         self._cancelled = True
 
-    @Slot()
-    def run(self):
-        if self._cancelled or not self._pairs:
-            self.finished.emit({}, self._request_seq)
+    @Slot(object, int)
+    def run(self, pairs: list, request_seq: int):
+        """Execute one immutable queued request.
+
+        The previous worker stored ``pairs`` and ``request_seq`` on itself.
+        Assigning a new job while the old scorer was blocked could therefore
+        relabel the old result as the new request.  Signal arguments are copied
+        into the queued Qt event and cannot be overwritten by a later job.
+        """
+
+        if self._cancelled or not pairs:
+            self.finished.emit({}, request_seq)
             return
         try:
-            keys = [p[0] for p in self._pairs]
-            src_texts = [p[1] for p in self._pairs]
-            tgt_texts = [p[2] for p in self._pairs]
+            keys = [p[0] for p in pairs]
+            src_texts = [p[1] for p in pairs]
+            tgt_texts = [p[2] for p in pairs]
 
             scores = self._scorer.score_pairs(src_texts, tgt_texts)
 
             if self._cancelled:
-                self.finished.emit({}, self._request_seq)
+                self.finished.emit({}, request_seq)
                 return
 
             results = {}
             for i, k in enumerate(keys):
                 results[k] = float(scores[i]) if i < len(scores) else 0.0
-            self.finished.emit(results, self._request_seq)
+            self.finished.emit(results, request_seq)
         except Exception as e:
             logger.error(f"ScoreWorker 评分失败: {e}", exc_info=True)
-            self.error.emit(str(e), self._request_seq)
+            self.error.emit(str(e), request_seq)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -117,7 +118,7 @@ class ScoreManager(QObject):
         self._request_seq: int = 0
         self._pending_req: dict = {}  # {(ordinal, sub): latest_seq}
 
-        self._pending_flat_batch_id: Optional[int] = None
+        self._flat_requests: dict[int, int] = {}  # request_seq -> preview batch id
 
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
@@ -185,6 +186,9 @@ class ScoreManager(QObject):
         if ordinal is None:
             self._cache.clear()
             self._pending_req.clear()
+            self._debounced_pairs.clear()
+            self._debounce_timer.stop()
+            self._flat_requests.clear()
             return
         if sub is not None:
             key = (ordinal, sub)
@@ -233,11 +237,10 @@ class ScoreManager(QObject):
         pairs = [(-(i + 1), src[i], tgt[i]) for i in range(n)]
         seq = self._request_seq + 1
         self._request_seq = seq
-        self._pending_flat_batch_id = batch_id
+        self._flat_requests[seq] = batch_id
 
         self._ensure_worker()
-        self._worker.assign(pairs, seq)
-        self._worker._trigger.emit()
+        self._worker._trigger.emit(pairs, seq)
         return batch_id
 
     # ═════════════════════════════════════════════════════════
@@ -249,21 +252,30 @@ class ScoreManager(QObject):
             return
         self._flush_in_progress = True
         try:
-            pairs = self._debounced_pairs
+            queued = self._debounced_pairs
             self._debounced_pairs = []
-            self._do_score_async(pairs, self._request_seq)
+            # Each worker job needs its own immutable sequence.  Reusing the
+            # latest per-key request sequence can collide with a flat-preview
+            # job queued between request_score() and this debounce callback.
+            latest_by_key = {item[0]: item for item in queued}
+            pairs = [
+                item for key, item in latest_by_key.items() if key in self._pending_req
+            ]
+            if not pairs:
+                return
+            seq = self._request_seq + 1
+            self._request_seq = seq
+            for key, _source, _target in pairs:
+                self._pending_req[key] = seq
+            self._do_score_async(pairs, seq)
         finally:
             self._flush_in_progress = False
 
     def _do_score_async(self, pairs: list, seq: int):
         if not pairs:
             return
-        # 保护：flat batch 已发出尚未完成时，不覆写 worker 的作业
-        if self._pending_flat_batch_id is not None:
-            return
         self._ensure_worker()
-        self._worker.assign(pairs, seq)
-        self._worker._trigger.emit()
+        self._worker._trigger.emit(pairs, seq)
 
     def _ensure_worker(self):
         from PySide6.QtCore import QThread
@@ -297,37 +309,23 @@ class ScoreManager(QObject):
 
     def _on_worker_finished(self, results: dict, seq: int):
         # ── 扁平批次 ──
-        if self._pending_flat_batch_id is not None:
-            # 扁平批次键为负整数 (-1, -2, ...)；子行评分键为二元组。
-            # 竞态下子行结果可能
-            # 在扁平批次等待期间到达，必须通过键符号区分，否则会
-            # 按 max(abs(k)) 构造出巨型数组导致下游崩溃。
-            if results:
-                first_key = next(iter(results))
-                if not (isinstance(first_key, int) and first_key < 0):
-                    # 子行评分结果到达：说明 flat batch 被后续 peri-subrow
-                    # _flush_pending 覆盖了 worker。清除 pending 标记，
-                    # 让下一轮 _render_preview 能重新发起请求。
-                    self._pending_flat_batch_id = None
-                else:
-                    batch_id = self._pending_flat_batch_id
-                    self._pending_flat_batch_id = None
-                    import numpy as np
-
-                    n_positions = max(abs(k) for k in results) if results else 0
-                    scores = np.zeros(n_positions, dtype=np.float64)
-                    for neg_pos, sc in results.items():
-                        idx = abs(neg_pos) - 1
-                        if 0 <= idx < n_positions:
-                            scores[idx] = sc
-                    self.flat_batch_ready.emit(batch_id, scores)
-                    return
-            else:
-                # 空结果：取消或出错，仍按扁平批次处理
-                batch_id = self._pending_flat_batch_id
-                self._pending_flat_batch_id = None
+        batch_id = self._flat_requests.pop(seq, None)
+        if batch_id is not None:
+            if not results:
                 self.flat_batch_ready.emit(batch_id, None)
                 return
+            if not all(isinstance(key, int) and key < 0 for key in results):
+                logger.warning("丢弃键类型异常的扁平评分结果 (seq=%s)", seq)
+                self.flat_batch_ready.emit(batch_id, None)
+                return
+            import numpy as np
+
+            n_positions = max(abs(key) for key in results)
+            scores = np.zeros(n_positions, dtype=np.float64)
+            for neg_pos, score in results.items():
+                scores[abs(neg_pos) - 1] = score
+            self.flat_batch_ready.emit(batch_id, scores)
+            return
 
         # ── 子行评分 ──
         for worker_key, score in results.items():
@@ -336,7 +334,10 @@ class ScoreManager(QObject):
             ordinal, sub = worker_key
             key = (ordinal, sub)
             pending_seq = self._pending_req.get(key)
-            if pending_seq is not None and seq < pending_seq:
+            # Missing means the relation/document was invalidated while this
+            # worker was running.  A different sequence belongs to another
+            # immutable queued job for the same key.
+            if pending_seq != seq:
                 continue
 
             self._cache[key] = _ScoreEntry(
@@ -350,16 +351,12 @@ class ScoreManager(QObject):
         logger.error(f"ScoreWorker 错误 (seq={seq}): {error_msg}")
 
         # 扁平批次错误：仅当 worker 处理的是扁平批次时发送 None
-        if self._pending_flat_batch_id is not None:
-            batch_id = self._pending_flat_batch_id
-            self._pending_flat_batch_id = None
+        batch_id = self._flat_requests.pop(seq, None)
+        if batch_id is not None:
             self.flat_batch_ready.emit(batch_id, None)
-            # 注意：即使是子行评分出错，只要 pending_flat_batch_id
-            # 已设置，也发送 flat_batch_ready(None) 让预览表回退到
-            # 全零评分，避免预览表永久等待。
 
-        for key, s in list(self._pending_req.items()):
-            if s > seq:
+        for key, request_seq in list(self._pending_req.items()):
+            if request_seq != seq:
                 continue
             ordinal, sub = key
             entry = self._cache.get(key)

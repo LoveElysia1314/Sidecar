@@ -82,8 +82,10 @@ def main_gui(src_path: str = "", tgt_path: str = "", entries_file: str = ""):
     # ── 全局未捕获异常钩子 ──
     def _global_exception_hook(exc_type, exc_value, exc_tb):
         import traceback as _tb
+        from dualign.diagnostics import write_crash_report
 
         tb_str = "".join(_tb.format_exception(exc_type, exc_value, exc_tb))
+        crash_path = write_crash_report("Qt 事件循环中未捕获的异常", tb_str)
         print(f"\n{'='*60}", file=sys.stderr)
         print("[全局异常钩子] Qt 事件循环中未捕获的异常:", file=sys.stderr)
         print(tb_str, file=sys.stderr)
@@ -91,7 +93,12 @@ def main_gui(src_path: str = "", tgt_path: str = "", entries_file: str = ""):
         QMessageBox.critical(
             None,
             "未捕获的异常",
-            f"{exc_type.__name__}: {exc_value}\n\n完整 traceback 已输出到终端。",
+            f"{exc_type.__name__}: {exc_value}\n\n"
+            + (
+                f"完整 traceback 已写入：\n{crash_path}"
+                if crash_path
+                else "完整 traceback 已输出到标准错误。"
+            ),
         )
 
     sys.excepthook = _global_exception_hook

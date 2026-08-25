@@ -13,10 +13,8 @@ import numpy as np
 from dualign.common import load_text_lines
 from dualign.config import get_embedding_cache_path
 from dualign.algorithms.mdl import (
-    beta_binomial_upper_p,
+    compare_monotone_evidence,
     conformal_upper_p,
-    fit_beta_binomial_order_model,
-    monotone_order_evidence,
     mutual_rank_code_evidence,
     normalize_embeddings,
     symmetric_nearest_score,
@@ -40,17 +38,16 @@ def _block_order(size: int, mode: str) -> np.ndarray:
 
 def _evaluate(scores: np.ndarray) -> dict:
     evidence = mutual_rank_code_evidence(scores)
-    order = monotone_order_evidence(scores, evidence)
+    order = compare_monotone_evidence(evidence)
     return {
         "shape": list(scores.shape),
         "nearest_score": symmetric_nearest_score(scores),
         "order": {
-            "mutual_pairs": order.mutual_pairs,
-            "chain_length": order.chain_length,
-            "out_of_chain_pairs": order.out_of_chain_pairs,
-            "chain_weight": order.chain_weight,
-            "coverage": order.coverage,
-            "kendall_tau": order.kendall_tau,
+            "order_free_evidence_bits": order.order_free_bits,
+            "monotone_evidence_bits": order.monotone_bits,
+            "monotone_evidence_loss": order.relative_loss,
+            "order_free_pairs": len(order.order_free_pairs),
+            "monotone_pairs": len(order.monotone_pairs),
         },
     }
 
@@ -58,31 +55,21 @@ def _evaluate(scores: np.ndarray) -> dict:
 def _status(
     item: dict,
     existence_null: np.ndarray,
-    order_alpha: float,
-    order_beta: float,
+    acceptable_monotone_losses: np.ndarray,
     alpha: float,
-) -> tuple[str, float, float]:
+) -> tuple[bool, str, float, float]:
     existence_p = conformal_upper_p(item["nearest_score"], existence_null)
-    order = item["order"]
-    order_p = (
-        beta_binomial_upper_p(
-            order["out_of_chain_pairs"],
-            order["mutual_pairs"],
-            order_alpha,
-            order_beta,
-        )
-        if order["mutual_pairs"]
-        else 0.0
+    order_p = conformal_upper_p(
+        item["order"]["monotone_evidence_loss"],
+        acceptable_monotone_losses,
     )
     if existence_p > alpha:
-        status = "rejected_no_correspondence"
-    elif not order["mutual_pairs"]:
-        status = "rejected_order_unidentifiable"
+        accepted, reason = False, "no_correspondence"
     elif order_p <= alpha:
-        status = "rejected_order_incompatible"
+        accepted, reason = False, "order_incompatible"
     else:
-        status = "accepted"
-    return status, existence_p, order_p
+        accepted, reason = True, ""
+    return accepted, reason, existence_p, order_p
 
 
 def main() -> int:
@@ -95,6 +82,13 @@ def main() -> int:
         type=int,
         nargs="*",
         help="仅调试时限制块乱序案例；默认系统地测试全部校准文档",
+    )
+    parser.add_argument(
+        "--acceptable-report",
+        type=Path,
+        action="append",
+        default=[],
+        help="加入经审阅仍可产生单调路径的困难正例报告；可重复指定",
     )
     args = parser.parse_args()
     if not 0.0 < args.alpha < 1.0:
@@ -157,17 +151,31 @@ def main() -> int:
         existence_null = np.array(
             [item["nearest_score"] for item in nonparallel], dtype=np.float64
         )
-        order_counts = np.array(
+        acceptable_hard = []
+        for report_path in args.acceptable_report:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report_documents = report.get("documents") or {}
+            raw = report_path.parent.parent / "raw"
+            lines_a = load_text_lines(raw / report_documents["a"]["path"])
+            lines_b = load_text_lines(raw / report_documents["b"]["path"])
+            scores = np.dot(
+                normalize_embeddings(encoder.encode(lines_a)),
+                normalize_embeddings(encoder.encode(lines_b)).T,
+            )
+            acceptable_hard.append(
+                {
+                    "kind": "acceptable_hard",
+                    "report": str(report_path),
+                    **_evaluate(scores),
+                }
+            )
+        acceptable_monotone_losses = np.asarray(
             [
-                [
-                    item["order"]["out_of_chain_pairs"],
-                    item["order"]["mutual_pairs"],
-                ]
-                for item in parallel
+                item["order"]["monotone_evidence_loss"]
+                for item in [*parallel, *acceptable_hard]
             ],
-            dtype=np.int32,
+            dtype=np.float64,
         )
-        order_alpha, order_beta = fit_beta_binomial_order_model(order_counts)
 
         selected_cases = (
             set(args.reorder_cases)
@@ -196,29 +204,35 @@ def main() -> int:
 
         groups = {
             "parallel": parallel,
+            "acceptable_hard": acceptable_hard,
             "nonparallel": nonparallel,
             "reordered": reordered,
         }
         summary = {}
         for name, items in groups.items():
             statuses = Counter()
+            rejection_reasons = Counter()
             for item in items:
-                status, existence_p, order_p = _status(
+                accepted, reason, existence_p, order_p = _status(
                     item,
                     existence_null,
-                    order_alpha,
-                    order_beta,
+                    acceptable_monotone_losses,
                     args.alpha,
                 )
+                status = "accepted" if accepted else "rejected"
                 item["gate"] = {
                     "status": status,
+                    "reason": reason or None,
                     "existence_p": existence_p,
                     "order_compatibility_p": order_p,
                 }
                 statuses[status] += 1
+                if reason:
+                    rejection_reasons[reason] += 1
             summary[name] = {
                 "cases": len(items),
                 "gate_counts": dict(sorted(statuses.items())),
+                "rejection_reasons": dict(sorted(rejection_reasons.items())),
             }
 
         payload = {
@@ -228,10 +242,8 @@ def main() -> int:
             "reorder_stress": "four equal blocks; middle swap and reverse",
             "calibration_resolution": 1.0 / (len(nonparallel) + 1),
             "order_model": {
-                "family": "beta_binomial",
-                "fit": "document-rate method of moments",
-                "alpha": order_alpha,
-                "beta": order_beta,
+                "family": "conformal_upper_tail",
+                "acceptable_monotone_losses": acceptable_monotone_losses.tolist(),
             },
             **groups,
             "summary": summary,

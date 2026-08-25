@@ -4,7 +4,6 @@ Dualign — Demo 演示文件
 用法:
   python -m demo.demo_cli              # 对齐 + 校订工作报告管线
   python -m demo.demo_gui              # 交互式 GUI 演示
-  python -m demo.demo_ai_repaired      # AI 审校代理演示
 """
 
 import sys

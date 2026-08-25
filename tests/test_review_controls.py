@@ -8,7 +8,11 @@ from dualign.gui.base_table import compute_text_colors, relation_text_changes
 from dualign.gui.settings import DualignConfig, KEY_AUTO_NEXT_CHAPTER
 from dualign.gui.window import DualignWindow
 from dualign.models.action import RepairAction
-from dualign.models.relation_status import RelationAnomaly
+from dualign.models.relation_status import (
+    APPROVAL_USER,
+    RelationAnomaly,
+    project_relation_statuses,
+)
 from dualign.models.state import AlignmentSnapshot
 from dualign.services.repair import RepairState
 
@@ -257,6 +261,37 @@ def test_chapter_ai_still_requires_anomalies_without_explicit_selection():
     )
 
     assert context is None
+
+
+def test_applying_ai_suggestion_creates_a_user_approval():
+    state = RepairState.from_ops([((0, 1), (0,), 0.7)], ["A", "B"], ["AB"])
+    action = RepairAction.make_merge("L000001", source="ai")
+
+    approved = state.apply(action).apply(ReviewController._make_user_approval(action))
+    status = project_relation_statuses(approved)[0]
+
+    assert approved.repair_log[-1].source == "user"
+    assert status.approval == APPROVAL_USER
+    assert not status.requires_manual_review
+
+
+def test_chapter_ai_excludes_user_reviewed_relations_but_explicit_review_can_include():
+    state = RepairState.from_ops([((0, 1), (0,), 0.7)], ["A", "B"], ["AB"])
+    state = state.apply(RepairAction.make_ok("L000001", source="user"))
+    review = SimpleNamespace(
+        _window=SimpleNamespace(_repair_state=state, _strategy="src", _model=object()),
+        _anomalies=[RelationAnomaly(ordinals=(0,), approval="user")],
+    )
+
+    assert (
+        ReviewController._build_chapter_context(review, skip_auto_repair=True) is None
+    )
+    explicit = ReviewController._build_chapter_context(
+        review,
+        for_ordinals=[0],
+        skip_auto_repair=True,
+    )
+    assert explicit.reviewable_ids == [0]
 
 
 def test_user_collapsed_ai_panel_stays_closed_during_auto_sync(monkeypatch):

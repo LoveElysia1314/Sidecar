@@ -5,7 +5,10 @@ from dualign.algorithms.mdl import (
     align_similarity_lattices_mdl,
     mutual_rank_code_evidence,
 )
-from dualign.algorithms.mdl.mdl_aligner import _semantic_frontier, _structure_counts
+from dualign.algorithms.mdl.mdl_aligner import (
+    _semantic_frontier,
+    _structure_counts,
+)
 
 
 def _relations(result):
@@ -27,6 +30,99 @@ def test_mutual_rank_requires_both_directions_to_be_distinctive():
 
     assert evidence[0, 0] > evidence[0, 1]
     assert evidence[0, 0] > evidence[1, 0]
+
+
+def test_vectorized_rank_evidence_preserves_conservative_tie_ranks():
+    scores = np.array(
+        [
+            [0.5, 0.5, 0.2, 0.1],
+            [0.3, 0.8, 0.3, 0.8],
+            [0.5, 0.4, 0.3, 0.1],
+        ]
+    )
+
+    def reference_ranks(matrix, axis):
+        values = matrix if axis == 1 else matrix.T
+        result = np.empty(values.shape, dtype=np.int32)
+        for index, row in enumerate(values):
+            ordered = np.sort(row)
+            result[index] = len(row) - np.searchsorted(ordered, row, side="left")
+        return result if axis == 1 else result.T
+
+    row_ranks = reference_ranks(scores, 1)
+    column_ranks = reference_ranks(scores, 0)
+    row_harmonic = sum(1.0 / value for value in range(1, scores.shape[1] + 1))
+    column_harmonic = sum(1.0 / value for value in range(1, scores.shape[0] + 1))
+    expected = np.minimum(
+        np.log2(scores.shape[1] / (row_harmonic * row_ranks)),
+        np.log2(scores.shape[0] / (column_harmonic * column_ranks)),
+    )
+
+    np.testing.assert_array_equal(mutual_rank_code_evidence(scores), expected)
+
+
+def test_integrated_frontier_backtrace_preserves_coverage_and_semantics():
+    random = np.random.default_rng(20260825)
+    for n in range(1, 5):
+        for m in range(1, 5):
+            for evidence in (
+                random.normal(size=(n, m)),
+                random.integers(-2, 3, size=(n, m)).astype(float),
+            ):
+                scores = random.normal(size=(n, m))
+                frontier = _semantic_frontier(evidence)
+                complexities = tuple(frontier)
+                integrated = align_evidence_lattice_mdl(
+                    evidence,
+                    scores_11=scores,
+                    return_frontier_paths=True,
+                )
+                integrated_paths = dict(integrated.frontier_paths)
+
+                for complexity in complexities:
+                    path = integrated_paths[complexity]
+                    assert tuple(
+                        index for source, _target, _score in path for index in source
+                    ) == tuple(range(n))
+                    assert tuple(
+                        index for _source, target, _score in path for index in target
+                    ) == tuple(range(m))
+                    assert (
+                        sum(
+                            (
+                                len(source) + len(target) - 2
+                                if source and target
+                                else len(source) + len(target)
+                            )
+                            for source, target, _score in path
+                        )
+                        == complexity
+                    )
+                    semantic = sum(
+                        float(evidence[np.ix_(source, target)].sum())
+                        for source, target, _score in path
+                        if source and target
+                    )
+                    assert np.isclose(
+                        semantic,
+                        frontier[complexity],
+                    )
+
+
+def test_integrated_frontier_backtrace_keeps_existing_tie_break():
+    evidence = np.array([[1.0, 0.0], [-10.0, -10.0]])
+
+    result = align_evidence_lattice_mdl(
+        evidence,
+        scores_11=evidence,
+        return_frontier_paths=True,
+    )
+
+    assert dict(result.frontier_paths)[2] == (
+        ((0,), (0,), 1.0),
+        ((), (1,), 0.0),
+        ((1,), (), 0.0),
+    )
 
 
 def test_mdl_prefers_two_clear_pairs_over_merge_plus_gap():

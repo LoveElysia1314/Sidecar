@@ -458,9 +458,7 @@ class AgentConfigDialog(QDialog):
             self._ai_note_edit.setText(a.note)
 
     def _on_test_ai_agent(self):
-        """测试 AI Agent 连接。"""
-        import requests as _requests
-
+        """Test the same Responses tool-calling contract used by Agent runs."""
         url = self._ai_url_edit.text().strip().rstrip("/")
         model = self._ai_model_edit.text().strip()
         key = self._ai_key_edit.text().strip()
@@ -473,32 +471,44 @@ class AgentConfigDialog(QDialog):
             return
 
         try:
-            headers = {"Authorization": f"Bearer {key}"} if key else {}
-            # 使用简单的 chat completion 测试（所有 LLM API 都支持）
-            resp = _requests.post(
-                f"{url}/v1/chat/completions",
-                headers=headers,
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": "ping"}],
-                    "max_tokens": 5,
-                },
-                timeout=15,
+            from dualign.services.ai_repair_agent import DeepSeekNativeBackend
+
+            backend = DeepSeekNativeBackend(
+                temperature=0.0,
+                max_tokens=32,
+                model=model,
+                base_url=url,
+                api_key=key,
+                reasoning_effort="none",
+                request_timeout=15,
             )
-            if resp.status_code == 200:
-                data = resp.json()
-                model_used = data.get("model", model)
-                self._ai_status.setText(
-                    f"✅ 连接成功！模型: {model_used}<br>"
-                    f"💡 自动修复建议使用 <b>DeepSeek V4 Flash</b> 或同等能力模型"
-                )
+            response = backend.chat(
+                [
+                    {
+                        "role": "user",
+                        "content": "Call the ping tool exactly once; do not answer in text.",
+                    }
+                ],
+                thinking=False,
+                tools=[
+                    {
+                        "type": "function",
+                        "name": "ping",
+                        "description": "Connection test.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                    }
+                ],
+            )
+            if any(call.name == "ping" for call in response.tool_calls):
+                self._ai_status.setText(f"✅ Responses 工具调用可用！模型: {model}")
             else:
-                detail = resp.text[:200]
-                self._ai_status.setText(f"❌ API 返回 {resp.status_code}: {detail}")
-        except _requests.ConnectionError:
-            self._ai_status.setText(f"❌ 无法连接到 {url}")
-        except _requests.Timeout:
-            self._ai_status.setText(f"❌ 连接超时: {url}")
+                self._ai_status.setText(
+                    "⚠ 接口可响应，但未按要求产生工具调用；不宜用于 AI 审校"
+                )
         except Exception as e:
             self._ai_status.setText(f"❌ 检测失败: {e}")
 

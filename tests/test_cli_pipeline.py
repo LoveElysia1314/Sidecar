@@ -8,6 +8,9 @@ from dualign.core import AlignmentResult
 from dualign.core.legacy_anchor_aligner import LegacyAnchorConfig
 from dualign.models.action import RepairAction
 from dualign.services.cli_pipeline import align_documents as _align_documents
+from dualign.services.cli_pipeline import _auto_repair_state
+from dualign.models.state import AlignmentSnapshot
+from dualign.services.repair import RepairService, RepairState
 from dualign.services.report_io import load_report, materialize_reader_rows, save_report
 
 
@@ -34,6 +37,50 @@ def _pair(tmp_path):
     source.write_text("A\n\nB\n", encoding="utf-8")
     target.write_text("a\n\nb\n", encoding="utf-8")
     return source, target
+
+
+def test_document_a_first_split_reuses_embedding_cache(monkeypatch):
+    snapshot = AlignmentSnapshot.from_alignment(
+        [((0, 1), (0,), 0.5)],
+        ["A1", "A2"],
+        ["B1. B2."],
+    )
+    state = RepairState(snapshot)
+    encoder = MockEncoder()
+    cache = object()
+    captured = {}
+
+    class CacheContext:
+        def __init__(self, _path):
+            pass
+
+        def __enter__(self):
+            return cache
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_auto_repair(state_arg, **kwargs):
+        captured.update(kwargs)
+        return state_arg
+
+    monkeypatch.setattr("dualign.services.cli_pipeline.EmbeddingCache", CacheContext)
+    monkeypatch.setattr(RepairService, "auto_repair", fake_auto_repair)
+
+    result = _auto_repair_state(
+        state,
+        "src",
+        encoder,
+        {"level": "diagnostic_only"},
+    )
+
+    assert result is state
+    assert captured == {
+        "strategy": "src",
+        "model": encoder,
+        "unresolved_only": False,
+        "cache": cache,
+    }
 
 
 def test_alignment_persists_only_a_report(tmp_path):

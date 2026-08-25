@@ -9,18 +9,164 @@ import numpy as np
 
 
 @dataclass(frozen=True)
-class MonotoneOrderEvidence:
-    """Deterministic order evidence extracted from mutual nearest pairs."""
+class MonotoneEvidenceComparison:
+    """Best order-free and monotone explanations of positive rank evidence."""
 
-    mutual_pairs: int
-    chain_length: int
-    chain_weight: float
-    coverage: float
-    kendall_tau: float
+    order_free_bits: float
+    monotone_bits: float
+    relative_loss: float
+    order_free_pairs: tuple[tuple[int, int, float], ...] = ()
+    monotone_pairs: tuple[tuple[int, int, float], ...] = ()
 
-    @property
-    def out_of_chain_pairs(self) -> int:
-        return self.mutual_pairs - self.chain_length
+
+def _positive_evidence(evidence: np.ndarray) -> np.ndarray:
+    bits = np.asarray(evidence, dtype=np.float64)
+    if bits.ndim != 2:
+        raise ValueError("顺序证据矩阵必须是二维数组")
+    if not np.all(np.isfinite(bits)):
+        raise ValueError("顺序证据矩阵必须只包含有限值")
+    return np.maximum(bits, 0.0)
+
+
+def maximum_order_free_evidence(
+    evidence: np.ndarray,
+) -> tuple[float, tuple[tuple[int, int, float], ...]]:
+    """Return the exact maximum-weight one-to-one matching.
+
+    Zero-weight assignments represent unmatched rows.  Assigning every item
+    on the smaller side is therefore equivalent to adding private zero-weight
+    dummy vertices, without increasing the rectangular assignment problem.
+    """
+
+    original = _positive_evidence(evidence)
+    if not original.size:
+        return 0.0, ()
+
+    transposed = original.shape[0] > original.shape[1]
+    weights = original.T if transposed else original
+    row_count, column_count = weights.shape
+    maximum = float(np.max(weights))
+    costs = maximum - weights
+
+    # Rectangular Hungarian algorithm.  The inner relaxation is vectorized;
+    # this keeps the exact dependency-free solver practical for chapter-sized
+    # matrices while preserving deterministic tie handling.
+    row_potential = np.zeros(row_count + 1, dtype=np.float64)
+    column_potential = np.zeros(column_count + 1, dtype=np.float64)
+    matched_row = np.zeros(column_count + 1, dtype=np.int32)
+    predecessor_column = np.zeros(column_count + 1, dtype=np.int32)
+
+    for row in range(1, row_count + 1):
+        matched_row[0] = row
+        current_column = 0
+        minimum_slack = np.full(column_count + 1, np.inf, dtype=np.float64)
+        used = np.zeros(column_count + 1, dtype=bool)
+        while True:
+            used[current_column] = True
+            current_row = int(matched_row[current_column])
+            slack = (
+                costs[current_row - 1]
+                - row_potential[current_row]
+                - column_potential[1:]
+            )
+            available = ~used[1:]
+            improved = available & (slack < minimum_slack[1:])
+            minimum_slack[1:][improved] = slack[improved]
+            predecessor_column[1:][improved] = current_column
+
+            candidates = np.where(available, minimum_slack[1:], np.inf)
+            next_column = int(np.argmin(candidates)) + 1
+            delta = float(candidates[next_column - 1])
+            row_potential[matched_row[used]] += delta
+            column_potential[used] -= delta
+            minimum_slack[~used] -= delta
+            current_column = next_column
+            if matched_row[current_column] == 0:
+                break
+
+        while True:
+            previous_column = int(predecessor_column[current_column])
+            matched_row[current_column] = matched_row[previous_column]
+            current_column = previous_column
+            if current_column == 0:
+                break
+
+    pairs = []
+    for column in range(1, column_count + 1):
+        row = int(matched_row[column])
+        if not row:
+            continue
+        weight = float(weights[row - 1, column - 1])
+        if weight <= 0.0:
+            continue
+        source, target = (column - 1, row - 1) if transposed else (row - 1, column - 1)
+        pairs.append((source, target, weight))
+    pairs.sort(key=lambda item: (item[0], item[1]))
+    return float(math.fsum(item[2] for item in pairs)), tuple(pairs)
+
+
+def maximum_monotone_evidence(
+    evidence: np.ndarray,
+) -> tuple[float, tuple[tuple[int, int, float], ...]]:
+    """Return the exact maximum-weight strictly monotone one-to-one matching."""
+
+    weights = _positive_evidence(evidence)
+    if not weights.size:
+        return 0.0, ()
+    if not np.any(weights > 0.0):
+        return 0.0, ()
+
+    source_count, target_count = weights.shape
+    # Weighted-LCS recurrence:
+    #   D[i,j] = max(D[i-1,j], D[i,j-1], D[i-1,j-1] + w[i,j])
+    # For one source row, the left dependency is exactly the prefix maximum of
+    # every diagonal candidate. NumPy evaluates that prefix in compiled code;
+    # the full table is retained only for exact deterministic backtracking.
+    table = np.zeros((source_count + 1, target_count + 1), dtype=np.float64)
+    for source in range(source_count):
+        diagonal_candidates = table[source, :-1] + weights[source]
+        table[source + 1, 1:] = np.maximum(
+            table[source, 1:],
+            np.maximum.accumulate(diagonal_candidates),
+        )
+
+    selected = []
+    source = source_count
+    target = target_count
+    while source and target:
+        weight = float(weights[source - 1, target - 1])
+        if (
+            weight > 0.0
+            and table[source, target] == table[source - 1, target - 1] + weight
+        ):
+            selected.append((source - 1, target - 1, weight))
+            source -= 1
+            target -= 1
+        elif table[source, target] == table[source - 1, target]:
+            source -= 1
+        else:
+            target -= 1
+    selected.reverse()
+    return float(table[-1, -1]), tuple(selected)
+
+
+def compare_monotone_evidence(evidence: np.ndarray) -> MonotoneEvidenceComparison:
+    """Compare order-free evidence with its best monotone explanation."""
+
+    order_free_bits, order_free_pairs = maximum_order_free_evidence(evidence)
+    monotone_bits, monotone_pairs = maximum_monotone_evidence(evidence)
+    relative_loss = (
+        max(0.0, min(1.0, (order_free_bits - monotone_bits) / order_free_bits))
+        if order_free_bits > 0.0
+        else 0.0
+    )
+    return MonotoneEvidenceComparison(
+        order_free_bits=order_free_bits,
+        monotone_bits=monotone_bits,
+        relative_loss=relative_loss,
+        order_free_pairs=order_free_pairs,
+        monotone_pairs=monotone_pairs,
+    )
 
 
 def symmetric_nearest_score(scores: np.ndarray) -> float:
@@ -41,227 +187,3 @@ def conformal_upper_p(value: float, null_values: np.ndarray) -> float:
     if null.ndim != 1 or not null.size:
         raise ValueError("conformal null 样本不能为空")
     return float((1 + np.count_nonzero(null >= value)) / (null.size + 1))
-
-
-def fit_beta_binomial_order_model(counts: np.ndarray) -> tuple[float, float]:
-    """Fit document-level order-error heterogeneity by method of moments.
-
-    ``counts`` contains ``(out_of_chain_pairs, mutual_pairs)`` rows.  Each
-    document has a latent order-error rate drawn from Beta(alpha, beta), while
-    its observed errors are binomial conditional on that rate.  The beta layer
-    prevents a long but otherwise parallel document from being rejected merely
-    because independent-binomial variance was too optimistic.
-    """
-
-    values = np.asarray(counts, dtype=np.float64)
-    if values.ndim != 2 or values.shape[1] != 2 or values.shape[0] < 2:
-        raise ValueError("顺序错误率校准至少需要两个 (错误数, 总数) 文档")
-    failures, totals = values.T
-    if np.any(totals <= 0) or np.any(failures < 0) or np.any(failures > totals):
-        raise ValueError("顺序错误率校准计数无效")
-    rates = failures / totals
-    mean = float(np.mean(rates))
-    variance = float(np.var(rates, ddof=1))
-    if not 0.0 < mean < 1.0 or variance <= 0.0:
-        raise ValueError("顺序错误率 calibration 缺少可估计的文档间变异")
-    concentration = mean * (1.0 - mean) / variance - 1.0
-    if concentration <= 0.0:
-        raise ValueError("顺序错误率方差无法由 beta-binomial 模型表达")
-    return mean * concentration, (1.0 - mean) * concentration
-
-
-def beta_binomial_upper_p(
-    failures: int,
-    total: int,
-    alpha: float,
-    beta: float,
-) -> float:
-    """Posterior-predictive upper-tail probability for order failures."""
-
-    if not 0 <= failures <= total or total < 1 or alpha <= 0.0 or beta <= 0.0:
-        raise ValueError("beta-binomial 参数或计数无效")
-    if failures == 0:
-        return 1.0
-
-    def log_beta(left, right):
-        return math.lgamma(left) + math.lgamma(right) - math.lgamma(left + right)
-
-    baseline = log_beta(alpha, beta)
-    logs = [
-        math.lgamma(total + 1)
-        - math.lgamma(value + 1)
-        - math.lgamma(total - value + 1)
-        + log_beta(value + alpha, total - value + beta)
-        - baseline
-        for value in range(failures, total + 1)
-    ]
-    maximum = max(logs)
-    return float(
-        min(1.0, math.exp(maximum) * math.fsum(math.exp(v - maximum) for v in logs))
-    )
-
-
-def mutual_best_pairs(scores: np.ndarray) -> list[tuple[int, int]]:
-    matrix = np.asarray(scores, dtype=np.float64)
-    if matrix.ndim != 2 or not matrix.shape[0] or not matrix.shape[1]:
-        return []
-    row_best = np.argmax(matrix, axis=1)
-    column_best = np.argmax(matrix, axis=0)
-    return [
-        (source, int(target))
-        for source, target in enumerate(row_best)
-        if column_best[target] == source
-    ]
-
-
-def _weighted_increasing_chain_indices(
-    target_indices: np.ndarray,
-    weights: np.ndarray,
-) -> tuple[float, int, list[int]]:
-    if not target_indices.size:
-        return 0.0, 0, []
-    ordered_values = {
-        value: rank + 1 for rank, value in enumerate(sorted(target_indices))
-    }
-    size = len(ordered_values)
-    tree = [(0.0, 0, -1)] * (size + 1)
-    predecessors = np.full(target_indices.size, -1, dtype=np.int32)
-
-    def better(left, right):
-        return left if (left[0], left[1]) >= (right[0], right[1]) else right
-
-    def query(position):
-        result = (0.0, 0, -1)
-        while position:
-            result = better(result, tree[position])
-            position -= position & -position
-        return result
-
-    def update(position, value):
-        while position <= size:
-            tree[position] = better(tree[position], value)
-            position += position & -position
-
-    for index, (target, weight) in enumerate(zip(target_indices, weights)):
-        position = ordered_values[int(target)]
-        previous_weight, previous_length, previous_index = query(position - 1)
-        predecessors[index] = previous_index
-        update(
-            position,
-            (previous_weight + float(weight), previous_length + 1, index),
-        )
-    total_weight, length, cursor = query(size)
-    selected = []
-    while cursor >= 0:
-        selected.append(int(cursor))
-        cursor = int(predecessors[cursor])
-    selected.reverse()
-    return total_weight, length, selected
-
-
-def _weighted_increasing_chain(
-    target_indices: np.ndarray,
-    weights: np.ndarray,
-) -> tuple[float, int]:
-    weight, length, _indices = _weighted_increasing_chain_indices(
-        target_indices, weights
-    )
-    return weight, length
-
-
-def mutual_monotone_chain(
-    scores: np.ndarray,
-    evidence: np.ndarray,
-) -> list[tuple[int, int, float]]:
-    """Return the maximum-weight monotone chain of mutual nearest pairs.
-
-    This is a rank-derived scaffold, not a set of mandatory alignment edges.
-    It has no cosine threshold or trust-margin parameter.
-    """
-
-    matrix = np.asarray(scores, dtype=np.float64)
-    bits = np.asarray(evidence, dtype=np.float64)
-    if matrix.ndim != 2 or bits.shape != matrix.shape:
-        raise ValueError("分数和证据矩阵必须形状一致")
-    pairs = mutual_best_pairs(matrix)
-    if not pairs:
-        return []
-    targets = np.array([target for _source, target in pairs], dtype=np.int32)
-    weights = np.array(
-        [max(0.0, float(bits[source, target])) for source, target in pairs],
-        dtype=np.float64,
-    )
-    _weight, _length, selected = _weighted_increasing_chain_indices(targets, weights)
-    return [
-        (pairs[index][0], pairs[index][1], float(weights[index])) for index in selected
-    ]
-
-
-def _inversion_count(values: np.ndarray) -> int:
-    if not values.size:
-        return 0
-    ordered_values = {value: rank + 1 for rank, value in enumerate(sorted(values))}
-    tree = [0] * (len(ordered_values) + 1)
-    inversions = 0
-    seen = 0
-    for value in values:
-        position = ordered_values[int(value)]
-        prefix = 0
-        cursor = position
-        while cursor:
-            prefix += tree[cursor]
-            cursor -= cursor & -cursor
-        inversions += seen - prefix
-        cursor = position
-        while cursor < len(tree):
-            tree[cursor] += 1
-            cursor += cursor & -cursor
-        seen += 1
-    return inversions
-
-
-def monotone_order_evidence(
-    scores: np.ndarray,
-    evidence: np.ndarray,
-) -> MonotoneOrderEvidence:
-    """Summarize monotonicity without a simulation budget or score threshold.
-
-    The maximum-weight increasing chain is the same object used as the
-    alignment scaffold.  Its omitted-pair count is calibrated directly on
-    known parallel documents by the beta-binomial model.  A former
-    permutation test was removed from the decision path: it tested a second,
-    less relevant null (random order), duplicated the calibrated order gate,
-    and made the result depend on an arbitrary number of shuffles.
-    """
-
-    matrix = np.asarray(scores, dtype=np.float64)
-    bits = np.asarray(evidence, dtype=np.float64)
-    if matrix.ndim != 2 or bits.shape != matrix.shape:
-        raise ValueError("分数和证据矩阵必须形状一致")
-    pairs = mutual_best_pairs(matrix)
-    pair_count = len(pairs)
-    if pair_count < 2:
-        return MonotoneOrderEvidence(
-            pair_count,
-            pair_count,
-            0.0,
-            pair_count / max(1, min(matrix.shape)),
-            0.0,
-        )
-
-    targets = np.array([target for _source, target in pairs], dtype=np.int32)
-    weights = np.array(
-        [max(0.0, float(bits[source, target])) for source, target in pairs],
-        dtype=np.float64,
-    )
-    observed_weight, observed_length = _weighted_increasing_chain(targets, weights)
-    inversions = _inversion_count(targets)
-    pair_total = pair_count * (pair_count - 1) / 2
-    tau = 1.0 - 2.0 * inversions / pair_total
-    return MonotoneOrderEvidence(
-        mutual_pairs=pair_count,
-        chain_length=observed_length,
-        chain_weight=float(observed_weight),
-        coverage=observed_length / max(1, min(matrix.shape)),
-        kendall_tau=float(tau),
-    )

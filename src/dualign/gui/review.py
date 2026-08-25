@@ -83,7 +83,7 @@ class AgentRunThread(QThread):
     """
 
     event_occurred = Signal(object)  # AgentEvent
-    finished_actions = Signal(list)  # List[RepairAction]
+    finished_result = Signal(object)
     error_occurred = Signal(str)
 
     def __init__(
@@ -98,6 +98,9 @@ class AgentRunThread(QThread):
         base_url: str = "https://api.deepseek.com",
         api_key: str = "",
         repair_state=None,
+        temperature: float = 0.0,
+        max_tokens: int = 8192,
+        request_timeout: float = 240.0,
     ):
         super().__init__(parent)
         self._ctx = ctx
@@ -108,6 +111,9 @@ class AgentRunThread(QThread):
         self._model_name = model_name
         self._base_url = base_url
         self._api_key = api_key
+        self._temperature = temperature
+        self._max_tokens = max_tokens
+        self._request_timeout = request_timeout
         self._repair_state = repair_state
         # 日志导出用 — agent.run 执行后由 run() 写入
         self.turn_log: list = []
@@ -145,6 +151,9 @@ class AgentRunThread(QThread):
                 model_name=self._model_name,
                 base_url=self._base_url,
                 api_key=self._api_key,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+                request_timeout=self._request_timeout,
             )
 
             # ── 收集 turn_log 和 token 统计（用于日志导出）──
@@ -160,14 +169,14 @@ class AgentRunThread(QThread):
                     _token_stats["completion"] += evt.usage.get("completion_tokens", 0)
                 self._on_agent_event(evt)
 
-            actions = agent.run(
+            result = agent.run(
                 ctx, on_event=_wrapped_on_event, initial_state=self._repair_state
             )
             self.turn_log = _local_turn_log
             self.token_stats = _token_stats
             self.agent_ctx = ctx
             self.elapsed = _time.time() - _start
-            self.finished_actions.emit(actions)
+            self.finished_result.emit(result)
         except MaxTurnsExceeded as e:
             self.error_occurred.emit(f"Agent 超时: {e}")
         except Exception as e:
@@ -188,7 +197,7 @@ class ReviewController(QWidget):
     next_chapter_requested = Signal()
     prev_chapter_requested = Signal()
     action_requested = Signal(object)  # RepairAction — AI 建议被采纳
-    batch_finished = Signal()
+    batch_finished = Signal(object)
     ai_error = Signal(str)  # AI 校订错误 → 窗口写入 ai_review
     actions_updated = Signal()
     log_message = Signal(str, str)  # (message, role) — 转发给 LogPanel
@@ -395,7 +404,7 @@ class ReviewController(QWidget):
         row0: 文档 A：fullname（超链接，跨 3 列）
         row1: 文档 B：fullname（超链接，跨 3 列）
         row2: 文档 A 块数 | 文档 B 块数 | 关系均分
-        row3: 单调脚手架 | 顺序链外 | 分歧区
+        row3: 单调脚手架 | 单调损失 | 分歧区
         末尾：章节进度
         """
         g = QGroupBox("文档摘要")
@@ -1213,10 +1222,18 @@ class ReviewController(QWidget):
         self._sync_menu_actions()
 
     def _all_handled(self) -> bool:
-        """所有异常都已被处理（approval 不再是 unreviewed）。"""
-        return bool(self._anomalies) and all(
-            anomaly.approval != "unreviewed" for anomaly in self._anomalies
+        """Return whether every relation requiring a user decision has one."""
+
+        window = self._window
+        if window is None or window._repair_state is None:
+            return False
+        from dualign.models.relation_status import (
+            manual_review_counts,
+            project_relation_statuses,
         )
+
+        counts = manual_review_counts(project_relation_statuses(window._repair_state))
+        return counts.is_complete
 
     # ── 导航 ──
 
@@ -1482,11 +1499,9 @@ class ReviewController(QWidget):
         w = self._window
         if w and w._repair_state:
             w._repair_state.ai_proposal_store.accept(action)
-            from dualign.models.action import RepairAction
 
             # 追加 [OK] 确认标记
-            ordinal = w._repair_state.action_ordinal(action)
-            ok_action = w._repair_state.make_action("ok", ordinal)
+            ok_action = self._make_user_approval(action)
             w._undo_stack.append(w._repair_state)
             w._repair_state = w._repair_state.apply(ok_action)
             w._refresh()
@@ -1641,7 +1656,7 @@ class ReviewController(QWidget):
                 w._repair_state.ai_proposal_store.add(a)
                 w._repair_state.ai_proposal_store.accept(a)
                 # 叠加 [OK] 标记用户审核通过
-                ok_action = RepairAction.make_ok(a.relation_ids[0])
+                ok_action = self._make_user_approval(a)
                 w._repair_state = w._repair_state.apply(ok_action)
         if w._repair_state:
             w._refresh()
@@ -1709,6 +1724,9 @@ class ReviewController(QWidget):
         model_name = "deepseek-v4-flash"
         base_url = "https://api.deepseek.com"
         api_key = ""
+        temperature = 0.0
+        max_tokens = 8192
+        request_timeout = 240.0
         try:
             from dualign.providers import active_repair_agent
 
@@ -1717,6 +1735,9 @@ class ReviewController(QWidget):
                 model_name = cfg.model_name or model_name
                 base_url = cfg.base_url or base_url
                 api_key = cfg.key_plain or api_key
+                temperature = cfg.temperature
+                max_tokens = cfg.max_tokens
+                request_timeout = cfg.request_timeout
         except Exception:
             pass
 
@@ -1739,9 +1760,12 @@ class ReviewController(QWidget):
             base_url=base_url,
             api_key=api_key,
             repair_state=w._repair_state if w else None,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            request_timeout=request_timeout,
         )
         thread.event_occurred.connect(self._on_agent_event)
-        thread.finished_actions.connect(self._on_agent_finished)
+        thread.finished_result.connect(self._on_agent_finished)
         thread.error_occurred.connect(self._on_agent_error)
         self._active_threads = [t for t in self._active_threads if t.isRunning()]
         self._active_threads.append(thread)
@@ -1808,19 +1832,25 @@ class ReviewController(QWidget):
         item = next(it for it in self._suggestions if it.ordinal == ordinal)
         self._focus_suggestion(item.action, ordinal)
 
-    def _on_agent_finished(self, actions: List[RepairAction]):
-        """Agent 完成 → 处理 actions。
+    @staticmethod
+    def _make_user_approval(action: RepairAction) -> RepairAction:
+        """Create the explicit human decision made by an Apply click."""
+        return RepairAction.make_ok(action.relation_ids[0], source="user")
+
+    def _on_agent_finished(self, result):
+        """Agent 结束 → 保存已产生建议并传递完成语义。
 
         拟修复在 AgentRunThread 中已构造，w._repair_state 已包含 auto-repair 操作。
         对存在拟修复的关系，AI 的 "ok" 应转换为等效操作（如 split/merge）显示在建议表中。
         """
         self._disable_ai_buttons(False)
+        actions = result.actions
 
         if not actions:
             self._rebuild_ai_suggestions()
             if self._batch_mode:
                 self._batch_mode = False
-                self.batch_finished.emit()
+                self.batch_finished.emit(result)
             return
 
         w = self._window
@@ -1893,7 +1923,7 @@ class ReviewController(QWidget):
 
         if self._batch_mode:
             self._batch_mode = False
-            self.batch_finished.emit()
+            self.batch_finished.emit(result)
 
     def _on_agent_error(self, error: str):
         self._disable_ai_buttons(False)

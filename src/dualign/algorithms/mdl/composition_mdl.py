@@ -77,6 +77,19 @@ class CounterfactualCompositionResult:
     diagnostics: tuple[dict, ...]
 
 
+@dataclass(frozen=True)
+class _PreparedCompositionModels:
+    n: int
+    m: int
+    posterior_edges: tuple[CandidateEdge, ...]
+    dld_edges: tuple[CandidateEdge, ...]
+    posterior_diagnostics: tuple[dict, ...]
+    dld_diagnostics: tuple[dict, ...]
+    encoded_texts: int
+    semantic_candidates: int
+    composition_candidates: int
+
+
 def counterfactual_diagnostics(
     full_scores: np.ndarray,
     ablated_scores: np.ndarray,
@@ -261,7 +274,7 @@ def decision_relevant_candidates(
     return tuple(selected.values())
 
 
-def align_counterfactual_composition_mdl(
+def _prepare_counterfactual_composition_models(
     lines_a: list[str],
     lines_b: list[str],
     embeddings_a: np.ndarray,
@@ -270,10 +283,8 @@ def align_counterfactual_composition_mdl(
     evidence: np.ndarray,
     candidates: list[Operation] | tuple[Operation, ...],
     encode_fn: Callable[[list[str]], np.ndarray],
-    *,
-    evidence_model: str = "posterior_reweight",
-) -> CounterfactualCompositionResult:
-    """Reweight sparse compound candidates by leave-one-out composition gain.
+) -> _PreparedCompositionModels:
+    """Compute the shared block diagnostics for both composition codes once.
 
     Atomic rank-code evidence defines the base counterpart distribution.  For
     every N:1/1:N candidate, the joined block is compared with every
@@ -282,8 +293,6 @@ def align_counterfactual_composition_mdl(
     there is no cosine threshold or free multiplier.
     """
 
-    if evidence_model not in {"posterior_reweight", "counterfactual_dld"}:
-        raise ValueError(f"未知组合证据模型: {evidence_model}")
     matrix = np.asarray(scores, dtype=np.float64)
     bits = np.asarray(evidence, dtype=np.float64)
     source_vectors = _normalized(embeddings_a)
@@ -323,8 +332,10 @@ def align_counterfactual_composition_mdl(
     encoded = _normalized(encode_fn(texts)) if texts else np.empty((0, 0))
     by_text = dict(zip(texts, encoded))
 
-    edges = []
-    diagnostics = []
+    posterior_edges = []
+    dld_edges = []
+    posterior_diagnostics = []
+    dld_diagnostics = []
     for source, target in sorted(relations):
         start = (source[0], target[0])
         end = (source[-1] + 1, target[-1] + 1)
@@ -332,6 +343,7 @@ def align_counterfactual_composition_mdl(
             selected_source, selected_target = source[0], target[0]
             semantic = float(bits[selected_source, selected_target])
             raw_score = float(matrix[selected_source, selected_target])
+            posterior_semantic = dld_semantic = semantic
         elif len(source) > 1:
             block_vectors = np.vstack(
                 [by_text[text] for text in variants[(source, target)]]
@@ -345,40 +357,45 @@ def align_counterfactual_composition_mdl(
             posterior_semantic = float(
                 atomic_by_target[selected] + correction.correction_bits[selected]
             )
-            if evidence_model == "counterfactual_dld":
-                direct_ablations = ablated_scores[[0, -1], :]
-                _direct_wins, direct_gains = counterfactual_diagnostics(
-                    full_scores, direct_ablations
-                )
-                necessity_ranks, necessity_bits = _uniform_rank_savings(direct_gains)
-                direct_atomic = np.maximum(
-                    bits[np.array(source[:-1]), :].sum(axis=0),
-                    bits[np.array(source[1:]), :].sum(axis=0),
-                )
-                dld_semantic = float(direct_atomic[selected] + necessity_bits[selected])
-                semantic = dld_semantic
-            else:
-                necessity_ranks = correction.ranks
-                necessity_bits = correction.correction_bits
-                direct_atomic = atomic_by_target
-                dld_semantic = posterior_semantic
-                semantic = posterior_semantic
+            direct_ablations = ablated_scores[[0, -1], :]
+            _direct_wins, direct_gains = counterfactual_diagnostics(
+                full_scores, direct_ablations
+            )
+            necessity_ranks, necessity_bits = _uniform_rank_savings(direct_gains)
+            direct_atomic = np.maximum(
+                bits[np.array(source[:-1]), :].sum(axis=0),
+                bits[np.array(source[1:]), :].sum(axis=0),
+            )
+            dld_semantic = float(direct_atomic[selected] + necessity_bits[selected])
             raw_score = float(matrix[np.array(source), selected].mean())
-            diagnostics.append(
+            common = {
+                "source": source,
+                "target": target,
+                "relation": f"{len(source)}:1",
+                "gain": float(gains[selected]),
+                "gain_rank": int(correction.ranks[selected]),
+                "correction_bits": float(correction.correction_bits[selected]),
+                "atomic_bits": float(atomic_by_target[selected]),
+                "posterior_semantic_bits": posterior_semantic,
+            }
+            posterior_diagnostics.append(
                 {
-                    "source": source,
-                    "target": target,
-                    "relation": f"{len(source)}:1",
-                    "gain": float(gains[selected]),
-                    "gain_rank": int(correction.ranks[selected]),
-                    "correction_bits": float(correction.correction_bits[selected]),
+                    **common,
+                    "necessity_rank": int(correction.ranks[selected]),
+                    "necessity_bits": float(correction.correction_bits[selected]),
+                    "direct_subblock_bits": float(atomic_by_target[selected]),
+                    "dld_semantic_bits": posterior_semantic,
+                    "semantic_bits": posterior_semantic,
+                }
+            )
+            dld_diagnostics.append(
+                {
+                    **common,
                     "necessity_rank": int(necessity_ranks[selected]),
                     "necessity_bits": float(necessity_bits[selected]),
-                    "atomic_bits": float(atomic_by_target[selected]),
                     "direct_subblock_bits": float(direct_atomic[selected]),
-                    "posterior_semantic_bits": posterior_semantic,
                     "dld_semantic_bits": dld_semantic,
-                    "semantic_bits": semantic,
+                    "semantic_bits": dld_semantic,
                 }
             )
         else:
@@ -394,53 +411,142 @@ def align_counterfactual_composition_mdl(
             posterior_semantic = float(
                 atomic_by_source[selected] + correction.correction_bits[selected]
             )
-            if evidence_model == "counterfactual_dld":
-                direct_ablations = ablated_scores[[0, -1], :]
-                _direct_wins, direct_gains = counterfactual_diagnostics(
-                    full_scores, direct_ablations
-                )
-                necessity_ranks, necessity_bits = _uniform_rank_savings(direct_gains)
-                direct_atomic = np.maximum(
-                    bits[:, np.array(target[:-1])].sum(axis=1),
-                    bits[:, np.array(target[1:])].sum(axis=1),
-                )
-                dld_semantic = float(direct_atomic[selected] + necessity_bits[selected])
-                semantic = dld_semantic
-            else:
-                necessity_ranks = correction.ranks
-                necessity_bits = correction.correction_bits
-                direct_atomic = atomic_by_source
-                dld_semantic = posterior_semantic
-                semantic = posterior_semantic
+            direct_ablations = ablated_scores[[0, -1], :]
+            _direct_wins, direct_gains = counterfactual_diagnostics(
+                full_scores, direct_ablations
+            )
+            necessity_ranks, necessity_bits = _uniform_rank_savings(direct_gains)
+            direct_atomic = np.maximum(
+                bits[:, np.array(target[:-1])].sum(axis=1),
+                bits[:, np.array(target[1:])].sum(axis=1),
+            )
+            dld_semantic = float(direct_atomic[selected] + necessity_bits[selected])
             raw_score = float(matrix[selected, np.array(target)].mean())
-            diagnostics.append(
+            common = {
+                "source": source,
+                "target": target,
+                "relation": f"1:{len(target)}",
+                "gain": float(gains[selected]),
+                "gain_rank": int(correction.ranks[selected]),
+                "correction_bits": float(correction.correction_bits[selected]),
+                "atomic_bits": float(atomic_by_source[selected]),
+                "posterior_semantic_bits": posterior_semantic,
+            }
+            posterior_diagnostics.append(
                 {
-                    "source": source,
-                    "target": target,
-                    "relation": f"1:{len(target)}",
-                    "gain": float(gains[selected]),
-                    "gain_rank": int(correction.ranks[selected]),
-                    "correction_bits": float(correction.correction_bits[selected]),
-                    "necessity_rank": int(necessity_ranks[selected]),
-                    "necessity_bits": float(necessity_bits[selected]),
-                    "atomic_bits": float(atomic_by_source[selected]),
-                    "direct_subblock_bits": float(direct_atomic[selected]),
-                    "posterior_semantic_bits": posterior_semantic,
-                    "dld_semantic_bits": dld_semantic,
-                    "semantic_bits": semantic,
+                    **common,
+                    "necessity_rank": int(correction.ranks[selected]),
+                    "necessity_bits": float(correction.correction_bits[selected]),
+                    "direct_subblock_bits": float(atomic_by_source[selected]),
+                    "dld_semantic_bits": posterior_semantic,
+                    "semantic_bits": posterior_semantic,
                 }
             )
-        edges.append(CandidateEdge(start, end, source, target, raw_score, semantic))
+            dld_diagnostics.append(
+                {
+                    **common,
+                    "necessity_rank": int(necessity_ranks[selected]),
+                    "necessity_bits": float(necessity_bits[selected]),
+                    "direct_subblock_bits": float(direct_atomic[selected]),
+                    "dld_semantic_bits": dld_semantic,
+                    "semantic_bits": dld_semantic,
+                }
+            )
+        posterior_edges.append(
+            CandidateEdge(start, end, source, target, raw_score, posterior_semantic)
+        )
+        dld_edges.append(
+            CandidateEdge(start, end, source, target, raw_score, dld_semantic)
+        )
 
-    alignment = align_explicit_evidence_mdl(n, m, edges)
-    return CounterfactualCompositionResult(
-        alignment=alignment,
-        evidence_model=evidence_model,
+    return _PreparedCompositionModels(
+        n=n,
+        m=m,
+        posterior_edges=tuple(posterior_edges),
+        dld_edges=tuple(dld_edges),
+        posterior_diagnostics=tuple(posterior_diagnostics),
+        dld_diagnostics=tuple(dld_diagnostics),
         encoded_texts=len(texts),
-        semantic_candidates=len(edges),
-        composition_candidates=len(diagnostics),
-        diagnostics=tuple(diagnostics),
+        semantic_candidates=len(posterior_edges),
+        composition_candidates=len(dld_diagnostics),
     )
+
+
+def _solve_prepared_composition_model(
+    prepared: _PreparedCompositionModels,
+    evidence_model: str,
+) -> CounterfactualCompositionResult:
+    if evidence_model == "posterior_reweight":
+        edges = prepared.posterior_edges
+        diagnostics = prepared.posterior_diagnostics
+    elif evidence_model == "counterfactual_dld":
+        edges = prepared.dld_edges
+        diagnostics = prepared.dld_diagnostics
+    else:
+        raise ValueError(f"未知组合证据模型: {evidence_model}")
+    return CounterfactualCompositionResult(
+        alignment=align_explicit_evidence_mdl(prepared.n, prepared.m, list(edges)),
+        evidence_model=evidence_model,
+        encoded_texts=prepared.encoded_texts,
+        semantic_candidates=prepared.semantic_candidates,
+        composition_candidates=prepared.composition_candidates,
+        diagnostics=diagnostics,
+    )
+
+
+def align_counterfactual_composition_models_mdl(
+    lines_a: list[str],
+    lines_b: list[str],
+    embeddings_a: np.ndarray,
+    embeddings_b: np.ndarray,
+    scores: np.ndarray,
+    evidence: np.ndarray,
+    candidates: list[Operation] | tuple[Operation, ...],
+    encode_fn: Callable[[list[str]], np.ndarray],
+) -> tuple[CounterfactualCompositionResult, CounterfactualCompositionResult]:
+    """Solve posterior and DLD codes from one shared composition audit."""
+
+    prepared = _prepare_counterfactual_composition_models(
+        lines_a,
+        lines_b,
+        embeddings_a,
+        embeddings_b,
+        scores,
+        evidence,
+        candidates,
+        encode_fn,
+    )
+    return (
+        _solve_prepared_composition_model(prepared, "posterior_reweight"),
+        _solve_prepared_composition_model(prepared, "counterfactual_dld"),
+    )
+
+
+def align_counterfactual_composition_mdl(
+    lines_a: list[str],
+    lines_b: list[str],
+    embeddings_a: np.ndarray,
+    embeddings_b: np.ndarray,
+    scores: np.ndarray,
+    evidence: np.ndarray,
+    candidates: list[Operation] | tuple[Operation, ...],
+    encode_fn: Callable[[list[str]], np.ndarray],
+    *,
+    evidence_model: str = "posterior_reweight",
+) -> CounterfactualCompositionResult:
+    """Solve one composition code while preserving the public research API."""
+
+    prepared = _prepare_counterfactual_composition_models(
+        lines_a,
+        lines_b,
+        embeddings_a,
+        embeddings_b,
+        scores,
+        evidence,
+        candidates,
+        encode_fn,
+    )
+    return _solve_prepared_composition_model(prepared, evidence_model)
 
 
 def _prune(states: dict[int, float]) -> None:

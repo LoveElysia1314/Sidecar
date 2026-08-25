@@ -175,8 +175,8 @@ def test_agent_run_with_initial_state_passes_ok_through():
     )
     agent = AiRepairAgent(backend="deepseek", verbose=False, strategy="src")
     agent._llm = _ScriptedBackend([t1])
-    actions = agent.run(ctx, initial_state=_repaired_state())
-    by_op = {_snapshot().operation_index(a.relation_ids[0]): a for a in actions}
+    result = agent.run(ctx, initial_state=_repaired_state())
+    by_op = {_snapshot().operation_index(a.relation_ids[0]): a for a in result.actions}
     assert by_op[1].kind == "merge"  # AI ok 认可已有 merge
     assert by_op[2].kind == "ok"  # snap 2 无修复 → 真正的通过
 

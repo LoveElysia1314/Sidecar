@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional
 
 import numpy as np
@@ -37,10 +38,41 @@ def normalize_embeddings(vectors: np.ndarray) -> np.ndarray:
     return matrix / np.maximum(norms, 1e-12)
 
 
+@lru_cache(maxsize=None)
 def _harmonic_number(size: int) -> float:
     if size < 1:
         return 1.0
     return math.fsum(1.0 / value for value in range(1, size + 1))
+
+
+def _worst_tie_descending_ranks(matrix: np.ndarray) -> np.ndarray:
+    """Rank every row in batches, assigning ties their conservative rank."""
+
+    rows, width = matrix.shape
+    ranks = np.empty((rows, width), dtype=np.int32)
+    if not rows or not width:
+        return ranks
+
+    # Bound temporary argsort/take arrays by an implementation memory budget.
+    # This affects only batching, never ranks or the alignment result.
+    bytes_per_row = width * (
+        np.dtype(np.intp).itemsize * 2 + np.dtype(np.float64).itemsize
+    )
+    batch_rows = max(1, (32 * 1024 * 1024) // max(1, bytes_per_row))
+    positions = np.arange(width, dtype=np.int32)[np.newaxis, :]
+    for start in range(0, rows, batch_rows):
+        end = min(rows, start + batch_rows)
+        values = matrix[start:end]
+        order = np.argsort(values, axis=1)
+        ordered = np.take_along_axis(values, order, axis=1)
+        group_starts = np.zeros(order.shape, dtype=np.int32)
+        if width > 1:
+            changed = ordered[:, 1:] != ordered[:, :-1]
+            group_starts[:, 1:] = np.where(changed, positions[:, 1:], 0)
+        np.maximum.accumulate(group_starts, axis=1, out=group_starts)
+        ordered_ranks = width - group_starts
+        np.put_along_axis(ranks[start:end], order, ordered_ranks, axis=1)
+    return ranks
 
 
 def mutual_rank_code_evidence(scores: np.ndarray) -> np.ndarray:
@@ -62,18 +94,19 @@ def mutual_rank_code_evidence(scores: np.ndarray) -> np.ndarray:
     if not n or not m:
         return np.empty_like(matrix)
 
-    row_ranks = np.empty((n, m), dtype=np.int32)
-    column_ranks = np.empty((n, m), dtype=np.int32)
-    for i in range(n):
-        ordered = np.sort(matrix[i, :])
-        row_ranks[i, :] = m - np.searchsorted(ordered, matrix[i, :], side="left")
-    for j in range(m):
-        ordered = np.sort(matrix[:, j])
-        column_ranks[:, j] = n - np.searchsorted(ordered, matrix[:, j], side="left")
+    row_ranks = _worst_tie_descending_ranks(matrix)
+    column_ranks = _worst_tie_descending_ranks(matrix.T).T
 
-    row_savings = np.log2(m / (_harmonic_number(m) * row_ranks))
-    column_savings = np.log2(n / (_harmonic_number(n) * column_ranks))
-    return np.minimum(row_savings, column_savings)
+    row_codebook = np.log2(
+        m / (_harmonic_number(m) * np.arange(1, m + 1, dtype=np.float64))
+    )
+    column_codebook = np.log2(
+        n / (_harmonic_number(n) * np.arange(1, n + 1, dtype=np.float64))
+    )
+    return np.minimum(
+        row_codebook[row_ranks - 1],
+        column_codebook[column_ranks - 1],
+    )
 
 
 def _elias_delta_length(value: int) -> int:
@@ -103,14 +136,18 @@ def _prune_dominated_states(states: dict[int, float]) -> None:
             strongest = semantic
 
 
-def _semantic_frontier(evidence: np.ndarray) -> dict[int, float]:
-    """Find terminal semantic optima for every non-dominated complexity.
+def _semantic_frontier_trace(
+    evidence: np.ndarray,
+) -> tuple[dict[int, float], dict[tuple[int, int, int], _Backtrace]]:
+    """Find the semantic frontier and its paths in one dynamic program.
 
     For an N:1 relation ending at ``(i, j)``, a predecessor ``(p, j-1)`` has
     resulting complexity ``c = c_prev + i - p - 1``. Rearranging gives the
     invariant key ``c_prev - p = c - i + 1``. Keeping the best predecessor per
     key turns arbitrary-span search into a prefix maximum. The 1:N recurrence
-    is symmetric.
+    is symmetric. A state dominated at one vertex stays dominated after every
+    common continuation, so its backtrace can be discarded without losing any
+    terminal Pareto path.
     """
 
     n, m = evidence.shape
@@ -120,8 +157,31 @@ def _semantic_frontier(evidence: np.ndarray) -> dict[int, float]:
     target_prefix = np.hstack(
         (np.zeros((n, 1), dtype=np.float64), np.cumsum(evidence, axis=1))
     )
-    vertical: list[dict[int, float]] = [{} for _j in range(m + 1)]
+    vertical: list[dict[int, tuple[float, int]]] = [{} for _j in range(m + 1)]
     previous: Optional[list[dict[int, float]]] = None
+    backtrace: dict[tuple[int, int, int], _Backtrace] = {}
+
+    def update(
+        states: dict[int, float],
+        i: int,
+        j: int,
+        complexity: int,
+        semantic: float,
+        operation: _Backtrace,
+    ) -> None:
+        current = states.get(complexity)
+        if current is None or semantic > current:
+            states[complexity] = semantic
+            backtrace[(i, j, complexity)] = operation
+
+    def prune_accumulator(states: dict[int, tuple[float, int]]) -> None:
+        strongest = _NEGATIVE_INFINITY
+        for complexity in sorted(tuple(states)):
+            semantic = states[complexity][0]
+            if semantic <= strongest:
+                del states[complexity]
+            else:
+                strongest = semantic
 
     for i in range(n + 1):
         if previous is not None:
@@ -130,53 +190,89 @@ def _semantic_frontier(evidence: np.ndarray) -> dict[int, float]:
                 prefix = float(source_prefix[source_start, j - 1])
                 accumulator = vertical[j]
                 for complexity, semantic in previous[j - 1].items():
-                    _set_max(
-                        accumulator,
-                        complexity - source_start,
-                        semantic - prefix,
-                    )
-                _prune_dominated_states(accumulator)
+                    key = complexity - source_start
+                    candidate = semantic - prefix
+                    old = accumulator.get(key)
+                    if old is None or candidate > old[0]:
+                        accumulator[key] = (candidate, source_start)
+                prune_accumulator(accumulator)
 
         current: list[dict[int, float]] = [{} for _j in range(m + 1)]
-        horizontal: dict[int, float] = {}
+        horizontal: dict[int, tuple[float, int]] = {}
         for j in range(m + 1):
             states = current[j]
             if i == 0 and j == 0:
                 states[0] = 0.0
             if previous is not None:
                 for complexity, semantic in previous[j].items():
-                    _set_max(states, complexity + 1, semantic)
+                    update(
+                        states,
+                        i,
+                        j,
+                        complexity + 1,
+                        semantic,
+                        ("source_gap", 1),
+                    )
             if j:
                 for complexity, semantic in current[j - 1].items():
-                    _set_max(states, complexity + 1, semantic)
+                    update(
+                        states,
+                        i,
+                        j,
+                        complexity + 1,
+                        semantic,
+                        ("target_gap", 1),
+                    )
 
             if previous is not None and j:
                 target_start = j - 1
                 prefix = float(target_prefix[i - 1, target_start])
                 for complexity, semantic in previous[target_start].items():
-                    _set_max(
-                        horizontal,
-                        complexity - target_start,
-                        semantic - prefix,
-                    )
-                _prune_dominated_states(horizontal)
+                    key = complexity - target_start
+                    candidate = semantic - prefix
+                    old = horizontal.get(key)
+                    if old is None or candidate > old[0]:
+                        horizontal[key] = (candidate, target_start)
+                prune_accumulator(horizontal)
 
                 source_end_prefix = float(source_prefix[i, j - 1])
-                for key, semantic in vertical[j].items():
-                    _set_max(states, key + i - 1, semantic + source_end_prefix)
+                for key, (semantic, source_start) in vertical[j].items():
+                    update(
+                        states,
+                        i,
+                        j,
+                        key + i - 1,
+                        semantic + source_end_prefix,
+                        ("many_to_one", i - source_start),
+                    )
 
                 target_end_prefix = float(target_prefix[i - 1, j])
-                for key, semantic in horizontal.items():
-                    _set_max(states, key + j - 1, semantic + target_end_prefix)
+                for key, (semantic, target_start) in horizontal.items():
+                    update(
+                        states,
+                        i,
+                        j,
+                        key + j - 1,
+                        semantic + target_end_prefix,
+                        ("one_to_many", j - target_start),
+                    )
 
             _prune_dominated_states(states)
         previous = current
 
     if previous is None:
-        return {0: 0.0}
-    return previous[m]
+        return {0: 0.0}, backtrace
+    return previous[m], backtrace
 
 
+def _semantic_frontier(evidence: np.ndarray) -> dict[int, float]:
+    """Return terminal semantic optima for every non-dominated complexity."""
+
+    frontier, _backtrace = _semantic_frontier_trace(evidence)
+    return frontier
+
+
+@lru_cache(maxsize=2048)
 def _structure_counts(n: int, m: int, max_complexity: int) -> dict[int, int]:
     """Count all full-grammar scripts by complexity combinatorially.
 
@@ -263,6 +359,7 @@ class MDLAlignmentResult:
     structure_bits: float
     objective_bits: float
     frontier: tuple[tuple[int, float, float, float], ...]
+    frontier_paths: tuple[tuple[int, tuple[Operation, ...]], ...] = ()
 
 
 def _collapse_gaps(operations: list[Operation]) -> list[Operation]:
@@ -279,178 +376,84 @@ def _collapse_gaps(operations: list[Operation]) -> list[Operation]:
     return collapsed
 
 
-def _reconstruct_fixed_complexity(
-    evidence: np.ndarray,
+def _reconstruct_from_backtrace(
     scores: np.ndarray,
-    target_complexity: int,
-) -> list[Operation]:
-    """Recover the best general-span path for one exact complexity."""
+    backtrace: dict[tuple[int, int, int], _Backtrace],
+    target_complexities,
+) -> dict[int, list[Operation]]:
+    """Recover paths from a completed exact-complexity backtrace."""
 
-    n, m = evidence.shape
-    source_evidence_prefix = np.vstack(
-        (np.zeros((1, m), dtype=np.float64), np.cumsum(evidence, axis=0))
-    )
-    target_evidence_prefix = np.hstack(
-        (np.zeros((n, 1), dtype=np.float64), np.cumsum(evidence, axis=1))
-    )
+    n, m = scores.shape
+    targets = tuple(sorted(set(int(value) for value in target_complexities)))
     source_score_prefix = np.vstack(
         (np.zeros((1, m), dtype=np.float64), np.cumsum(scores, axis=0))
     )
     target_score_prefix = np.hstack(
         (np.zeros((n, 1), dtype=np.float64), np.cumsum(scores, axis=1))
     )
-
-    vertical: list[dict[int, tuple[float, int, int]]] = [{} for _j in range(m + 1)]
-    previous: Optional[list[dict[int, float]]] = None
-    backtrace: dict[tuple[int, int, int], _Backtrace] = {}
-
-    def update(
-        states: dict[int, float],
-        i: int,
-        j: int,
-        complexity: int,
-        semantic: float,
-        operation: _Backtrace,
-    ) -> None:
-        if complexity > target_complexity:
-            return
-        remaining_difference = abs((n - i) - (m - j))
-        if complexity + remaining_difference > target_complexity:
-            return
-        current = states.get(complexity)
-        if current is None or semantic > current:
-            states[complexity] = semantic
-            backtrace[(i, j, complexity)] = operation
-
-    for i in range(n + 1):
-        if previous is not None:
-            source_start = i - 1
-            for j in range(1, m + 1):
-                prefix = float(source_evidence_prefix[source_start, j - 1])
-                accumulator = vertical[j]
-                for complexity, semantic in previous[j - 1].items():
-                    key = complexity - source_start
-                    candidate = semantic - prefix
-                    old = accumulator.get(key)
-                    if old is None or candidate > old[0]:
-                        accumulator[key] = (candidate, source_start, complexity)
-
-        current_row: list[dict[int, float]] = [{} for _j in range(m + 1)]
-        horizontal: dict[int, tuple[float, int, int]] = {}
-        for j in range(m + 1):
-            states = current_row[j]
-            if i == 0 and j == 0:
-                states[0] = 0.0
-            if previous is not None:
-                for complexity, semantic in previous[j].items():
-                    update(states, i, j, complexity + 1, semantic, ("source_gap", 1))
-            if j:
-                for complexity, semantic in current_row[j - 1].items():
-                    update(states, i, j, complexity + 1, semantic, ("target_gap", 1))
-
-            if previous is not None and j:
-                target_start = j - 1
-                prefix = float(target_evidence_prefix[i - 1, target_start])
-                for complexity, semantic in previous[target_start].items():
-                    key = complexity - target_start
-                    candidate = semantic - prefix
-                    old = horizontal.get(key)
-                    if old is None or candidate > old[0]:
-                        horizontal[key] = (candidate, target_start, complexity)
-
-                source_end_prefix = float(source_evidence_prefix[i, j - 1])
-                for key, (semantic, source_start, _old_complexity) in vertical[
-                    j
-                ].items():
-                    span = i - source_start
-                    update(
-                        states,
-                        i,
-                        j,
-                        key + i - 1,
-                        semantic + source_end_prefix,
-                        ("many_to_one", span),
+    results = {}
+    for target in targets:
+        operations: list[Operation] = []
+        i, j, complexity = n, m, target
+        while i or j:
+            operation = backtrace.get((i, j, complexity))
+            if operation is None:
+                raise RuntimeError("MDL 实验路径缺少回溯操作")
+            kind, span = operation
+            if kind == "source_gap":
+                i -= 1
+                complexity -= 1
+                operations.append(((i,), (), 0.0))
+            elif kind == "target_gap":
+                j -= 1
+                complexity -= 1
+                operations.append(((), (j,), 0.0))
+            elif kind == "many_to_one":
+                source_start = i - span
+                target_index = j - 1
+                raw_score = (
+                    source_score_prefix[i, target_index]
+                    - source_score_prefix[source_start, target_index]
+                ) / span
+                operations.append(
+                    (
+                        tuple(range(source_start, i)),
+                        (target_index,),
+                        float(raw_score),
                     )
-
-                target_end_prefix = float(target_evidence_prefix[i - 1, j])
-                for key, (
-                    semantic,
-                    target_start,
-                    _old_complexity,
-                ) in horizontal.items():
-                    span = j - target_start
-                    update(
-                        states,
-                        i,
-                        j,
-                        key + j - 1,
-                        semantic + target_end_prefix,
-                        ("one_to_many", span),
+                )
+                i = source_start
+                j = target_index
+                complexity -= span - 1
+            elif kind == "one_to_many":
+                source_index = i - 1
+                target_start = j - span
+                raw_score = (
+                    target_score_prefix[source_index, j]
+                    - target_score_prefix[source_index, target_start]
+                ) / span
+                operations.append(
+                    (
+                        (source_index,),
+                        tuple(range(target_start, j)),
+                        float(raw_score),
                     )
-        previous = current_row
-
-    if previous is None or target_complexity not in previous[m]:
-        raise RuntimeError("无法重建选定复杂度的 MDL 对齐路径")
-
-    operations: list[Operation] = []
-    i, j, complexity = n, m, target_complexity
-    while i or j:
-        operation = backtrace.get((i, j, complexity))
-        if operation is None:
-            raise RuntimeError("MDL 实验路径缺少回溯操作")
-        kind, span = operation
-        if kind == "source_gap":
-            i -= 1
-            complexity -= 1
-            operations.append(((i,), (), 0.0))
-        elif kind == "target_gap":
-            j -= 1
-            complexity -= 1
-            operations.append(((), (j,), 0.0))
-        elif kind == "many_to_one":
-            source_start = i - span
-            target_index = j - 1
-            raw_score = (
-                source_score_prefix[i, target_index]
-                - source_score_prefix[source_start, target_index]
-            ) / span
-            operations.append(
-                (
-                    tuple(range(source_start, i)),
-                    (target_index,),
-                    float(raw_score),
                 )
-            )
-            i = source_start
-            j = target_index
-            complexity -= span - 1
-        elif kind == "one_to_many":
-            source_index = i - 1
-            target_start = j - span
-            raw_score = (
-                target_score_prefix[source_index, j]
-                - target_score_prefix[source_index, target_start]
-            ) / span
-            operations.append(
-                (
-                    (source_index,),
-                    tuple(range(target_start, j)),
-                    float(raw_score),
-                )
-            )
-            i = source_index
-            j = target_start
-            complexity -= span - 1
-        else:
-            raise RuntimeError(f"未知 MDL 回溯操作: {kind}")
-    operations.reverse()
-    return _collapse_gaps(operations)
+                i = source_index
+                j = target_start
+                complexity -= span - 1
+            else:
+                raise RuntimeError(f"未知 MDL 回溯操作: {kind}")
+        operations.reverse()
+        results[target] = _collapse_gaps(operations)
+    return results
 
 
 def align_evidence_lattice_mdl(
     evidence_11: np.ndarray,
     *,
     scores_11: Optional[np.ndarray] = None,
+    return_frontier_paths: bool = False,
 ) -> MDLAlignmentResult:
     """Select a general-span alignment using semantic and structural bits."""
 
@@ -466,7 +469,7 @@ def align_evidence_lattice_mdl(
     if scores.shape != (n, m):
         raise ValueError(f"1:1 分数矩阵形状应为 {(n, m)}")
 
-    terminal = _semantic_frontier(evidence)
+    terminal, backtrace = _semantic_frontier_trace(evidence)
     maximum_complexity = max(terminal)
     counts = _structure_counts(n, m, maximum_complexity)
     minimum_complexity = min(terminal)
@@ -484,7 +487,11 @@ def align_evidence_lattice_mdl(
     chosen = max(frontier, key=lambda item: (item[3], -item[0]))
     complexity, semantic_bits, structure_bits, objective = chosen
 
-    operations = _reconstruct_fixed_complexity(evidence, scores, complexity)
+    path_complexities = (
+        tuple(item[0] for item in frontier) if return_frontier_paths else (complexity,)
+    )
+    paths = _reconstruct_from_backtrace(scores, backtrace, path_complexities)
+    operations = paths[complexity]
     return MDLAlignmentResult(
         all_ops=operations,
         complexity=complexity,
@@ -492,6 +499,11 @@ def align_evidence_lattice_mdl(
         structure_bits=structure_bits,
         objective_bits=objective,
         frontier=tuple(frontier),
+        frontier_paths=(
+            tuple((value, tuple(paths[value])) for value in path_complexities)
+            if return_frontier_paths
+            else ()
+        ),
     )
 
 

@@ -508,40 +508,51 @@ class WindowActionsMixin:
                 return
 
             if result.status == "rejected":
-                from dualign.core import alignment_payload
-                from dualign.core.calibration import resolve_alignment_calibration
-                from dualign.services.cli_pipeline import _provenance
-                from dualign.services.embedding import _try_lazy_load_model
-                from dualign.services.report_io import build_report, save_report
-
-                model = _try_lazy_load_model()
-                resolved = resolve_alignment_calibration(
-                    model,
-                    calibration_id=getattr(self._align_config, "calibration_id", ""),
-                )
-                calibration_id = resolved.calibration_id if resolved is not None else ""
                 self._repair_state = None
                 self._alignment_snapshot = None
                 self._align_stats = result.stats
                 self._alignment_gate = dict(result.gate or {})
                 report_path = self._session_path()
-                report = build_report(
-                    chapter_id=self._current_entry_id,
-                    document_a_path=self._src_path,
-                    document_b_path=self._tgt_path,
-                    operations=[],
-                    stats=result.stats,
-                    quality={
-                        "level": "diagnostic_only",
-                        "rejections": [],
-                        "indicators": {"alignment_status": "rejected"},
-                    },
-                    alignment=alignment_payload(result, calibration_id=calibration_id),
-                    provenance=_provenance(model, self._align_config, calibration_id),
-                )
-                save_report(report, report_path)
+                if result.stats.get("load_origin") != "report":
+                    from dualign.core import alignment_payload
+                    from dualign.core.calibration import (
+                        resolve_alignment_calibration,
+                    )
+                    from dualign.services.cli_pipeline import _provenance
+                    from dualign.services.embedding import _try_lazy_load_model
+                    from dualign.services.report_io import build_report, save_report
+
+                    model = _try_lazy_load_model()
+                    resolved = resolve_alignment_calibration(
+                        model,
+                        calibration_id=getattr(
+                            self._align_config, "calibration_id", ""
+                        ),
+                    )
+                    calibration_id = (
+                        resolved.calibration_id if resolved is not None else ""
+                    )
+                    report = build_report(
+                        chapter_id=self._current_entry_id,
+                        document_a_path=self._src_path,
+                        document_b_path=self._tgt_path,
+                        operations=[],
+                        stats=result.stats,
+                        quality={
+                            "level": "diagnostic_only",
+                            "rejections": [],
+                            "indicators": {"alignment_status": "rejected"},
+                        },
+                        alignment=alignment_payload(
+                            result, calibration_id=calibration_id
+                        ),
+                        provenance=_provenance(
+                            model, self._align_config, calibration_id
+                        ),
+                    )
+                    save_report(report, report_path)
                 self._report_file_hash = file_bytes_sha256(report_path)
-                self._report_file_present = True
+                self._report_file_present = os.path.isfile(report_path)
                 reason_labels = {
                     "no_correspondence": "未检测到足够的双语对应关系",
                     "order_incompatible": "对应内容的顺序与单调对齐不兼容",
@@ -553,8 +564,13 @@ class WindowActionsMixin:
                     "对齐已拒绝：" + reason_labels.get(result.reason, result.reason),
                     "warning",
                 )
-                if not self._preview_active:
-                    self._on_view_mode_toggled(True)
+                # A rejected result has no trustworthy relation projection,
+                # but the raw line-by-line preview remains useful.  Re-enter
+                # preview explicitly because cache hits do not emit text_ready.
+                self._preview_active = False
+                self._status_bar.set_view_mode(True)
+                self._on_view_mode_toggled(True)
+                self._status_bar.set_preview_only()
                 self._update_feature_gating()
                 return
 
@@ -1238,11 +1254,33 @@ class WindowActionsMixin:
         except Exception as e:
             self._show_error("AI 校订本章", e)
 
-    def _on_ai_batch_finished(self):
-        """AI 校订完成 → 持久化 + 刷新 GUI。"""
-        self._set_ai_review("completed", "")
+    def _on_ai_batch_finished(self, result):
+        """Persist the Agent's explicit completion state and refresh the GUI."""
+        note = result.note
+        if result.pending_ids:
+            progress = (
+                f"已审 {len(result.reviewed_ids)}，"
+                f"剩余 {len(result.pending_ids)}: {list(result.pending_ids[:15])}"
+            )
+            note = f"{progress}；{note}" if note else progress
+        self._set_ai_review(
+            result.status,
+            note,
+            details={
+                "reviewed_count": len(result.reviewed_ids),
+                "pending_count": len(result.pending_ids),
+                "pending_ids": list(result.pending_ids),
+                "turns": result.turns,
+                "forced": result.forced,
+                "model": result.model_name,
+                "prompt_sha256": result.prompt_sha256,
+            },
+        )
         self._save_session()
-        self._status("AI 校订完成", "success")
+        if result.is_complete:
+            self._status("AI 校订完成", "success")
+        else:
+            self._status(f"AI 校订未完成：{note}", "warning")
         # 刷新主表格以反映修复后的最新状态
         self._refresh()
         self._sync_bottom_panel()
@@ -1254,13 +1292,15 @@ class WindowActionsMixin:
         else:
             self._set_ai_review("error", status_or_error)
 
-    def _set_ai_review(self, status: str, note: str = ""):
+    def _set_ai_review(self, status: str, note: str = "", details=None):
         """写入 AI 审校状态到 report.json 的 ai_review 字段。"""
         try:
             from dualign.services.report_io import set_ai_review
 
             self._write_report(
-                lambda path: set_ai_review(path, status=status, note=note)
+                lambda path: set_ai_review(
+                    path, status=status, note=note, details=details
+                )
             )
         except Exception:
             import traceback as _tb
@@ -1948,8 +1988,10 @@ class WindowActionsMixin:
         所有未捕获异常都通过此方法输出，方便用户反馈和开发者定位。
         """
         import traceback as _tb
+        from dualign.diagnostics import write_crash_report
 
         tb = _tb.format_exc()
+        crash_path = write_crash_report(context, tb)
         # 1) 终端输出完整 traceback
         print(f"\n{'='*60}", file=sys.stderr)
         print(f"[{context}] 未捕获异常:", file=sys.stderr)
@@ -1957,7 +1999,12 @@ class WindowActionsMixin:
         print(f"{'='*60}\n", file=sys.stderr)
 
         # 2) 弹窗显示摘要
-        msg = f"{context}\n\n{error}\n\n完整 traceback 已输出到终端。"
+        destination = (
+            f"完整 traceback 已写入：\n{crash_path}"
+            if crash_path
+            else "完整 traceback 已输出到标准错误。"
+        )
+        msg = f"{context}\n\n{error}\n\n{destination}"
         QMessageBox.critical(self, f"异常 — {context}", msg)
 
         # 3) 状态栏
@@ -1981,6 +2028,9 @@ class WindowActionsMixin:
 
     def _on_worker_error(self, context: str, tb_str: str):
         """后台工作线程异常回调。已在终端输出完整 traceback，此处弹窗通知。"""
+        from dualign.diagnostics import write_crash_report
+
+        crash_path = write_crash_report(context, tb_str or context)
         print(f"\n{'='*60}", file=sys.stderr)
         print(f"[后台线程异常] {context}", file=sys.stderr)
         if tb_str:
@@ -1989,7 +2039,12 @@ class WindowActionsMixin:
         QMessageBox.critical(
             self,
             f"后台任务异常 — {context}",
-            f"{context}\n\n完整 traceback 已输出到终端。",
+            f"{context}\n\n"
+            + (
+                f"完整 traceback 已写入：\n{crash_path}"
+                if crash_path
+                else "完整 traceback 已输出到标准错误。"
+            ),
         )
         self._safe_status(f"✗ 后台异常: {context}")
         if hasattr(self, "_status_bar") and self._status_bar is not None:

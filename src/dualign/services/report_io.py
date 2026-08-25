@@ -396,8 +396,16 @@ def update_report(
     return report
 
 
-def set_ai_review(path: str | Path, status: str, note: str = "") -> dict[str, Any]:
+def set_ai_review(
+    path: str | Path,
+    status: str,
+    note: str = "",
+    details: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     def mutate(report: dict[str, Any]) -> None:
-        report["ai_review"] = {"status": status, "note": note, "updated_at": _now()}
+        review = {"status": status, "note": note, "updated_at": _now()}
+        if details:
+            review.update(details)
+        report["ai_review"] = review
 
     return update_report(path, mutate)
