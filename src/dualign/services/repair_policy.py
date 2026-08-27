@@ -13,7 +13,9 @@ class AutoRepairPlan:
     side: str = ""
 
     @property
-    def requires_model(self) -> bool:
+    def may_require_model(self) -> bool:
+        """Whether boundary expansion may need semantic path selection."""
+
         return self.kind == "split"
 
 
@@ -25,10 +27,13 @@ def strategy_for_ai_review(strategy: str) -> str:
 
 
 def choose_auto_repair(n_src: int, n_tgt: int, strategy: str) -> AutoRepairPlan | None:
-    """Return the strategy-matrix action for one original alignment relation.
+    """Return the strategy-matrix normalization plan for one original relation.
 
     ``None`` means preserve the native relation. In particular, N:M has no
     deterministic normalization: choosing a side there requires semantic review.
+    A split plan expresses the preferred side for boundary expansion; applying it
+    may naturally produce a merge when no new boundary exists and the complete
+    gapless path is unique.
     """
     if strategy not in VALID_REPAIR_STRATEGIES:
         raise ValueError(f"未知对齐策略: {strategy}")

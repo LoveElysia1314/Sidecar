@@ -94,6 +94,13 @@ def test_partial_edit_solidification_keeps_other_side_as_rebased_action():
     assert len(plan.remaining_actions) == 1
     assert "new_src_lines" in plan.remaining_actions[0].data
     assert "new_tgt_lines" not in plan.remaining_actions[0].data
+    assert len(plan.changes) == 1
+    change = plan.changes[0]
+    assert change.kind == "edit"
+    assert change.effects == ("edit_b",)
+    assert change.document_a_before == change.document_a_after == ("甲",)
+    assert change.document_b_before == ("A",)
+    assert change.document_b_after == ("A edited",)
 
 
 def test_partial_edit_does_not_promote_score_for_the_uncommitted_full_edit(
@@ -316,6 +323,10 @@ def test_delete_is_solidified_but_review_markers_remain_in_history(tmp_path: Pat
     assert path_b.read_text(encoding="utf-8") == "keep\n"
     saved = load_report(report_path)
     assert saved["repair_log"] == []
+    assert plan.changes[0].document_a_before == ("多余",)
+    assert plan.changes[0].document_a_after == ()
+    assert plan.changes[0].document_b_before == ("extra",)
+    assert plan.changes[0].document_b_after == ()
     assert [item["kind"] for item in saved["history"][-1]["repair_log"]] == [
         "delete",
         "flag",

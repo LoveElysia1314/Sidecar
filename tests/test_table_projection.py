@@ -13,6 +13,8 @@ class Row:
     n_tgt: int
     marker: str = ""
     display_group_id: object = None
+    src_text: str = ""
+    tgt_text: str = ""
 
 
 def test_projection_separates_initial_segments_from_current_bundle():
@@ -27,9 +29,10 @@ def test_projection_separates_initial_segments_from_current_bundle():
     assert (0, 2) not in projection.spans
     assert projection.spans[(0, 3)] == (2, 1)
     assert projection.spans[(0, 4)] == (2, 1)
-    assert projection.spans[(0, 6)] == (2, 1)
+    assert projection.spans[(0, 5)] == (2, 1)
+    assert projection.spans[(0, 7)] == (2, 1)
     assert projection.covered_rows(3) == frozenset({1})
-    assert projection.divider_cells == frozenset({(0, 5)})
+    assert projection.divider_cells == frozenset({(0, 6)})
 
 
 def test_projection_preserves_independent_current_edit_rows():
@@ -45,7 +48,30 @@ def test_projection_preserves_independent_current_edit_rows():
     assert projection.spans[(0, 2)] == (2, 1)
     assert (0, 3) not in projection.spans
     assert (0, 4) not in projection.spans
+    assert (0, 5) not in projection.spans
     assert not projection.divider_cells
+
+
+def test_short_side_span_never_hides_content_owned_by_a_later_relation():
+    rows = [
+        Row(363, 0, "关系 363\n1:0", 2, 1, "[M]", src_text="专长"),
+        Row(
+            363,
+            1,
+            "关系 364\n1:1",
+            2,
+            1,
+            "[M]",
+            src_text="无特别专长。",
+            tgt_text="Special skills: None in particular.",
+        ),
+    ]
+
+    projection = project_table_cells(rows, col_offset=1, relation_col=0)
+
+    assert (0, 7) not in projection.spans
+    assert (1, 7) not in projection.covered_cells
+    assert (0, 7) in projection.divider_cells
 
 
 def test_identical_initial_labels_do_not_fuse_explicit_segments():

@@ -23,6 +23,7 @@ from dualign.models.marker import (
 )
 from dualign.core.text import op_type_str
 from dualign.models.relation_identity import normalize_relation_ids
+from dualign.models.source import SOURCE_AUTO, SOURCE_NONE, canonical_source
 
 # ═══════════════════════════════════════════════════════════════
 # AlignmentSnapshot — 不可变对齐快照
@@ -131,7 +132,8 @@ class RelationRow:
     orig_score:  初始评分（来自 snapshot）
     n_src:       原文行数
     n_tgt:       译文行数
-    marker:      操作标记 ("" / "[M]" / "[S]" / "[E]" / "[D]" / "[P]" / "[F]" / "[OK]")
+    marker:      操作标记 ("" / "[M]" / "[S]" / "[E]" / "[D]" / "[P]" / "[F]")
+    effective_source: 当前结果可信来源 (none / auto / ai / user)
     """
 
     ordinal: int
@@ -145,6 +147,7 @@ class RelationRow:
     n_src: int
     n_tgt: int
     marker: str = ""
+    effective_source: str = SOURCE_NONE
     init_score_text: str = ""  # 捆绑编辑时多行分数文本
 
 
@@ -198,17 +201,20 @@ class RelationGroup:
 
     # ── 修改器（返回新 RelationGroup） ──
 
-    def with_marker(self, marker: str) -> RelationGroup:
+    def with_marker(
+        self, marker: str, effective_source: str | None = None
+    ) -> RelationGroup:
         """对所有行设置相同的 marker。返回新 RelationGroup。
 
-        兼容格式: "[M]", "[AI][OK]", "[M] [AI][OK]"
-        cur_type 改为 1:1 的条件: marker 含 [M], [S], [P], [OK]
+        旧格式中的来源/审批前缀只在兼容边界解析；这里的规范 marker
+        仅表达 M/S/E/D/P/F。
+        cur_type 改为 1:1 的条件: marker 含 [M], [S], [P]
         """
         new_cur = "1:1" if is_resolved_to_11(marker) else self.rows[0].cur_type
         zero_score = needs_zero_score(marker)
         # [M]: 保留原始 n_src/n_tgt，让单元格投影能判断少行侧的列跨行合并。
         #      例如 2:1 → 译文列跨行，第 2 行继承译文文本。
-        # [S]/[P]/[OK]: 逻辑上变为 1:1，各子行独立显示。
+        # [S]/[P]: 逻辑上变为 1:1，各子行独立显示。
         if is_merge(marker):
             logical_n_src = self.rows[0].n_src
             logical_n_tgt = self.rows[0].n_tgt
@@ -218,6 +224,11 @@ class RelationGroup:
         else:
             logical_n_src = self.rows[0].n_src
             logical_n_tgt = self.rows[0].n_tgt
+        projected_source = (
+            None
+            if effective_source is None
+            else canonical_source(effective_source, default=SOURCE_NONE)
+        )
         return RelationGroup(
             relation_id=self.relation_id,
             ordinal=self.ordinal,
@@ -234,13 +245,22 @@ class RelationGroup:
                     n_src=logical_n_src,
                     n_tgt=logical_n_tgt,
                     marker=marker,
+                    effective_source=(
+                        r.effective_source
+                        if projected_source is None
+                        else projected_source
+                    ),
                 )
                 for r in self.rows
             ),
         )
 
     def with_text(
-        self, texts: List[tuple], scores: List[float], marker: str = "[E]"
+        self,
+        texts: List[tuple],
+        scores: List[float],
+        marker: str = "[E]",
+        effective_source: str = SOURCE_AUTO,
     ) -> RelationGroup:
         """info-full 操作：用完整新文本对替换。texts = [(src, tgt), ...]"""
         it = self.rows[0].init_type
@@ -264,8 +284,39 @@ class RelationGroup:
                     n_src=n,
                     n_tgt=n,
                     marker=marker,
+                    effective_source=canonical_source(
+                        effective_source, default=SOURCE_AUTO
+                    ),
                 )
                 for k in range(n)
+            ),
+        )
+
+    def with_effective_source(self, effective_source: str) -> RelationGroup:
+        """Raise/replace trust without changing text, structure, or marker."""
+
+        effective_source = canonical_source(effective_source, default=SOURCE_NONE)
+
+        return RelationGroup(
+            relation_id=self.relation_id,
+            ordinal=self.ordinal,
+            rows=tuple(
+                RelationRow(
+                    ordinal=row.ordinal,
+                    sub=row.sub,
+                    init_type=row.init_type,
+                    cur_type=row.cur_type,
+                    src_text=row.src_text,
+                    tgt_text=row.tgt_text,
+                    score=row.score,
+                    orig_score=row.orig_score,
+                    n_src=row.n_src,
+                    n_tgt=row.n_tgt,
+                    marker=row.marker,
+                    effective_source=effective_source,
+                    init_score_text=row.init_score_text,
+                )
+                for row in self.rows
             ),
         )
 

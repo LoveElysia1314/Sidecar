@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 from dualign.core import AlignmentResult
 from dualign.common import content_hash, file_bytes_sha256, file_identity_changed
 from dualign.models.state import AlignmentSnapshot
-from dualign.models.action import RepairAction
+from dualign.models.action import CONTENT_ACTION_KINDS, RepairAction
 from dualign.services.repair import (
     RepairState,
     RepairService,
@@ -680,7 +680,7 @@ class WindowActionsMixin:
                 if hasattr(self, "_scorer") and self._scorer is not None:
                     self._score_mgr.set_scorer(self._scorer)
 
-            # ── 退出预览模式，恢复到标准 7 列表格 ──
+            # ── 退出预览模式，恢复到标准 8 列表格 ──
             if self._preview_active:
                 self._status_bar.set_preview_active(False)
                 self._preview_active = False
@@ -740,96 +740,116 @@ class WindowActionsMixin:
         else:
             self._status("错误: 无法找到源文件路径", "error")
 
-    def _apply_action(self, action: RepairAction, auto: bool = False):
-        """唯一入口：应用修复操作 + 刷新 UI。
-
-        auto=False: 用户手动操作 → approval=manual_reviewed（持久化）
-        auto=True:  一键修复/自动处理 → approval=auto_repaired（持久化）
-
-        统一校验：通过 RepairService.valid_operations 检查操作在当前状态下是否合法。
-        不合法时跳过执行并在状态栏提示（不会崩溃或产生不一致状态）。
-        """
-        if self._repair_state is None:
-            return
-
-        # ── 统一合法性校验 ──
+    @staticmethod
+    def _action_validation_error(state, action: RepairAction) -> str:
+        """Return one user-facing validation error, or an empty string."""
         from dualign.services.repair import RepairService
 
-        ordinal = self._repair_state.action_ordinal(action)
-        ops = RepairService.valid_operations(self._repair_state, ordinal)
+        ordinal = state.action_ordinal(action)
+        ops = RepairService.valid_operations(state, ordinal)
         kind = action.kind
-        if kind == "merge":
-            if not ops.get("merge", False):
-                self._status(f"⚠ 跳过: 关系[{ordinal}] 当前不可合并", "warning")
-                return
-        elif kind in ("split",):
-            if not ops.get("split_tgt", False) and not ops.get("split_src", False):
-                self._status(f"⚠ 跳过: 关系[{ordinal}] 当前不可拆分", "warning")
-                return
-        elif kind in ("edit", "edit_tgt", "edit_src"):
-            if not ops.get("edit", False):
-                self._status(f"⚠ 跳过: 关系[{ordinal}] 当前不可校订", "warning")
-                return
-        elif kind == "delete":
-            if not ops.get("delete", False):
-                self._status(f"⚠ 跳过: 关系[{ordinal}] 当前不可删除", "warning")
-                return
-        elif kind in ("placeholder_src", "placeholder_tgt"):
-            if not ops.get("placeholder", False):
-                self._status(f"⚠ 跳过: 关系[{ordinal}] 当前不可插占位符", "warning")
-                return
-        elif kind in ("ok", "flag"):
-            if not ops.get(kind, False):
-                self._status(f"⚠ 跳过: 关系[{ordinal}] 操作 {kind} 不可用", "warning")
-                return
+        if kind == "merge" and not ops.get("merge", False):
+            return f"关系[{ordinal}] 当前不可合并"
+        if kind == "split" and not (
+            ops.get("split_tgt", False) or ops.get("split_src", False)
+        ):
+            return f"关系[{ordinal}] 当前不可拆分"
+        if kind in ("edit", "edit_tgt", "edit_src") and not ops.get("edit", False):
+            return f"关系[{ordinal}] 当前不可校订"
+        if kind == "delete" and not ops.get("delete", False):
+            return f"关系[{ordinal}] 当前不可删除"
+        if kind in ("placeholder_src", "placeholder_tgt") and not ops.get(
+            "placeholder", False
+        ):
+            return f"关系[{ordinal}] 当前不可插占位符"
+        if kind in ("ok", "flag") and not ops.get(kind, False):
+            return f"关系[{ordinal}] 操作 {kind} 不可用"
+        return ""
 
-        action.data["approvals"] = {"auto"} if auto else {"manual"}
-        if not auto and action.source == "auto":
-            action.source = "user"
-        self._undo_stack.append(self._repair_state)
+    def _apply_actions(
+        self,
+        actions,
+        *,
+        auto: bool = False,
+        save: bool = True,
+        refresh: bool = True,
+        show_status: bool = True,
+        rebuild_suggestions: bool = True,
+    ) -> list[RepairAction]:
+        """Apply a sequence as one GUI transaction and one undo step."""
+        if self._repair_state is None:
+            return []
+
+        original_state = self._repair_state
+        applied = []
+        affected_ordinals = set()
+        content_changed = False
+        skipped = []
+
+        for action in actions:
+            error = self._action_validation_error(original_state, action)
+            if error:
+                skipped.append(error)
+                continue
+            action.data["approvals"] = {"auto"} if auto else {"manual"}
+            if not auto and action.source == "auto":
+                action.source = "user"
+            action_ordinals = original_state.action_ordinals(action)
+            applied.append(action)
+            affected_ordinals.update(action_ordinals)
+            content_changed = content_changed or action.kind in CONTENT_ACTION_KINDS
+
+        if not applied:
+            if skipped and show_status:
+                self._status(f"⚠ 跳过: {skipped[0]}", "warning")
+            return []
+
+        self._undo_stack.append(original_state)
         self._redo_stack.clear()
-        self._repair_state = self._repair_state.apply(action)
-        # 标记受影响关系失效，等待 poll_now 捡起重算
-        _affected = self._repair_state.action_ordinals(action)
-        self._invalidate_relation_scores(_affected)
-        # 文本变更类操作 → 重置该关系已采纳的 AI 建议为 pending
-        _text_changing_kinds = {
-            "edit",
-            "edit_tgt",
-            "edit_src",
-            "merge",
-            "split",
-            "delete",
-            "placeholder_src",
-            "placeholder_tgt",
-        }
-        if action.kind in _text_changing_kinds:
-            _store = self._repair_state.ai_proposal_store
-            for _si in _affected:
-                _store.reset(self._repair_state.snapshot.relation_id(_si))
-            if hasattr(self, "_review"):
+        self._repair_state = original_state.apply_many(applied)
+        self._invalidate_relation_scores(sorted(affected_ordinals))
+
+        if content_changed:
+            store = self._repair_state.ai_proposal_store
+            for ordinal in affected_ordinals:
+                store.reset(self._repair_state.snapshot.relation_id(ordinal))
+            if rebuild_suggestions and hasattr(self, "_review"):
                 self._review._rebuild_ai_suggestions()
 
-        self._save_session()
-        self._refresh()
+        if save:
+            self._save_session()
+        if refresh:
+            self._refresh()
 
-        # ── 用临时状态反馈操作结果 ──
-        _action_labels = {
-            "merge": "已合并",
-            "split": "已拆分",
-            "edit": "已校订",
-            "delete": "已删除",
-            "flag": "已标记异常",
-            "ok": "已审核通过",
-            "placeholder_src": "已插占位符",
-            "placeholder_tgt": "已插占位符",
-        }
-        lbl = _action_labels.get(kind, f"已{kind}")
-        self._set_temp_status(f"{lbl} 关系[{ordinal}]", "success")
+        if show_status:
+            if len(applied) == 1:
+                action = applied[0]
+                ordinal = self._repair_state.action_ordinal(action)
+                labels = {
+                    "merge": "已合并",
+                    "split": "已拆分",
+                    "edit": "已校订",
+                    "delete": "已删除",
+                    "flag": "已标记异常",
+                    "ok": "已审核通过",
+                    "placeholder_src": "已插占位符",
+                    "placeholder_tgt": "已插占位符",
+                }
+                label = labels.get(action.kind, f"已{action.kind}")
+                self._set_temp_status(f"{label} 关系[{ordinal}]", "success")
+            else:
+                detail = f"，跳过 {len(skipped)} 条" if skipped else ""
+                self._set_temp_status(
+                    f"已批量应用 {len(applied)} 条校订{detail}", "success"
+                )
 
-        # 撤销栈溢出提醒
         if len(self._undo_stack) == self._undo_stack.maxlen:
             self._status("撤销栈已达上限 (50)，将覆盖最旧记录", "warning")
+        return applied
+
+    def _apply_action(self, action: RepairAction, auto: bool = False):
+        """Apply one action through the same transaction boundary as batches."""
+        return self._apply_actions([action], auto=auto)
 
     def do_merge(self, ordinal: int):
         """合并当前文本对。"""
@@ -904,7 +924,15 @@ class WindowActionsMixin:
                     item, QAbstractItemView.ScrollHint.PositionAtCenter
                 )
                 break
-        self._set_temp_status(f"已拆分关系[{ordinal}] ({side}侧)", "success")
+        if (
+            action is not None
+            and action.kind == "merge"
+            and action.data.get("normalization_plan") == "split"
+        ):
+            message = f"已归一化关系[{ordinal}] (无新边界，合并为 1:1)"
+        else:
+            message = f"已拆分关系[{ordinal}] ({side}侧)"
+        self._set_temp_status(message, "success")
 
     def _ensure_model(self):
         """确保 self._model 已加载。返回 True 表示就绪。"""
@@ -1228,17 +1256,17 @@ class WindowActionsMixin:
         self._set_temp_status(f"已重置关系[{ordinal}]", "info")
 
     def _apply_ai_action(self, action: RepairAction):
-        """AI 操作的受控入口：用户已确认采纳，执行修复。
+        """建议动作的受控入口：按其最终责任来源执行修复。
 
-        统一方案：所有 AI 操作（含 delete）走统一 _apply_action 路径，
-        不再为 delete 单独追加 [OK]——采纳操作本身已构成审批。
+        人工点击应用时，ReviewController 已把动作采纳为 user source；
+        自动应用时则保留 ai/auto source。内容动作本身即构成审批。
         """
         if self._repair_state is None:
             return
         ordinal = self._repair_state.action_ordinal(action)
-        self._apply_action(action, auto=False)
+        self._apply_action(action, auto=action.source != "user")
         self._set_temp_status(
-            f"AI 修复已应用: 关系[{ordinal}] {action.kind}", "success"
+            f"校订建议已应用: 关系[{ordinal}] {action.kind}", "success"
         )
 
     def _on_ai_repair_chapter(self):
@@ -1274,10 +1302,13 @@ class WindowActionsMixin:
                 "forced": result.forced,
                 "model": result.model_name,
                 "prompt_sha256": result.prompt_sha256,
+                "elapsed_seconds": round(result.elapsed_seconds, 3),
             },
         )
         self._save_session()
-        if result.is_complete:
+        if result.status == "cancelled":
+            self._status("AI 校订已停止", "info")
+        elif result.is_complete:
             self._status("AI 校订完成", "success")
         else:
             self._status(f"AI 校订未完成：{note}", "warning")

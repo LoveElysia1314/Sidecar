@@ -11,7 +11,6 @@ from dualign.services.repair import (
     RepairState,
     RepairService,
     SPLIT_FAILURE_AMBIGUOUS,
-    SPLIT_FAILURE_UNSPLITTABLE,
     normalize_repair_log,
     review_flags_for_uncertain_regions,
     current_score_slot_exists,
@@ -104,6 +103,17 @@ class TestApplyUndo:
         state2 = simple_state.apply(action)
         assert state2 is not simple_state
 
+    def test_apply_many_matches_sequential_effective_state(self, simple_state):
+        edit = simple_state.make_action("edit", 0, source="ai", new_tgt_lines=["fixed"])
+        approval = simple_state.make_action("ok", 0, source="user")
+        flag = simple_state.make_action("flag", 1, source="user", note="check")
+
+        batched = simple_state.apply_many([edit, approval, flag])
+        sequential = simple_state.apply(edit).apply(approval).apply(flag)
+
+        assert batched.repair_log == sequential.repair_log
+        assert batched.current == sequential.current
+
     def test_undo_new_instance(self, simple_state):
         action = simple_state.make_action("ok", 0)
         state2 = simple_state.apply(action)
@@ -172,9 +182,49 @@ class TestApplyUndo:
     def test_explicit_approval_resolves_a_flag_without_erasing_content(self):
         edit = RepairAction.make_edit("L000001", source="ai", new_tgt_lines=["fixed"])
         flag = RepairAction.make_flag("L000001", "review")
-        approval = RepairAction.make_ok("L000001")
+        approval = RepairAction.make_ok("L000001", source="user")
 
-        assert normalize_repair_log([edit, flag, approval]) == [edit, approval]
+        normalized = normalize_repair_log([edit, flag, approval])
+
+        assert len(normalized) == 1
+        assert normalized[0].kind == "edit"
+        assert normalized[0].source == "user"
+        assert normalized[0].data["reviewed_by"] == ["user"]
+
+    def test_legacy_ai_edit_plus_user_ok_normalizes_to_one_user_edit(
+        self, simple_state
+    ):
+        edit = RepairAction.make_edit("L000001", source="ai", new_tgt_lines=["fixed"])
+        approval = RepairAction.make_ok("L000001", source="user")
+
+        restored = RepairState(simple_state.snapshot, [edit, approval])
+
+        assert len(restored.repair_log) == 1
+        assert restored.repair_log[0].kind == "edit"
+        assert restored.repair_log[0].source == "user"
+        row = restored.current.group(0).rows[0]
+        assert row.marker == "[E] [OK]"
+        assert row.effective_source == "user"
+
+    def test_repeating_explicit_ok_keeps_one_visible_review(self, simple_state):
+        edited = simple_state.apply(
+            simple_state.make_action("edit", 0, source="user", new_tgt_lines=["fixed"])
+        )
+        once = edited.apply(edited.make_action("ok", 0, source="user"))
+        twice = once.apply(once.make_action("ok", 0, source="user"))
+
+        assert len(twice.repair_log) == 1
+        row = twice.current.group(0).rows[0]
+        assert row.marker == "[E] [OK]"
+        assert row.effective_source == "user"
+        assert RepairService.valid_operations(twice, 0)["ok"]
+
+    def test_ok_is_available_for_a_legitimate_non_1to1_relation(self):
+        state = RepairState.from_ops(
+            [((0, 1), (0,), 0.7)], ["A", "B"], ["Combined translation"]
+        )
+
+        assert RepairService.valid_operations(state, 0)["ok"]
 
     def test_content_changes_preserve_flag_and_invalidate_approval(self):
         flag = RepairAction.make_flag("L000001", "review", source="auto")
@@ -187,7 +237,13 @@ class TestApplyUndo:
         approval = RepairAction.make_ok("L000001", source="user")
         flag = RepairAction.make_flag("L000001", "review", source="ai")
 
-        assert normalize_repair_log([approval, flag]) == [flag]
+        normalized = normalize_repair_log([approval, flag])
+        assert normalized == [approval, flag]
+        state = RepairState.from_ops([((0,), (0,), 0.9)], ["A"], ["B"])
+        reopened = RepairState(state.snapshot, normalized)
+        row = reopened.current.group(0).rows[0]
+        assert row.marker == "[F]"
+        assert row.effective_source == "user"
 
     def test_full_auto_repair_preserves_an_existing_review_flag(self, simple_state):
         flagged = simple_state.apply(
@@ -233,7 +289,7 @@ class TestSplitAttempt:
         assert action.data["new_tgt_lines"] == ["First.", "Second. Third."]
         assert action.data["split_scores"] == pytest.approx([1.0, 1.0])
 
-    def test_split_reports_when_text_has_no_further_boundary(self):
+    def test_split_naturally_normalizes_to_merge_when_no_boundary_exists(self):
         state = RepairState.from_ops(
             [((0, 1), (0,), 0.7)],
             ["source one", "source two"],
@@ -242,9 +298,15 @@ class TestSplitAttempt:
 
         attempt = RepairService.try_split(state, 0, "tgt", model=_PartitionEncoder())
 
-        assert not attempt.succeeded
-        assert attempt.failure_reason == SPLIT_FAILURE_UNSPLITTABLE
-        assert attempt.state is state
+        assert attempt.succeeded
+        action = attempt.state.repair_log[-1]
+        assert action.kind == "merge"
+        assert action.data["normalization_plan"] == "split"
+        assert action.data["side"] == "tgt"
+        assert attempt.state.current.group(0).rows[0].cur_type == "1:1"
+        src, tgt = RepairService.render_rows(attempt.state)
+        assert src == ["source one source two"]
+        assert tgt == ["No further boundary"]
 
     def test_split_does_not_use_soft_clause_punctuation(self):
         state = RepairState.from_ops(
@@ -255,9 +317,25 @@ class TestSplitAttempt:
 
         attempt = RepairService.try_split(state, 0, "tgt", model=_ZeroEncoder())
 
-        assert not attempt.succeeded
-        assert attempt.failure_reason == SPLIT_FAILURE_UNSPLITTABLE
-        assert attempt.state is state
+        assert attempt.succeeded
+        action = attempt.state.repair_log[-1]
+        assert action.kind == "merge"
+        assert action.data["normalization_plan"] == "split"
+
+    def test_unsplit_normalization_does_not_require_an_embedding_model(self):
+        state = RepairState.from_ops(
+            [((0, 1), (0,), 0.7)],
+            ["source one", "source two"],
+            ["No further boundary"],
+        )
+
+        repaired = RepairService.auto_repair(state, strategy="src", model=None)
+        repeated = RepairService.auto_repair(
+            repaired, strategy="src", model=None, unresolved_only=True
+        )
+
+        assert [action.kind for action in repaired.repair_log] == ["merge"]
+        assert repeated.repair_log == repaired.repair_log
 
     def test_split_reports_when_local_evidence_is_exactly_ambiguous(self):
         state = RepairState.from_ops(
@@ -493,7 +571,8 @@ class TestRenderRows:
         # snap1 starts at table row 1 and is a native 2:1 relation.
         assert spans[(1, 3)] == (2, 1)
         assert spans[(1, 4)] == (2, 1)
-        assert spans[(1, 6)] == (2, 1)
+        assert spans[(1, 5)] == (2, 1)
+        assert spans[(1, 7)] == (2, 1)
         group = multi_state.current.group(1)
         assert current_score_texts(group, 0) == ("B C", "b")
         assert current_score_texts(group, 1) is None
@@ -515,9 +594,10 @@ class TestRenderRows:
         assert [(r.n_src, r.n_tgt) for r in view.rows] == [(2, 1), (2, 1)]
         assert (0, 1) not in spans  # 两个独立的初始类型
         assert (0, 2) not in spans  # 两个独立的初始评分
-        assert spans[(0, 3)] == (2, 1)  # 当前状态
-        assert spans[(0, 4)] == (2, 1)  # 当前评分
-        assert spans[(0, 6)] == (2, 1)  # 当前关系的短侧文档 B
+        assert spans[(0, 3)] == (2, 1)  # 当前来源
+        assert spans[(0, 4)] == (2, 1)  # 当前状态
+        assert spans[(0, 5)] == (2, 1)  # 当前评分
+        assert spans[(0, 7)] == (2, 1)  # 当前关系的短侧文档 B
 
         group = repaired.current.group(0)
         assert current_score_texts(group, 0) == (
@@ -525,6 +605,24 @@ class TestRenderRows:
             "# Volume 1, Chapter 1: Meeting the Angel",
         )
         assert current_score_texts(group, 1) is None
+
+    def test_bundle_keeps_later_short_side_text_visible(self):
+        snapshot = AlignmentSnapshot.from_alignment(
+            [((0,), (), 0.0), ((1,), (0,), 0.8)],
+            ["专长", "无特别专长。"],
+            ["Special skills: None in particular."],
+        )
+
+        repaired = RepairService.repair_bundle_relations(RepairState(snapshot), [0, 1])
+        view = make_table_view(repaired)
+        projection = project_table_cells(view.rows, col_offset=1, relation_col=0)
+
+        assert [row.tgt_text for row in view.rows] == [
+            "",
+            "Special skills: None in particular.",
+        ]
+        assert (0, 7) not in projection.spans
+        assert (1, 7) not in projection.covered_cells
 
     def test_multi_edit_keeps_current_rows_independent(self, multi_state):
         repaired = RepairService.repair_multi_edit(

@@ -3,12 +3,10 @@ from types import SimpleNamespace
 from dualign.gui.review import ReviewController
 from dualign.models.action import RepairAction
 from dualign.models.relation_status import (
-    APPROVAL_AGENT,
-    APPROVAL_PROPOSED,
-    APPROVAL_USER,
     manual_review_counts,
     project_relation_statuses,
 )
+from dualign.models.source import SOURCE_AI, SOURCE_AUTO, SOURCE_USER
 from dualign.services.repair import RepairState
 
 
@@ -39,8 +37,8 @@ def test_auto_and_agent_repairs_still_require_a_user_decision():
     proposed_status = project_relation_statuses(proposed)[0]
     agent_status = project_relation_statuses(agent)[0]
 
-    assert proposed_status.approval == APPROVAL_PROPOSED
-    assert agent_status.approval == APPROVAL_AGENT
+    assert proposed_status.effective_source == SOURCE_AUTO
+    assert agent_status.effective_source == SOURCE_AI
     assert proposed_status.requires_manual_review
     assert agent_status.requires_manual_review
     assert manual_review_counts(project_relation_statuses(agent)).required == 1
@@ -54,7 +52,7 @@ def test_user_approval_completes_the_relation_and_deletion_removes_it():
     approved_status = project_relation_statuses(approved)[0]
     deleted_status = project_relation_statuses(deleted)[0]
 
-    assert approved_status.approval == APPROVAL_USER
+    assert approved_status.effective_source == SOURCE_USER
     assert approved_status.is_manual_review_subject
     assert not approved_status.requires_manual_review
     assert not deleted_status.is_manual_review_subject

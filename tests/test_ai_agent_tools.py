@@ -8,6 +8,8 @@ Dualign — AI 校订 Agent 工具可靠性测试
   4. 范围 edit 行数校验
 """
 
+import json
+
 import pytest
 
 from dualign.models.state import AlignmentSnapshot
@@ -21,7 +23,10 @@ from dualign.services.ai_repair_agent import (
     LLMBackend,
     AiRepairAgent,
     agent_contract_fingerprint,
+    dump_agent_debug,
+    dump_agent_raw,
 )
+from dualign.services.cancellation import CancellationToken
 
 
 @pytest.fixture
@@ -193,6 +198,15 @@ class _ScriptedBackend(LLMBackend):
         return self.script.pop(0)
 
 
+class _CancellingBackend(LLMBackend):
+    def __init__(self, token):
+        self.token = token
+
+    def chat(self, messages, thinking=False, tools=None):
+        self.token.cancel()
+        self.token.raise_if_cancelled()
+
+
 def _run_agent(ctx, script):
     agent = AiRepairAgent(
         llm_backend=_ScriptedBackend(script), verbose=False, strategy="src"
@@ -202,6 +216,21 @@ def _run_agent(ctx, script):
 
 
 class TestDoneFlow:
+    def test_user_cancellation_is_a_normal_partial_result(self, reviewable_ctx):
+        token = CancellationToken()
+        agent = AiRepairAgent(
+            llm_backend=_CancellingBackend(token),
+            cancellation_token=token,
+            verbose=False,
+            strategy="src",
+        )
+
+        result = agent.run(reviewable_ctx)
+
+        assert result.status == "cancelled"
+        assert result.actions == []
+        assert result.pending_ids == tuple(reviewable_ctx.reviewable_ids)
+
     def test_done_rejected_keeps_loop_alive(self, reviewable_ctx):
         """本次事故场景：先处理 2/3，调用 done 被拒绝 → 循环必须继续而非退出。"""
         t1 = LLMResponse(
@@ -294,3 +323,65 @@ class TestDoneFlow:
     def test_unknown_named_backend_is_rejected(self):
         with pytest.raises(ValueError, match="不支持"):
             AiRepairAgent(backend="ollama", verbose=False)
+
+    def test_timing_is_reported_in_events_and_exported_logs(
+        self, reviewable_ctx, tmp_path
+    ):
+        response = LLMResponse(
+            tool_calls=[ToolCall("done", "done", {"force": True})],
+            usage={"prompt_tokens": 12, "completion_tokens": 3},
+        )
+        events = []
+        agent = AiRepairAgent(
+            llm_backend=_ScriptedBackend([response]),
+            verbose=False,
+            strategy="src",
+        )
+
+        result = agent.run(reviewable_ctx, on_event=events.append)
+
+        done_event = next(evt for evt in events if evt.type == "done")
+        llm_event = next(evt for evt in events if evt.type == "llm_response")
+        tool_event = next(evt for evt in events if evt.type == "tool_result")
+        turn = done_event.turn_log[0]
+        assert result.elapsed_seconds >= 0
+        assert done_event.elapsed_seconds == result.elapsed_seconds
+        assert llm_event.elapsed_seconds >= 0
+        assert tool_event.elapsed_seconds >= 0
+        assert set(turn["timing"]) == {
+            "llm_seconds",
+            "tool_seconds",
+            "total_seconds",
+        }
+        assert turn["timing"]["total_seconds"] >= turn["timing"]["llm_seconds"]
+        assert "elapsed_seconds" in turn["tool_results"][0]
+
+        debug_path = tmp_path / "agent.debug.md"
+        raw_path = tmp_path / "agent.raw.json"
+        dump_agent_debug(
+            reviewable_ctx,
+            result.actions,
+            done_event.turn_log,
+            str(debug_path),
+            elapsed=result.elapsed_seconds,
+        )
+        dump_agent_raw(
+            reviewable_ctx,
+            result.actions,
+            done_event.turn_log,
+            str(raw_path),
+            elapsed=result.elapsed_seconds,
+        )
+
+        debug_text = debug_path.read_text(encoding="utf-8")
+        raw = json.loads(raw_path.read_text(encoding="utf-8"))
+        assert "耗时分解" in debug_text
+        assert "模型等待" in debug_text
+        assert "工具执行结果" in debug_text
+        assert set(raw["timing"]) == {
+            "total_seconds",
+            "llm_seconds",
+            "tool_seconds",
+            "other_seconds",
+        }
+        assert raw["turn_log"][0]["tool_results"][0]["elapsed_seconds"] >= 0

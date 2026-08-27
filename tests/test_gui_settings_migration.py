@@ -3,6 +3,8 @@ import json
 from dualign.gui.settings import (
     DualignConfig,
     KEY_ANOMALY_DETECTION,
+    KEY_EFFECTIVE_SOURCES,
+    LEGACY_KEY_APPROVAL_STATES,
 )
 
 
@@ -41,3 +43,23 @@ def test_default_gui_settings_expose_no_alignment_gate_thresholds():
         "zscore_k": 3.0,
         "zscore_min_score": 0.6,
     }
+    assert defaults[KEY_EFFECTIVE_SOURCES] == ["none", "auto", "ai", "user"]
+
+
+def test_legacy_approval_filter_is_migrated_to_effective_sources(tmp_path):
+    path = tmp_path / "gui_config.json"
+    path.write_text(
+        json.dumps({LEGACY_KEY_APPROVAL_STATES: ["none", "agent", "user"]}),
+        encoding="utf-8",
+    )
+    config = DualignConfig()
+    config._file_path = str(path)
+
+    loaded = config.load()
+
+    assert loaded[KEY_EFFECTIVE_SOURCES] == ["none", "ai", "user"]
+    assert LEGACY_KEY_APPROVAL_STATES not in loaded
+    config.save()
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted[KEY_EFFECTIVE_SOURCES] == ["none", "ai", "user"]
+    assert LEGACY_KEY_APPROVAL_STATES not in persisted

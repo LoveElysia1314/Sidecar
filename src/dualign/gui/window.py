@@ -6,7 +6,7 @@ DualignWindow: 主窗口
   │  [审校面板]               │  QStackedWidget           │
   │   └─ 运行日志(可折叠)     │  (欢迎页/文本对表格)       │
   │  [文件管理]               │  ──────────────────────   │
-  │  (原生标签切换)           │  AI 建议列表 (7列)        │
+  │  (原生标签切换)           │  AI 建议列表 (8列)        │
   ├───────────────────────────┴───────────────────────────┤
   │  状态栏 (Ollama/Model/AI 指示灯 + 状态文本)            │
   └───────────────────────────────────────────────────────┘
@@ -67,7 +67,7 @@ from dualign.gui.settings import (
     KEY_CONTEXT_LINES,
     KEY_COMPACT_GRID,
     KEY_ANOMALY_TYPES,
-    KEY_APPROVAL_STATES,
+    KEY_EFFECTIVE_SOURCES,
     KEY_LAST_OPEN_DIR,
     KEY_SHOW_HANDLED,
     KEY_CROSS_GROUP_OP,
@@ -108,6 +108,7 @@ COLUMN_HEADERS = [
     "关系",
     "初始类型",
     "初始评分",
+    "来源",
     "当前状态",
     "当前评分",
     "文档 A",
@@ -395,26 +396,27 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         # 中央：仅表格（面板切换由原生 QTabBar 处理）
         # ══════════════════════════════════════════════════════
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels(COLUMN_HEADERS)
         hdr = self.table.horizontalHeader()
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         hdr.setMinimumSectionSize(0)
         hdr.setStretchLastSection(False)
-        # col 0-4: Fixed（不支持用户拖拽）
+        # col 0-5: Fixed（不支持用户拖拽）
         from dualign.gui.base_table import calc_relation_width
 
         relation_width = calc_relation_width(0)
-        for ci in range(5):
+        for ci in range(6):
             hdr.setSectionResizeMode(ci, QHeaderView.ResizeMode.Fixed)
         hdr.resizeSection(0, relation_width)
         hdr.resizeSection(1, 64)
         hdr.resizeSection(2, 60)
-        hdr.resizeSection(3, 64)
-        hdr.resizeSection(4, 60)
+        hdr.resizeSection(3, 52)
+        hdr.resizeSection(4, 64)
+        hdr.resizeSection(5, 60)
         # 原文/译文均分剩余空间
-        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
         # 列宽变化时重算行高（word-wrap 换行数可能变化）
         hdr.sectionResized.connect(self._on_text_col_resized)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -1042,7 +1044,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
 
     def _on_text_col_resized(self, logical_index: int, _old: int, _new: int):
         """原文/译文列宽变化时，带防抖重算行高（word-wrap 换行数可能变化）。"""
-        if logical_index not in (5, 6):
+        if logical_index not in (6, 7):
             return
         if not hasattr(self, "_row_resize_timer"):
             self._row_resize_timer = QTimer(self)
@@ -1078,10 +1080,10 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
     def _ensure_table_in_stacked(self):
         """确保表格和预览表已添加到 stacked widget 的第 1 页。
 
-        用 QStackedWidget 切换 7 列主表和 4 列预览表，
+        用 QStackedWidget 切换 8 列主表和 4 列预览表，
         避免切换模式时反复修改列数/标题/标题导致视觉闪烁。"""
         if self._stacked and self._stacked.count() < 2:
-            # ── 主表（7 列）──
+            # ── 主表（8 列）──
             g_table = QWidget()
             gl = QVBoxLayout(g_table)
             gl.setContentsMargins(0, 0, 0, 0)
@@ -1871,8 +1873,8 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         # 原始特征：全选
         for cb in fp._origin_checks.values():
             cb.setChecked(True)
-        # 处理状态：全选
-        for cb in fp._state_checks.values():
+        # 有效来源：全选
+        for cb in fp._source_checks.values():
             cb.setChecked(True)
 
         # 修复策略
@@ -2012,7 +2014,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
                 "AND" if fp._cross_group_combo.currentText() == "交集" else "OR",
             )
             cfg.set(KEY_ANOMALY_TYPES, sorted(fp.active_origin_keys))
-            cfg.set(KEY_APPROVAL_STATES, sorted(fp.active_state_keys))
+            cfg.set(KEY_EFFECTIVE_SOURCES, sorted(fp.active_source_keys))
             # AI 审校偏好
             cfg.set("ai_backend", self._review._backend)
             cfg.set("ai_auto_approve", self._review._auto_approve_enabled)
@@ -2068,11 +2070,11 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         )
         for key, cb in fp._origin_checks.items():
             cb.setChecked(key in saved_origin)
-        saved_state = set(history.get(KEY_APPROVAL_STATES, [])) or set(
-            defaults.get(KEY_APPROVAL_STATES, [])
+        saved_sources = set(history.get(KEY_EFFECTIVE_SOURCES, [])) or set(
+            defaults.get(KEY_EFFECTIVE_SOURCES, [])
         )
-        for key, cb in fp._state_checks.items():
-            cb.setChecked(key in saved_state)
+        for key, cb in fp._source_checks.items():
+            cb.setChecked(key in saved_sources)
 
     def _restore_layout(self, history: dict):
         """从配置恢复布局，含拆分布局偏好。"""

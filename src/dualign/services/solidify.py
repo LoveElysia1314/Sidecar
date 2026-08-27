@@ -169,6 +169,28 @@ def _replacement_count(values: object) -> int:
 
 
 @dataclass(frozen=True)
+class SolidificationChange:
+    """One applied relation-level effect with exact document deltas."""
+
+    relation_ids: tuple[str, ...]
+    kind: str
+    source: str
+    effects: tuple[str, ...]
+    document_a_before: tuple[str, ...]
+    document_a_after: tuple[str, ...]
+    document_b_before: tuple[str, ...]
+    document_b_after: tuple[str, ...]
+
+    @property
+    def document_a_changed(self) -> bool:
+        return self.document_a_before != self.document_a_after
+
+    @property
+    def document_b_changed(self) -> bool:
+        return self.document_b_before != self.document_b_after
+
+
+@dataclass(frozen=True)
 class SolidificationPlan:
     baseline: PairEditingState
     solidified: PairEditingState
@@ -176,6 +198,7 @@ class SolidificationPlan:
     remaining_actions: tuple[RepairAction, ...]
     applied: tuple[dict, ...]
     changed_relation_ids: frozenset[str]
+    changes: tuple[SolidificationChange, ...] = ()
 
     @property
     def document_a_changed(self) -> bool:
@@ -315,6 +338,56 @@ def build_solidification_plan(
     relation_to_link = {link.id: link.id for link in state.links}
     pending: list[_PendingAction] = []
     applied: list[dict] = []
+    changes: list[SolidificationChange] = []
+
+    def relation_texts(
+        current: PairEditingState, link_ids: tuple[str, ...]
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        return (
+            tuple(
+                _block_texts(current, _ordered_block_ids(current, link_ids, "a"), "a")
+            ),
+            tuple(
+                _block_texts(current, _ordered_block_ids(current, link_ids, "b"), "b")
+            ),
+        )
+
+    def record_change(
+        action: RepairAction,
+        effects: Iterable[str],
+        before: tuple[tuple[str, ...], tuple[str, ...]],
+        after: tuple[tuple[str, ...], tuple[str, ...]],
+    ) -> None:
+        changes.append(
+            SolidificationChange(
+                relation_ids=action.relation_ids,
+                kind=action.kind,
+                source=action.source,
+                effects=tuple(sorted(effects)),
+                document_a_before=before[0],
+                document_a_after=after[0],
+                document_b_before=before[1],
+                document_b_after=after[1],
+            )
+        )
+
+    def preserve_solidified_review(action: RepairAction, link_id: str) -> None:
+        """Project review provenance after its content becomes the baseline."""
+
+        if not set(action.reviewers).intersection({"ai", "user"}):
+            return
+        metadata = {}
+        if action.reviewers:
+            metadata["reviewed_by"] = list(action.reviewers)
+        approvals = action.data.get("approvals")
+        if approvals:
+            metadata["approvals"] = approvals
+        review = RepairAction.make_ok(
+            link_id,
+            source=action.source,
+            **metadata,
+        )
+        pending.append(_PendingAction(review, (link_id,)))
 
     def links_for(action: RepairAction) -> tuple[str, ...]:
         result: list[str] = []
@@ -361,6 +434,7 @@ def build_solidification_plan(
             if not selected:
                 pending.append(_PendingAction(action, link_ids))
                 continue
+            before = relation_texts(state, link_ids)
             anchor = merge_links(link_ids, action.relation_ids)
             kwargs = {}
             if "a" in selected:
@@ -372,16 +446,25 @@ def build_solidification_plan(
                     _smart_join_lines(_block_texts(state, ids_b, "b"))
                 ]
             state = state.edit_link_content(anchor, **kwargs)
+            selected_effects = tuple(effects[s] for s in selected)
             applied.append(
                 {
                     "action": action.to_dict(),
-                    "effects": sorted(effects[s] for s in selected),
+                    "effects": sorted(selected_effects),
                 }
+            )
+            record_change(
+                action,
+                selected_effects,
+                before,
+                relation_texts(state, (anchor,)),
             )
             remaining_sides = set(effects) - selected
             if remaining_sides:
                 residual = _action_copy(action, data={})
                 pending.append(_PendingAction(residual, (anchor,)))
+            else:
+                preserve_solidified_review(action, anchor)
             continue
 
         if action.kind == "split":
@@ -405,6 +488,7 @@ def build_solidification_plan(
             if selected != affected:
                 pending.append(_PendingAction(action, link_ids))
                 continue
+            before = relation_texts(state, link_ids)
             anchor = merge_links(link_ids, action.relation_ids)
             kwargs = {
                 "document_a" if side == "a" else "document_b": list(
@@ -413,12 +497,20 @@ def build_solidification_plan(
                 for side in affected
             }
             state = state.edit_link_content(anchor, **kwargs)
+            selected_effects = tuple(f"split_{side}" for side in affected)
             applied.append(
                 {
                     "action": action.to_dict(),
-                    "effects": sorted(f"split_{side}" for side in affected),
+                    "effects": sorted(selected_effects),
                 }
             )
+            record_change(
+                action,
+                selected_effects,
+                before,
+                relation_texts(state, (anchor,)),
+            )
+            preserve_solidified_review(action, anchor)
             continue
 
         if action.kind == "edit":
@@ -437,17 +529,25 @@ def build_solidification_plan(
             if not selected:
                 pending.append(_PendingAction(action, link_ids))
                 continue
+            before = relation_texts(state, link_ids)
             anchor = merge_links(link_ids, action.relation_ids)
             kwargs = {
                 candidates[side][2]: list(action.data.get(candidates[side][1]) or ())
                 for side in selected
             }
             state = state.edit_link_content(anchor, **kwargs)
+            selected_effects = tuple(candidates[s][0] for s in selected)
             applied.append(
                 {
                     "action": action.to_dict(),
-                    "effects": sorted(candidates[s][0] for s in selected),
+                    "effects": sorted(selected_effects),
                 }
+            )
+            record_change(
+                action,
+                selected_effects,
+                before,
+                relation_texts(state, (anchor,)),
             )
             remaining_sides = present - selected
             if remaining_sides:
@@ -462,15 +562,19 @@ def build_solidification_plan(
                 pending.append(
                     _PendingAction(_action_copy(action, data=data), (anchor,))
                 )
+            else:
+                preserve_solidified_review(action, anchor)
             continue
 
         if action.kind == "delete":
             if not policy.includes("delete_pair"):
                 pending.append(_PendingAction(action, link_ids))
                 continue
+            before = relation_texts(state, link_ids)
             anchor = merge_links(link_ids, action.relation_ids)
             state = state.delete_link_content(anchor)
             applied.append({"action": action.to_dict(), "effects": ["delete_pair"]})
+            record_change(action, ("delete_pair",), before, ((), ()))
             continue
 
         pending.append(_PendingAction(action, link_ids))
@@ -503,6 +607,7 @@ def build_solidification_plan(
         remaining_actions=tuple(remaining),
         applied=tuple(applied),
         changed_relation_ids=changed_relation_ids,
+        changes=tuple(changes),
     )
 
 

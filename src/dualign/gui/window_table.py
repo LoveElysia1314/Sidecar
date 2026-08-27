@@ -36,11 +36,12 @@ from dualign.models.marker import (
     needs_zero_score,
     format_anomaly_line,
 )
-from dualign.models.relation_status import RelationAnomaly
+from dualign.models.relation_status import RelationAnomaly, manual_review_counts
 from dualign.gui.base_table import (
     CHANGED_FLAG_ROLE,
     type_cl,
     marker_cl,
+    source_cl,
     anomaly_cl,
     priority_anomaly_type,
     compute_text_colors,
@@ -59,6 +60,7 @@ COLUMN_HEADERS = [
     "关系",
     "初始类型",
     "初始评分",
+    "来源",
     "当前状态",
     "当前评分",
     "文档 A",
@@ -300,7 +302,7 @@ class WindowTableMixin:
             return
 
         col = item.column()
-        if col not in (5, 6):
+        if col not in (6, 7):
             self._hover_cancel()
             return
 
@@ -359,12 +361,12 @@ class WindowTableMixin:
             snapshot = self._repair_state.snapshot
             if 0 <= ordinal < len(snapshot.original_ops):
                 s_idx, t_idx, _ = snapshot.original_ops[ordinal]
-                if col == 5:
+                if col == 6:
                     if s_idx:
                         initial_text = "\n".join(snapshot.src_text(i) for i in s_idx)
                     else:
                         initial_text = "（初始为空）"
-                elif col == 6:
+                elif col == 7:
                     if t_idx:
                         initial_text = "\n".join(snapshot.tgt_text(j) for j in t_idx)
                     else:
@@ -730,12 +732,12 @@ class WindowTableMixin:
         )
         for row_idx, row in enumerate(getattr(self, "_render_cache_rows", [])):
             if row.ordinal == ordinal and row.sub == sub:
-                cell = self.table.item(row_idx, 4)
+                cell = self.table.item(row_idx, 5)
                 if cell:
                     from dualign.gui.base_table import make_score_cell
 
                     new_cell = make_score_cell(new_score, show_scores, precision=1)
-                    self.table.setItem(row_idx, 4, new_cell)
+                    self.table.setItem(row_idx, 5, new_cell)
                 break
 
     def _on_preview_flat_ready(self, batch_id: int, scores):
@@ -828,6 +830,7 @@ class WindowTableMixin:
         if fp is None:
             self._anomalies = []
             self._review.set_anomalies([])
+            self._sync_workspace_review_status(relation_statuses)
             return
 
         sf = fp.relation_filter
@@ -852,24 +855,31 @@ class WindowTableMixin:
             atypes = (
                 st.current_anomaly_types if fp.ref_current else st.initial_anomaly_types
             )
+            selected_origins = fp.active_origin_keys
             origin_match = (
                 any(k in atypes for k in fp.active_origin_keys if k != "FLAGGED")
                 or ("FLAGGED" in fp.active_origin_keys and st.is_flagged)
-                if fp.active_origin_keys
+                if selected_origins
                 else False
             )
 
-            # ── 处理状态匹配（同组 OR）──
-            state_match = (
-                st.approval in fp.active_state_keys if fp.active_state_keys else False
-            )
+            # ── 有效来源匹配（同组 OR）──
+            selected_sources = fp.active_source_keys
+            source_match = st.effective_source in selected_sources
 
             # ── 跨组逻辑：AND 或 OR ──
             if sf.cross_group_op == "AND":
-                if not origin_match or not state_match:
+                if (selected_origins and not origin_match) or (
+                    selected_sources and not source_match
+                ):
                     continue
             else:  # OR
-                if not origin_match and not state_match:
+                active_matches = []
+                if selected_origins:
+                    active_matches.append(origin_match)
+                if selected_sources:
+                    active_matches.append(source_match)
+                if active_matches and not any(active_matches):
                     continue
 
             # 无任何异常特征且无操作 → 跳过
@@ -897,15 +907,45 @@ class WindowTableMixin:
                     marker=r0.marker,
                     resolution=resolution,
                     note=flag_action.data.get("note", "") if flag_action else "",
-                    approval=st.approval,
+                    effective_source=st.effective_source,
+                    is_user_approved=st.is_user_approved,
                     signals=tuple(st.signals),
                     anomaly_types=tuple(st.initial_anomaly_types),
                 )
             )
-            # 构建当前文本异常映射（col 3 Layer 2 用）
+            # 构建当前文本异常映射（col 4 Layer 2 用）
             self._current_atypes_map[si] = set(st.current_anomaly_types)
 
         self._review.set_anomalies(self._anomalies)
+        self._sync_workspace_review_status(relation_statuses)
+
+    def _sync_workspace_review_status(self, relation_statuses) -> None:
+        """Project current human-review progress onto the active file-pair row."""
+
+        workspace = getattr(self, "_workspace", None)
+        src_path = getattr(self, "_src_path", "")
+        tgt_path = getattr(self, "_tgt_path", "")
+        if workspace is None or not src_path or not tgt_path:
+            return
+
+        all_counts = manual_review_counts(relation_statuses)
+        filtered_ordinals = {
+            ordinal
+            for anomaly in self._anomalies
+            for ordinal in anomaly.ordinals
+            if 0 <= ordinal < len(relation_statuses)
+        }
+        filtered_counts = manual_review_counts(
+            [relation_statuses[ordinal] for ordinal in sorted(filtered_ordinals)]
+        )
+        workspace.update_review_status(
+            src_path,
+            tgt_path,
+            all_subjects=all_counts.subjects,
+            all_required=all_counts.required,
+            filtered_subjects=filtered_counts.subjects,
+            filtered_required=filtered_counts.required,
+        )
 
     def _apply_filter(self):
         """筛选 + 渲染表格。先重建异常列表以反映最新质量控制勾选。
@@ -1047,7 +1087,7 @@ class WindowTableMixin:
                     smart_join_lines([r.tgt_text for r in g.rows if r.tgt_text])
                 )
             else:
-                # [E]/[S]/[P]/[OK]/[F]/无标记: 取子行文本，跳过空串
+                # [E]/[S]/[P]/[F]/无标记: 取子行文本，跳过空串
                 for r in g.rows:
                     if r.src_text:
                         src_out.append(r.src_text)
@@ -1228,7 +1268,7 @@ class WindowTableMixin:
     def _compute_cur_type_text(
         row: RelationRow, cur_atypes: Set[str], show_cur: bool
     ) -> str:
-        """计算当前状态列文本（col 3, 两层: 标记 + 异常标签）。"""
+        """计算当前状态列文本（col 4, 两层: 标记 + 异常标签）。"""
         if not show_cur:
             return ""
         l1 = row.marker if row.marker else ""
@@ -1277,16 +1317,17 @@ class WindowTableMixin:
         anomaly_signals: Dict[int, List[str]],
         context_ordinals: Set[int],
     ):
-        """渲染 7 列表格。每格颜色在创建时即确定，无后置覆盖。
+        """渲染 8 列表格。每格颜色在创建时即确定，无后置覆盖。
 
         着色规则:
           col 0 (关系):       #888 灰色
           col 1 (init_type):  type_cl(init_type) — 1:1 灰 / N:M 金 / 1:0 红
           col 2 (init_score): score_to_color(orig) — 连续渐变
           col 3 (cur_type):    marker_cl > type_cl(cur_type) — 有标记则优先
-          col 4 (cur_score):  score_to_color(cur) — 连续渐变
-          col 5 (src):        [D] → 暗红+删除线 / 上下文 → 灰斜体 / 异常 → anomaly_cl / 默认 TEXT_CL_NORMAL
-          col 6 (tgt):        同上
+          col 4 (source):     none / auto / ai / user
+          col 5 (cur_score):  score_to_color(cur) — 连续渐变
+          col 6 (src):        [D] → 暗红+删除线 / 上下文 → 灰斜体 / 异常 → anomaly_cl / 默认 TEXT_CL_NORMAL
+          col 7 (tgt):        同上
         """
         self._render_cache_rows = rows
         self._render_in_progress = True
@@ -1310,7 +1351,7 @@ class WindowTableMixin:
             if sr < len(rows) and rs > 1:
                 table.setSpan(sr, col, rs, cs)
 
-        covered_cur_rows = set(projection.covered_rows(3))
+        covered_cur_rows = set(projection.covered_rows(4))
 
         # ── 单元格级分隔虚线 ──
         self._divider_delegate.set_divider_cells(set(projection.divider_cells))
@@ -1330,7 +1371,7 @@ class WindowTableMixin:
         # 评分列：明细→数字，紧凑→6px 色带
         hdr = table.horizontalHeader()
         # 评分列切换 56px（明细）或 6px（紧凑色带）
-        for col in (2, 4):
+        for col in (2, 5):
             table.setColumnHidden(col, False)
             hdr.resizeSection(col, 60 if show_scores else 6)
             table.horizontalHeaderItem(col).setText(
@@ -1349,7 +1390,7 @@ class WindowTableMixin:
             is_del = is_deleted(row.marker)
             show_cur = i not in covered_cur_rows
             atypes = anomaly_ordinals.get(row.ordinal, set())
-            # col 3 Layer 2 始终基于当前文本结构，直接读取 _rebuild_anomalies 构建的映射
+            # col 4 Layer 2 始终基于当前文本结构，直接读取 _rebuild_anomalies 构建的映射
             cur_atypes = self._current_atypes_map.get(row.ordinal, set())
             if is_ctx:
                 ctx_rows.add(i)
@@ -1364,7 +1405,7 @@ class WindowTableMixin:
             # ── 初始类型 (col 1) ──
             init_display = self._compute_init_type_display(row)
 
-            # col 3: 两层显示（标记 + 异常标签）
+            # col 4: 两层显示（标记 + 异常标签）
             cur_text = self._compute_cur_type_text(row, cur_atypes, show_cur)
 
             # ── 预计算每格颜色 ──
@@ -1384,29 +1425,45 @@ class WindowTableMixin:
                 None,  # col 0: 关系 — 默认色
                 type_cl(row.init_type),  # col 1: 初始类型色
                 None,  # col 2: 评分色（由 make_score_cell 自行处理）
+                source_cl(row.effective_source),  # col 3: 有效来源类别色
                 (
-                    marker_cl(row.marker)
+                    marker_cl(row.marker, row.effective_source)
                     if row.marker
                     else (
                         anomaly_cl(priority_anomaly_type(cur_atypes))
                         if cur_atypes
                         else _color_table.TYPE_CL_11
                     )
-                ),  # col 3: Layer1 标记色 / Layer2 异常色 / 灰
-                None,  # col 4: 当前评分色（由 make_score_cell 自行处理）
+                ),  # col 4: Layer1 标记色 / Layer2 异常色 / 灰
+                None,  # col 5: 当前评分色（由 make_score_cell 自行处理）
                 text_color_for_side(
-                    True, src_changed, tgt_changed, is_del, is_ctx, row.marker, atypes
-                ),  # col 5: src
+                    True,
+                    src_changed,
+                    tgt_changed,
+                    is_del,
+                    is_ctx,
+                    row.marker,
+                    atypes,
+                    row.effective_source,
+                ),  # col 6: src
                 text_color_for_side(
-                    False, src_changed, tgt_changed, is_del, is_ctx, row.marker, atypes
-                ),  # col 6: tgt
+                    False,
+                    src_changed,
+                    tgt_changed,
+                    is_del,
+                    is_ctx,
+                    row.marker,
+                    atypes,
+                    row.effective_source,
+                ),  # col 7: tgt
             ]
             texts = [
                 relation_display,
                 init_display,
                 "",  # col 2: 初始评分（由 make_score_cell 填充）
+                row.effective_source,
                 cur_text,
-                "",  # col 4: 当前评分（由 make_score_cell 填充）
+                "",  # col 5: 当前评分（由 make_score_cell 填充）
                 src_text,
                 tgt_text,
             ]
@@ -1419,7 +1476,7 @@ class WindowTableMixin:
                     it = make_score_cell(row.orig_score, show_scores)
                     if show_scores and row.init_score_text:
                         it.setText(row.init_score_text)
-                elif ci == 4:
+                elif ci == 5:
                     if (i, ci) in spanned_cells:
                         # Qt 不显示被 span 覆盖的格，也不应为它创建无意义的评分请求。
                         it = QTableWidgetItem("")
@@ -1463,14 +1520,14 @@ class WindowTableMixin:
             if flag_note:
                 tooltip = f"标记注释：{flag_note}"
                 items[0].setToolTip(tooltip)
-                items[3].setToolTip(tooltip)
-            if si in changed_src and len(items) > 5:
-                items[5].setData(CHANGED_FLAG_ROLE, True)
-            if si in changed_tgt and len(items) > 6:
+                items[4].setToolTip(tooltip)
+            if si in changed_src and len(items) > 6:
                 items[6].setData(CHANGED_FLAG_ROLE, True)
+            if si in changed_tgt and len(items) > 7:
+                items[7].setData(CHANGED_FLAG_ROLE, True)
 
-            # 对齐：col 0-4 居中，col 5-6 左对齐
-            for ci in range(5):
+            # 对齐：col 0-5 居中，col 6-7 左对齐
+            for ci in range(6):
                 items[ci].setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
             # 删除行：全列加删除线 + 暗前景
@@ -1499,13 +1556,13 @@ class WindowTableMixin:
 
         # ── 行高：自计算 + deficit-fill 均摊 ──
         # 基线排除所有跨行 span 锚点格，仅用非 span 列确定每行最小高度。
-        # 然后对所有跨行列（col 1-6）做 deficit-fill。
+        # 然后对所有跨行列（col 1-7）做 deficit-fill。
         table.setWordWrap(True)
         table.setTextElideMode(Qt.TextElideMode.ElideNone)
         table.setUpdatesEnabled(True)
 
         font = table.font()
-        col_widths = [table.columnWidth(c) for c in range(7)]
+        col_widths = [table.columnWidth(c) for c in range(8)]
         PAD = 4
 
         def _cell_px(row_i: int, col_i: int) -> int:
@@ -1536,12 +1593,12 @@ class WindowTableMixin:
         # 基线：仅取非 span 锚点格的原生高度
         base = [0] * len(rows)
         for i in range(len(rows)):
-            for ci in range(7):
+            for ci in range(8):
                 if (i, ci) in anchor_coords or (i, ci) in spanned_cells:
                     continue
                 base[i] = max(base[i], _cell_px(i, ci))
 
-        # 对每个跨行 span（col 1-6）做 deficit-fill
+        # 对每个跨行 span（col 1-7）做 deficit-fill
         for (sr, col), (rs, _) in sorted(spans.items()):
             if rs <= 1 or col == 0:
                 continue

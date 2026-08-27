@@ -105,7 +105,9 @@ def test_stable_action_identity_is_authoritative_over_stale_position():
     )
 
     assert state.action_ordinal(state.repair_log[0]) == 1
-    assert state.current.group(1).rows[0].marker == "[OK]"
+    row = state.current.group(1).rows[0]
+    assert row.marker == ""
+    assert row.effective_source == "auto"
 
 
 def test_cross_relation_action_is_queryable_and_reset_from_every_target():
@@ -179,6 +181,21 @@ def test_action_rejects_missing_stable_identity():
 
     with pytest.raises(ValueError):
         store.add(RepairAction(kind="ok"))
+
+
+def test_explicit_rereview_removes_every_proposal_touching_the_relation():
+    store = AiProposalStore()
+    first = RepairAction.make_edit(
+        ("relation-a", "relation-b"), source="ai", new_tgt_lines=["first"]
+    )
+    second = RepairAction.make_ok("relation-c", source="ai")
+    store.add(first)
+    store.accept(first)
+    store.add(second)
+
+    assert store.remove_for_relations({"relation-b"}) == 1
+    assert store.get("relation-a") == []
+    assert store.get("relation-c")[0].action == second
 
 
 def test_canonicalized_legacy_positions_create_an_id_only_action():

@@ -25,6 +25,11 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QComboBox,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QAbstractItemView,
+    QSplitter,
 )
 
 _DEFAULT_EMBEDDING_INSTRUCTION = (
@@ -1065,16 +1070,75 @@ class SolidifyReviewDialog(QDialog):
         label.setStyleSheet("font-weight:600;color:#2E7D32;")
         layout.addWidget(label)
 
-        tabs = QTabWidget()
+        self._change_table = QTableWidget(len(plan.changes), 4)
+        self._change_table.setHorizontalHeaderLabels(
+            ["关系", "操作", "文档 A 变化", "文档 B 变化"]
+        )
+        self._change_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self._change_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self._change_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._change_table.setAlternatingRowColors(True)
+        self._change_table.setWordWrap(True)
+        self._change_table.verticalHeader().setVisible(False)
+        header = self._change_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+
+        for row, change in enumerate(plan.changes):
+            relation = "、".join(change.relation_ids)
+            operation = self._operation_text(change, SOLIDIFY_TYPE_LABELS)
+            document_a = self._side_change_text(
+                change.document_a_before, change.document_a_after
+            )
+            document_b = self._side_change_text(
+                change.document_b_before, change.document_b_after
+            )
+            for column, content in enumerate(
+                (relation, operation, document_a, document_b)
+            ):
+                item = QTableWidgetItem(content)
+                item.setToolTip(content)
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+                )
+                self._change_table.setItem(row, column, item)
+            self._change_table.setRowHeight(row, 76)
+        layout.addWidget(self._change_table, 1)
+
+        self._diff_details = QGroupBox("完整文档差异")
+        self._diff_details.setCheckable(True)
+        self._diff_details.setChecked(False)
+        details_layout = QVBoxLayout(self._diff_details)
+        self._diff_container = QWidget()
+        container_layout = QVBoxLayout(self._diff_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        self._diff_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._diff_editors = []
         for title, content in (
             ("文档 A", plan.document_a_diff()),
             ("文档 B", plan.document_b_diff()),
         ):
+            panel = QWidget()
+            panel_layout = QVBoxLayout(panel)
+            panel_layout.setContentsMargins(0, 0, 0, 0)
+            panel_layout.addWidget(QLabel(title))
             editor = QPlainTextEdit(content or "（无变化）")
             editor.setReadOnly(True)
             editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-            tabs.addTab(editor, title)
-        layout.addWidget(tabs, 1)
+            panel_layout.addWidget(editor, 1)
+            self._diff_editors.append(editor)
+            self._diff_splitter.addWidget(panel)
+        container_layout.addWidget(self._diff_splitter)
+        details_layout.addWidget(self._diff_container)
+        self._diff_container.setVisible(False)
+        self._diff_details.toggled.connect(self._diff_container.setVisible)
+        layout.addWidget(self._diff_details)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
@@ -1086,6 +1150,26 @@ class SolidifyReviewDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    @staticmethod
+    def _side_change_text(before, after) -> str:
+        if tuple(before) == tuple(after):
+            return "—"
+        lines = [f"− {line}" for line in before]
+        lines.extend(f"+ {line}" for line in after)
+        return "\n".join(lines) or "—"
+
+    @staticmethod
+    def _operation_text(change, labels) -> str:
+        kinds = {
+            "merge": "合并 [M]",
+            "split": "拆分 [S]",
+            "edit": "校订 [E]",
+            "delete": "删除 [D]",
+        }
+        effects = "、".join(labels[value] for value in change.effects)
+        source = change.source or "auto"
+        return f"{kinds.get(change.kind, change.kind)}\n{effects}\n来源：{source}"
 
 
 # ═══════════════════════════════════════════════════════════════

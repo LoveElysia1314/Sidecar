@@ -42,7 +42,11 @@ dualign = "dualign.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-dualign = ["resources/*.json"]
+dualign = [
+    "resources/*.json",
+    "services/prompts/*.json",
+    "services/prompts/*.md",
+]
 
 # ═══════════════════════════════════════════════════════════════
 # 代码质量工具配置

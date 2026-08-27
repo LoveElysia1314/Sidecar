@@ -16,6 +16,7 @@ from dualign.core import (
 )
 from dualign.core.calibration import resolve_alignment_calibration
 from dualign.services.cached_encoder import CachedEncoder
+from dualign.services.cancellation import CancellationToken
 from dualign.services.embedding_cache import EmbeddingCache
 from dualign.services.report_io import (
     ReportError,
@@ -284,7 +285,7 @@ def _auto_repair_state(
     needs_embeddings = repair_model is not None and any(
         (plan := choose_auto_repair(len(source), len(target), repair_strategy))
         is not None
-        and plan.requires_model
+        and plan.may_require_model
         for source, target, _score in state.snapshot.original_ops
     )
     if not needs_embeddings:
@@ -306,6 +307,7 @@ def align_documents(
     reuse_alignment: bool = True,
     preserve_work_state: bool = False,
     previous_report_path: str | Path = "",
+    cancellation_token: CancellationToken | None = None,
 ) -> dict:
     """Align two documents and persist only their replayable work report.
 
@@ -317,6 +319,11 @@ def align_documents(
     by a caller after upstream text changed; it is never treated as a cache hit.
     """
 
+    def check_cancelled() -> None:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
+
+    check_cancelled()
     path_a = Path(document_a_path)
     path_b = Path(document_b_path)
     if not path_a.is_file():
@@ -327,6 +334,7 @@ def align_documents(
     cfg = config or AlignConfig()
     lines_a = load_text_lines(str(path_a))
     lines_b = load_text_lines(str(path_b))
+    check_cancelled()
 
     encoder = model
     if lines_a and lines_b:
@@ -416,6 +424,7 @@ def align_documents(
                         repair_log=repair_log,
                         previous=cached if preserve_work_state else None,
                     )
+                    check_cancelled()
                     save_report(report, target)
                     return {
                         "success": True,
@@ -445,15 +454,20 @@ def align_documents(
     if lines_a and lines_b:
         with EmbeddingCache(get_embedding_cache_path()) as cache:
             cached_encoder = CachedEncoder(encoder, cache)
+            embeddings_a = cached_encoder.encode(lines_a)
+            check_cancelled()
+            embeddings_b = cached_encoder.encode(lines_b)
+            check_cancelled()
             result = _run_alignment(
                 lines_a,
                 lines_b,
-                cached_encoder.encode(lines_a),
-                cached_encoder.encode(lines_b),
+                embeddings_a,
+                embeddings_b,
                 cfg,
                 cached_encoder.encode,
                 resolved.calibration if resolved is not None else None,
             )
+            check_cancelled()
     else:
         result = _empty_result(len(lines_a), len(lines_b), cfg)
 
@@ -575,6 +589,7 @@ def align_documents(
         document_a_lines=lines_a,
         document_b_lines=lines_b,
     )
+    check_cancelled()
     save_report(report, target)
     return {
         "success": True,

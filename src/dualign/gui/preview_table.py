@@ -2,7 +2,7 @@
 Dualign — SuggestionPreviewTable + AiSuggestionItem
 
 AI 建议表格的行数据模型 + 预览表。
-7 列，与主对齐表完全一致，仅 3 列覆写为预览。
+8 列，与主对齐表完全一致，仅预览状态、来源与文本使用建议投影。
 """
 
 from __future__ import annotations
@@ -14,12 +14,14 @@ from PySide6.QtWidgets import QHeaderView, QSizePolicy
 
 from dualign.models.action import RepairAction
 from dualign.models.marker import from_kind as _marker_from_kind
-from dualign.models.marker import AI_PREFIX
+from dualign.models.marker import is_deleted
 from dualign.gui.base_table import (
     BaseTextTable,
     make_score_cell,
     CHANGED_FLAG_ROLE,
     marker_cl,
+    source_cl,
+    text_color_for_side,
     type_cl,
 )
 import dualign.gui.base_table as _color_table  # 主题感知颜色，通过模块访问
@@ -52,6 +54,7 @@ class AiSuggestionItem:
         n_tgt: int = 1,
         init_src_text: str = "",
         init_tgt_text: str = "",
+        effective_source: str | None = None,
     ):
         self.ordinal = ordinal
         self.action = action
@@ -72,6 +75,9 @@ class AiSuggestionItem:
         self.orig_score = init_score
         self.init_src_text = init_src_text
         self.init_tgt_text = init_tgt_text
+        self.effective_source = effective_source or (
+            action.effective_source if action else "none"
+        )
         self.star_src: bool = False
         self.star_tgt: bool = False
 
@@ -81,7 +87,7 @@ class AiSuggestionItem:
 
 
 class SuggestionPreviewTable(BaseTextTable):
-    """AI 建议执行效果预览表。7 列，3 列覆写为预览数据。
+    """AI 建议执行效果预览表。8 列，预览当前有效结果。
 
     使用基类钩子体系，无需覆写 _render() 整体流程。
     """
@@ -90,6 +96,7 @@ class SuggestionPreviewTable(BaseTextTable):
         "关系",
         "初始类型",
         "初始评分",
+        "来源",
         "预览状态",
         "预览评分",
         "文档 A 预览",
@@ -106,15 +113,16 @@ class SuggestionPreviewTable(BaseTextTable):
         hdr = self.table.horizontalHeader()
         from dualign.gui.base_table import calc_relation_width
 
-        for ci in range(5):
+        for ci in range(6):
             hdr.setSectionResizeMode(ci, QHeaderView.ResizeMode.Fixed)
         hdr.resizeSection(0, calc_relation_width(0))
         hdr.resizeSection(1, 64)
         hdr.resizeSection(2, 60)
-        hdr.resizeSection(3, 64)
-        hdr.resizeSection(4, 60)
-        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        hdr.resizeSection(3, 52)
+        hdr.resizeSection(4, 64)
+        hdr.resizeSection(5, 60)
         hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
 
     # ── 基类钩子实现 ──
 
@@ -123,7 +131,7 @@ class SuggestionPreviewTable(BaseTextTable):
         show = self._show_scores
         hdr = self.table.horizontalHeader()
         _HEADERS = self.COL_HEADERS
-        for col in (2, 4):
+        for col in (2, 5):
             self.table.setColumnHidden(col, False)
             hdr.resizeSection(col, 60 if show else 6)
             self.table.horizontalHeaderItem(col).setText(_HEADERS[col] if show else "")
@@ -158,13 +166,8 @@ class SuggestionPreviewTable(BaseTextTable):
         比较 init_src_text/init_tgt_text 与当前预览文本。
         """
         marker = item.marker
-        # 预览表中 [AI] 前缀冗余（整表已是 AI 建议上下文），剥离后显示
-        display_marker = marker.replace(AI_PREFIX, "").strip()
         is_first = item.sub == 0
-        is_del = "[D]" in marker or marker == "[D]"
-
-        # 统一方案下 [AI] 前缀仅与操作标记结合出现（如 [AI][OK]），
-        # 剥离前缀后自然显示为 [OK]，无需独立转译。
+        is_del = is_deleted(marker)
 
         relation_text = str(item.ordinal) if is_first else ""
         self._set_cell(row, 0, relation_text, align=Qt.AlignCenter)
@@ -177,27 +180,38 @@ class SuggestionPreviewTable(BaseTextTable):
         # Col 2: 初始评分（紧凑模式→色带，明细模式→数字）
         self.table.setItem(row, 2, make_score_cell(item.init_score, self._show_scores))
 
-        # Col 3: 预览状态（显示时剥离 [AI] 前缀）
+        # Col 3: AI 建议自身的生成来源。应用者不会回写提案来源。
+        self._set_cell(
+            row,
+            3,
+            item.effective_source,
+            fg=source_cl(item.effective_source).name(),
+            align=Qt.AlignCenter,
+        )
+
+        # Col 4: 预览操作状态
         show_cur = is_first or not hide_cur
         if item.status == "已应用":
-            cur = "✓ " + (display_marker if (display_marker and show_cur) else "")
+            cur = "✓ " + (marker if (marker and show_cur) else "")
         else:
-            cur = display_marker if (display_marker and show_cur) else ""
-        # 颜色：纯 AI 确认时用 [OK] 色（绿色），否则用原始 marker 色
-        color_marker = display_marker if marker == AI_PREFIX else marker
-        fg_cur = marker_cl(color_marker) if color_marker else _color_table.TYPE_CL_11
-        self._set_cell(row, 3, cur, fg=fg_cur.name(), align=Qt.AlignCenter)
+            cur = marker if (marker and show_cur) else ""
+        fg_cur = (
+            marker_cl(marker, item.effective_source)
+            if marker
+            else _color_table.TYPE_CL_11
+        )
+        self._set_cell(row, 4, cur, fg=fg_cur.name(), align=Qt.AlignCenter)
 
-        # Col 4: 预览评分（紧凑模式→色带，明细模式→数字）
-        self.table.setItem(row, 4, make_score_cell(item.score, self._show_scores))
+        # Col 5: 预览评分（紧凑模式→色带，明细模式→数字）
+        self.table.setItem(row, 5, make_score_cell(item.score, self._show_scores))
 
-        # Col 5-6: 原文/译文预览 — 星标由 _rebuild_ai_suggestions 按语义计算
+        # Col 6-7: 原文/译文预览 — 星标由 _rebuild_ai_suggestions 按语义计算
         src_changed = item.star_src
         tgt_changed = item.star_tgt
 
         for col, text, changed in (
-            (5, item.src_text, src_changed),
-            (6, item.tgt_text, tgt_changed),
+            (6, item.src_text, src_changed),
+            (7, item.tgt_text, tgt_changed),
         ):
             if is_del:
                 cell = self._set_cell(
@@ -206,10 +220,18 @@ class SuggestionPreviewTable(BaseTextTable):
                 f = cell.font()
                 f.setStrikeOut(True)
                 cell.setFont(f)
-            elif marker:
-                self._set_cell(row, col, text, fg=marker_cl(color_marker).name())
             else:
-                self._set_cell(row, col, text, fg=_color_table.TEXT_CL_NORMAL.name())
+                color = text_color_for_side(
+                    col == 6,
+                    src_changed,
+                    tgt_changed,
+                    False,
+                    False,
+                    marker,
+                    set(),
+                    item.effective_source,
+                )
+                self._set_cell(row, col, text, fg=color.name())
             if changed:
                 cell = self.table.item(row, col)
                 if cell:
@@ -224,7 +246,7 @@ class SuggestionPreviewTable(BaseTextTable):
         self._render()
         from PySide6.QtCore import QTimer
 
-        if main_table.horizontalHeader().count() < 7:
+        if main_table.horizontalHeader().count() < 8:
             QTimer.singleShot(50, self._adjust_row_heights)
             return
 
@@ -232,12 +254,12 @@ class SuggestionPreviewTable(BaseTextTable):
 
     def _sync_widths(self, main_table):
         """实际执行列宽同步。只调尺寸不调内容。"""
-        if main_table.horizontalHeader().count() < 7:
+        if main_table.horizontalHeader().count() < 8:
             self._adjust_row_heights()
             return
         hdr = main_table.horizontalHeader()
         phdr = self.table.horizontalHeader()
-        for sc, dc in ((0, 0), (1, 1), (3, 3), (5, 5), (6, 6)):
+        for sc, dc in ((0, 0), (1, 1), (3, 3), (4, 4), (6, 6), (7, 7)):
             sz = hdr.sectionSize(sc)
             if sz > 40:
                 phdr.resizeSection(dc, sz)

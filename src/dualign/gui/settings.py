@@ -11,6 +11,8 @@ import json
 import os
 from typing import Any, Dict, Optional
 
+from dualign.models.source import ALL_EFFECTIVE_SOURCES, canonical_source
+
 # ═══════════════════════════════════════════════════════════════
 # 配置键常量
 # ═══════════════════════════════════════════════════════════════
@@ -22,7 +24,9 @@ KEY_AUTO_NEXT_CHAPTER = "auto_next_chapter"
 # 筛选
 KEY_SHOW_ALL = "show_all"
 KEY_ANOMALY_TYPES = "anomaly_types"
-KEY_APPROVAL_STATES = "approval_states"
+KEY_EFFECTIVE_SOURCES = "effective_sources"
+# 仅用于读取旧版 GUI 配置；新代码不再写入该键。
+LEGACY_KEY_APPROVAL_STATES = "approval_states"
 KEY_LAST_OPEN_DIR = "last_open_dir"
 
 # 显示选项
@@ -38,13 +42,6 @@ ALL_ANOMALY_TYPES = [
     "LOW_SCORE",
     "FLAGGED",
 ]
-ALL_APPROVAL_STATES = [
-    "none",
-    "auto",
-    "agent",
-    "user",
-]
-
 # 对齐后的异常诊断
 KEY_ANOMALY_DETECTION = "anomaly_detection"
 KEY_SOLIDIFY_TYPES = "solidify_types"
@@ -102,6 +99,15 @@ class DualignConfig:
         except Exception:
             self._data = {}
         self._dirty = self._data.pop("quality_gate", None) is not None
+        if KEY_EFFECTIVE_SOURCES not in self._data:
+            legacy_sources = self._data.pop(LEGACY_KEY_APPROVAL_STATES, None)
+            if isinstance(legacy_sources, list):
+                self._data[KEY_EFFECTIVE_SOURCES] = list(
+                    dict.fromkeys(canonical_source(value) for value in legacy_sources)
+                )
+                self._dirty = True
+        elif self._data.pop(LEGACY_KEY_APPROVAL_STATES, None) is not None:
+            self._dirty = True
         return self.snapshot()
 
     def save(self) -> None:
@@ -145,7 +151,7 @@ class DualignConfig:
             KEY_SHOW_HANDLED: True,  # AI 建议表默认显示已处理
             KEY_CROSS_GROUP_OP: "AND",
             KEY_ANOMALY_TYPES: list(ALL_ANOMALY_TYPES),
-            KEY_APPROVAL_STATES: list(ALL_APPROVAL_STATES),
+            KEY_EFFECTIVE_SOURCES: list(ALL_EFFECTIVE_SOURCES),
             # 修复策略
             KEY_STRATEGY: 1,
             KEY_AUTO_NEXT_CHAPTER: False,
