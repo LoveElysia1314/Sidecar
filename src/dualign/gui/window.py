@@ -1248,7 +1248,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
 
         info = QLabel(
             "调整对齐完成后的低分异常标记。\n"
-            "这些参数不参与文档接受、拒绝或对齐路径选择。"
+            "这些参数不参与文档接受、拒绝或对齐路径选择，并从下次重新对齐起生效。"
         )
         info.setWordWrap(True)
         layout.addWidget(info)
@@ -1309,8 +1309,8 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             )
             DualignConfig.instance().save()
             self._safe_status(
-                f"✅ 异常检测参数已更新：k={sb_k.value():.1f} "
-                f"最低分={sb_ms.value():.2f}"
+                f"✅ 异常检测参数已保存，将在下次重新对齐时生效："
+                f"k={sb_k.value():.1f} 最低分={sb_ms.value():.2f}"
             )
 
     def _build_bottom_bar(self):

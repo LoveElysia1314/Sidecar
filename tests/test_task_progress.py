@@ -46,3 +46,12 @@ def test_modal_task_requests_cooperative_cancellation_without_terminating_thread
 
     assert dialog.outcome.cancelled
     assert not dialog.worker.isRunning()
+
+
+def test_progress_dialog_text_uses_native_palette_without_color_overrides():
+    _app()
+    dialog = TaskProgressDialog("测试", "运行中", lambda *_args: None)
+
+    assert dialog.message_label.styleSheet() == ""
+    assert dialog.elapsed_label.styleSheet() == ""
+    assert dialog.cancel_button.styleSheet() == ""

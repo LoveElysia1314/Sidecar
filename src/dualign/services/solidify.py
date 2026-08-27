@@ -373,24 +373,6 @@ def build_solidification_plan(
             )
         )
 
-    def preserve_solidified_review(action: RepairAction, link_id: str) -> None:
-        """Project review provenance after its content becomes the baseline."""
-
-        if not set(action.reviewers).intersection({"ai", "user"}):
-            return
-        metadata = {}
-        if action.reviewers:
-            metadata["reviewed_by"] = list(action.reviewers)
-        approvals = action.data.get("approvals")
-        if approvals:
-            metadata["approvals"] = approvals
-        review = RepairAction.make_ok(
-            link_id,
-            source=action.source,
-            **metadata,
-        )
-        pending.append(_PendingAction(review, (link_id,)))
-
     def links_for(action: RepairAction) -> tuple[str, ...]:
         result: list[str] = []
         for relation_id in action.relation_ids:
@@ -465,8 +447,6 @@ def build_solidification_plan(
             if remaining_sides:
                 residual = _action_copy(action, data={})
                 pending.append(_PendingAction(residual, (anchor,)))
-            else:
-                preserve_solidified_review(action, anchor)
             continue
 
         if action.kind == "split":
@@ -512,7 +492,6 @@ def build_solidification_plan(
                 before,
                 relation_texts(state, (anchor,)),
             )
-            preserve_solidified_review(action, anchor)
             continue
 
         if action.kind == "edit":
@@ -564,8 +543,6 @@ def build_solidification_plan(
                 pending.append(
                     _PendingAction(_action_copy(action, data=data), (anchor,))
                 )
-            else:
-                preserve_solidified_review(action, anchor)
             continue
 
         if action.kind == "delete":

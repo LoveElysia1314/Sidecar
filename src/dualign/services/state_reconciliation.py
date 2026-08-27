@@ -194,6 +194,7 @@ def reconcile_relation_state(
     invalidated_relation_ids: Iterable[str] = (),
     positional_identity: bool = False,
     pending_ai_only: bool = False,
+    review_required_target_indices: Iterable[int] | None = None,
     cause: str = "realignment",
 ) -> ReconciledRelationState:
     """Preserve only relation-owned state whose exact text identity survives."""
@@ -226,6 +227,27 @@ def reconcile_relation_state(
         if action is not None:
             retained_actions.append(action)
 
+    if review_required_target_indices is not None:
+        review_required_ids = {
+            final_ids[index]
+            for index in review_required_target_indices
+            if 0 <= index < len(final_ids)
+        }
+        retained_actions = [
+            action
+            for action in retained_actions
+            if action.get("kind") != "ok"
+            or bool(set(action.get("relation_ids") or ()) & review_required_ids)
+        ]
+
+    user_approved_ids = {
+        relation_id
+        for action in retained_actions
+        if bool(action.get("data", {}).get("user_approved"))
+        or (action.get("kind") == "ok" and action.get("source") == "user")
+        for relation_id in action.get("relation_ids") or ()
+    }
+
     retained_proposals: dict[str, list[dict]] = {}
     if isinstance(ai_proposals, Mapping):
         for proposals in ai_proposals.values():
@@ -246,6 +268,8 @@ def reconcile_relation_state(
                     invalidated,
                 )
                 if action is None:
+                    continue
+                if set(action.get("relation_ids") or ()) & user_approved_ids:
                     continue
                 proposal = dict(raw_proposal)
                 proposal["action"] = action

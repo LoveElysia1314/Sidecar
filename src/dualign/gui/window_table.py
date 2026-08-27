@@ -973,7 +973,9 @@ class WindowTableMixin:
         state = self._repair_state
         ch = state.current
 
-        relation_statuses = project_relation_statuses(state, k=3.0 if k is None else k)
+        # LOW_SCORE belongs to the immutable alignment report baseline.  GUI
+        # preferences affect the next alignment, never an already-open report.
+        relation_statuses = project_relation_statuses(state)
 
         # 记录所有含异常类型的关系（不受筛选影响），供筛选判断“纯 1:1”。
         self._all_anomaly_ordinals = {

@@ -294,7 +294,9 @@ def test_resolved_flag_does_not_reappear_after_content_solidification(
 
     assert result is not None
     remaining = load_report(report_path)["repair_log"]
-    assert [item["kind"] for item in remaining] == ["ok"]
+    # The edit and its approval are now part of the new baseline.  Their full
+    # audit trail remains in history, but a clean baseline has no current OK.
+    assert remaining == []
 
 
 def test_delete_is_solidified_but_review_markers_remain_in_history(tmp_path: Path):

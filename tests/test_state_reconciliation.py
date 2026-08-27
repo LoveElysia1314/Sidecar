@@ -104,3 +104,54 @@ def test_reconciliation_moves_all_relation_owned_state_together():
     assert set(result.scores) == {"R-a", "R-c"}
     assert result.audit["preserved_relations"] == 2
     assert result.audit["invalidated_relations"] == 1
+
+
+def test_reconciliation_keeps_ok_only_for_a_remaining_baseline_anomaly():
+    operations = [((0,), (0,), 0.9), ((1,), (1,), 0.1)]
+    lines_a = ["甲", "乙"]
+    lines_b = ["A", "B"]
+    ids = ("R-clean", "R-low")
+    actions = [_action("R-clean", "ok"), _action("R-low", "ok")]
+
+    result = reconcile_relation_state(
+        source_operations=operations,
+        source_relation_ids=ids,
+        source_fingerprints=relation_fingerprints(operations, lines_a, lines_b),
+        target_operations=operations,
+        target_fingerprints=relation_fingerprints(operations, lines_a, lines_b),
+        repair_log=actions,
+        review_required_target_indices={1},
+    )
+
+    assert [action["relation_ids"] for action in result.repair_log] == [["R-low"]]
+
+
+def test_user_ok_supersedes_a_pending_ai_proposal_but_flag_does_not():
+    operations = [((0,), (0,), 0.9), ((1,), (1,), 0.8)]
+    lines_a = ["甲", "乙"]
+    lines_b = ["A", "B"]
+    ids = ("R-ok", "R-flag")
+    ok = _action("R-ok", "ok")
+    flag = _action("R-flag", "flag")
+    proposals = {
+        relation_id: [
+            {
+                "action": _action(relation_id, "ok"),
+                "status": "pending",
+            }
+        ]
+        for relation_id in ids
+    }
+
+    result = reconcile_relation_state(
+        source_operations=operations,
+        source_relation_ids=ids,
+        source_fingerprints=relation_fingerprints(operations, lines_a, lines_b),
+        target_operations=operations,
+        target_fingerprints=relation_fingerprints(operations, lines_a, lines_b),
+        repair_log=[ok, flag],
+        ai_proposals=proposals,
+        review_required_target_indices={0, 1},
+    )
+
+    assert set(result.ai_proposals) == {"R-flag"}

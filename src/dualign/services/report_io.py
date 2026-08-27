@@ -32,6 +32,7 @@ from dualign.services.state_reconciliation import (
 )
 
 REPORT_FORMAT = "dualign-report/v1"
+ANOMALY_DIAGNOSTICS_SCHEMA = "relation-anomaly/v1"
 
 # Windows refuses to replace an existing file while a reader, indexer, or
 # antivirus scanner briefly holds a handle without delete sharing.  The report
@@ -169,6 +170,45 @@ def relation_ids_from_report(report: Mapping[str, Any]) -> tuple[str, ...]:
         raise ReportError("报告中的关系 ID 无效") from exc
 
 
+def relation_anomalies_from_report(
+    report: Mapping[str, Any], relation_ids: tuple[str, ...] | None = None
+) -> tuple[frozenset[str], ...]:
+    """Read frozen baseline diagnostics; return empty for legacy reports."""
+
+    ids = relation_ids or relation_ids_from_report(report)
+    raw = report.get("anomaly_diagnostics")
+    if raw is None:
+        return ()
+    if not isinstance(raw, Mapping) or raw.get("schema") != ANOMALY_DIAGNOSTICS_SCHEMA:
+        raise ReportError("报告中的异常诊断格式无效")
+    relations = raw.get("relations") or {}
+    if not isinstance(relations, Mapping):
+        raise ReportError("报告中的关系异常诊断无效")
+    allowed = {"NON_1TO1", "MIX", "LOW_SCORE"}
+    result = []
+    for relation_id in ids:
+        values = relations.get(relation_id, [])
+        if not isinstance(values, list) or any(
+            value not in allowed for value in values
+        ):
+            raise ReportError("报告中的关系异常诊断无效")
+        result.append(frozenset(values))
+    return tuple(result)
+
+
+def anomaly_detection_config_from_report(report: Mapping[str, Any]):
+    """Return the frozen diagnostic policy, with deterministic legacy defaults."""
+
+    from dualign.services.anomaly_detection import AnomalyDetectionConfig
+
+    diagnostics = report.get("anomaly_diagnostics") or {}
+    config = diagnostics.get("config") or {}
+    return AnomalyDetectionConfig(
+        zscore_k=float(config.get("zscore_k", 3.0)),
+        zscore_min_score=float(config.get("zscore_min_score", 0.6)),
+    )
+
+
 def _repair_action_payload(action: Any, relation_ids: tuple[str, ...]) -> dict:
     payload = action.to_dict() if isinstance(action, RepairAction) else dict(action)
     try:
@@ -212,6 +252,7 @@ def _canonicalize_relation_state(data: dict[str, Any]) -> None:
     data["scores"] = RelationScoreCache.from_dict(
         data.get("scores"), relation_ids
     ).to_dict()
+    relation_anomalies_from_report(data, relation_ids)
     identity = data.get("relation_identity")
     if isinstance(identity, Mapping) and isinstance(identity.get("fingerprints"), list):
         if len(identity["fingerprints"]) != len(relation_ids):
@@ -242,6 +283,7 @@ def build_report(
     document_b_sha256_value: str = "",
     document_a_lines: Sequence[str] | None = None,
     document_b_lines: Sequence[str] | None = None,
+    anomaly_detection_config=None,
 ) -> dict[str, Any]:
     """Build a complete report while retaining review data from a valid report."""
 
@@ -261,6 +303,18 @@ def build_report(
         else load_text_lines(str(path_b))
     )
     content_fingerprints = relation_fingerprints(operation_list, lines_a, lines_b)
+    from dualign.services.anomaly_detection import baseline_anomaly_types
+
+    if anomaly_detection_config is None:
+        anomaly_detection_config = anomaly_detection_config_from_report(previous or {})
+    baseline_anomalies = baseline_anomaly_types(
+        operation_list, lines_b, anomaly_detection_config
+    )
+    anomaly_relations = {
+        relation_id: sorted(labels)
+        for relation_id, labels in zip(normalized_relation_ids, baseline_anomalies)
+        if labels
+    }
     documents = {
         "a": {
             "path": path_a.name,
@@ -303,6 +357,14 @@ def build_report(
         "stats": dict(stats),
         "alignment": dict(alignment or {"status": "aligned"}),
         "quality": dict(quality),
+        "anomaly_diagnostics": {
+            "schema": ANOMALY_DIAGNOSTICS_SCHEMA,
+            "config": {
+                "zscore_k": anomaly_detection_config.zscore_k,
+                "zscore_min_score": anomaly_detection_config.zscore_min_score,
+            },
+            "relations": anomaly_relations,
+        },
         "repair_log": [
             _repair_action_payload(action, normalized_relation_ids)
             for action in repair_log
@@ -445,6 +507,7 @@ def repair_state_from_report(
         load_text_lines(str(document_a_path)),
         load_text_lines(str(document_b_path)),
         relation_ids_from_report(report),
+        relation_anomalies_from_report(report),
     )
     actions = [RepairAction.from_dict(item) for item in report.get("repair_log", [])]
     return RepairState(snapshot, actions)

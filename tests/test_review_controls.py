@@ -99,6 +99,29 @@ class _FlagHarness(WindowActionsMixin):
         pass
 
 
+class _ApplyHarness(WindowActionsMixin):
+    def __init__(self):
+        self._repair_state = RepairState.from_ops([((0,), (0,), 0.5)], ["A"], ["B"])
+        self._undo_stack = deque(maxlen=50)
+        self._redo_stack = deque(maxlen=50)
+        self.invalidated = []
+
+    def _invalidate_relation_scores(self, ordinals):
+        self.invalidated.extend(ordinals)
+
+    def _save_session(self):
+        pass
+
+    def _refresh(self):
+        pass
+
+    def _set_temp_status(self, *_args):
+        pass
+
+    def _status(self, *_args):
+        pass
+
+
 class _InitialFocusHarness:
     def __init__(self, anomalies, all_anomalies, show_all=True):
         self._anomalies = anomalies
@@ -194,6 +217,27 @@ def test_flag_note_update_and_removal_are_single_undoable_operations():
     assert len(window._undo_stack) == 2
     assert window._repair_state.flag_for_relation(relation_id) is None
     assert window._repair_state.action_for_relation(relation_id).kind == "edit"
+
+
+def test_ok_and_flag_do_not_invalidate_semantic_scores():
+    window = _ApplyHarness()
+
+    window._apply_action(window._repair_state.make_action("ok", 0))
+    window._apply_action(window._repair_state.make_action("flag", 0, note="check"))
+
+    assert window.invalidated == []
+
+
+def test_content_action_still_invalidates_semantic_scores():
+    window = _ApplyHarness()
+
+    window._apply_action(
+        window._repair_state.make_action(
+            "edit", 0, new_src_lines=["A"], new_tgt_lines=["B+"]
+        )
+    )
+
+    assert window.invalidated == [0]
 
 
 def test_undo_projects_relation_identity_before_resetting_ai_proposal():

@@ -17,6 +17,7 @@ from dualign.services.report_io import (
     ReportError,
     build_report,
     load_report,
+    repair_state_from_report,
     relation_ids_from_report,
 )
 
@@ -87,6 +88,43 @@ def test_report_binds_unbound_actions_to_persisted_relation_ids(tmp_path):
     assert payload["relation_ids"] == ["relation-original"]
     assert "op_index" not in payload
     assert "operation_indices" not in payload
+
+
+def test_report_freezes_low_score_policy_and_relation_diagnostics(tmp_path):
+    from dualign.models.relation_status import project_relation_statuses
+    from dualign.services.anomaly_detection import AnomalyDetectionConfig
+
+    path_a = tmp_path / "a.md"
+    path_b = tmp_path / "b.md"
+    path_a.write_text("A\nB\nC\n", encoding="utf-8")
+    path_b.write_text("a\nb\nc\n", encoding="utf-8")
+    operations = [
+        ((0,), (0,), 0.9),
+        ((1,), (1,), 0.9),
+        ((2,), (2,), 0.5),
+    ]
+    report = build_report(
+        chapter_id="chapter",
+        document_a_path=path_a,
+        document_b_path=path_b,
+        operations=operations,
+        stats={},
+        quality={},
+        provenance={},
+        anomaly_detection_config=AnomalyDetectionConfig(
+            zscore_k=1.0, zscore_min_score=0.6
+        ),
+    )
+
+    state = repair_state_from_report(report, path_a, path_b)
+    statuses = project_relation_statuses(state, k=99.0)
+
+    assert report["anomaly_diagnostics"]["config"] == {
+        "zscore_k": 1.0,
+        "zscore_min_score": 0.6,
+    }
+    assert statuses[2].is_low_score
+    assert "LOW_SCORE" in statuses[2].current_anomaly_types
 
 
 def test_stable_action_identity_is_authoritative_over_stale_position():

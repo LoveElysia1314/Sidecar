@@ -48,6 +48,7 @@ class AlignmentSnapshot:
     original_src_lines: Tuple[str, ...]
     original_tgt_lines: Tuple[str, ...]
     relation_ids: Tuple[str, ...] = ()
+    baseline_anomalies: Tuple[frozenset[str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -55,6 +56,10 @@ class AlignmentSnapshot:
             "relation_ids",
             normalize_relation_ids(len(self.original_ops), self.relation_ids),
         )
+        if self.baseline_anomalies and len(self.baseline_anomalies) != len(
+            self.original_ops
+        ):
+            raise ValueError("基线异常诊断数量与对齐关系数量不一致")
 
     @classmethod
     def from_alignment(
@@ -63,6 +68,7 @@ class AlignmentSnapshot:
         src_lines: list,
         tgt_lines: list,
         relation_ids: Iterable[str] = (),
+        baseline_anomalies: Iterable[Iterable[str]] = (),
     ) -> AlignmentSnapshot:
         """从对齐结果构造快照。"""
         return cls(
@@ -70,6 +76,9 @@ class AlignmentSnapshot:
             original_src_lines=tuple(src_lines),
             original_tgt_lines=tuple(tgt_lines),
             relation_ids=tuple(relation_ids),
+            baseline_anomalies=tuple(
+                frozenset(values) for values in baseline_anomalies
+            ),
         )
 
     def relation_id(self, operation_index: int) -> str:

@@ -257,6 +257,15 @@ def save_pair_transaction(
                 )
             checkpoint("正在协调可复用的校订状态…")
             operations = list(rebuilt.operations)
+            from dualign.services.anomaly_detection import baseline_anomaly_types
+            from dualign.services.report_io import anomaly_detection_config_from_report
+
+            baseline_anomalies = baseline_anomaly_types(
+                operations,
+                state.document_b.blocks,
+                anomaly_detection_config_from_report(report),
+            )
+
             reconciliation = reconcile_relation_state(
                 source_operations=intermediate_operations,
                 source_relation_ids=intermediate_relation_ids,
@@ -274,6 +283,9 @@ def save_pair_transaction(
                 scores=report.get("scores"),
                 invalidated_relation_ids=changed,
                 pending_ai_only=True,
+                review_required_target_indices={
+                    index for index, labels in enumerate(baseline_anomalies) if labels
+                },
                 cause="selective-solidification",
             )
             relation_map = reconciliation.relation_map

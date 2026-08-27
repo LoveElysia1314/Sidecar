@@ -92,7 +92,6 @@ class TaskProgressDialog(QDialog):
         layout.addWidget(self.progress_bar)
 
         self.elapsed_label = QLabel("已用时 0 秒")
-        self.elapsed_label.setStyleSheet("color: palette(mid);")
         layout.addWidget(self.elapsed_label)
 
         buttons = QDialogButtonBox()

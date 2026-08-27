@@ -188,9 +188,18 @@ class TestOrphanPersistence:
 # ═══════════════════════════════════════════════════════════════
 # LOW_SCORE 持久化说明
 #
-# LOW_SCORE 只由不可变初始评分计算，当前修复不会改变它。
+# LOW_SCORE 只由当前对齐基线的评分分布计算，普通修复不会改变它；因此
+# 初始与当前异常视图都显示它，直到重新对齐建立新基线。
 # Z-score 检测本身由 anomaly_detection 的 is_statistical_low_score 覆盖。
 # ═══════════════════════════════════════════════════════════════
+
+
+def test_low_score_is_visible_in_both_baseline_and_current_state():
+    from dualign.models.relation_status import RelationStatus
+
+    status = RelationStatus(is_low_score=True)
+    assert "LOW_SCORE" in status.initial_anomaly_types
+    assert "LOW_SCORE" in status.current_anomaly_types
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -570,8 +570,17 @@ class WindowActionsMixin:
                 self._update_feature_gating()
                 return
 
+            from dualign.services.anomaly_detection import baseline_anomaly_types
+
             self._alignment_snapshot = AlignmentSnapshot.from_alignment(
-                result.all_ops, self.src_lines, self.tgt_lines
+                result.all_ops,
+                self.src_lines,
+                self.tgt_lines,
+                baseline_anomalies=baseline_anomaly_types(
+                    result.all_ops,
+                    self.tgt_lines,
+                    self._anomaly_detection_config,
+                ),
             )
             self._align_stats = result.stats
             self._alignment_gate = dict(result.gate or {})
@@ -584,9 +593,11 @@ class WindowActionsMixin:
                 self._repair_state = loaded
                 self._status("已恢复上次修复会话", "success")
             else:
-                self._repair_state = RepairState.from_ops(
-                    result.all_ops, self.src_lines, self.tgt_lines
-                )
+                # Reuse the snapshot created above so the GUI projects the
+                # exact anomaly baseline that will be persisted in the report.
+                # Reconstructing it here would silently fall back to legacy
+                # live low-score detection.
+                self._repair_state = RepairState(self._alignment_snapshot, [])
 
             # Loading an existing report must respect flags the user has
             # already edited or removed.  A freshly recomputed alignment gets
@@ -663,6 +674,7 @@ class WindowActionsMixin:
                     alignment=alignment_payload(result, calibration_id=calibration_id),
                     provenance=_provenance(model, self._align_config, calibration_id),
                     repair_log=self._repair_state.repair_log,
+                    anomaly_detection_config=self._anomaly_detection_config,
                 )
                 save_report(_report, _report_path)
             self._report_file_hash = file_bytes_sha256(_report_path)
@@ -803,7 +815,10 @@ class WindowActionsMixin:
         self._undo_stack.append(original_state)
         self._redo_stack.clear()
         self._repair_state = original_state.apply_many(applied)
-        self._invalidate_relation_scores(sorted(affected_ordinals))
+        # 来源、标记与认可不改变任何评分输入。只让真正修改当前文本或
+        # 结构的动作失效评分，避免一次 O(1) 的 OK 触发模型重算。
+        if content_changed:
+            self._invalidate_relation_scores(sorted(affected_ordinals))
 
         if content_changed:
             store = self._repair_state.ai_proposal_store
@@ -1763,7 +1778,7 @@ class WindowActionsMixin:
                 policy,
                 cancellation_token=token,
                 progress_callback=lambda current, total, target: progress(
-                    TaskProgress(f"正在检查 {target.label}", current, total)
+                    TaskProgress("正在检查工作报告…", current, total)
                 ),
             )
 
@@ -1824,11 +1839,7 @@ class WindowActionsMixin:
 
         def apply_operation(token, progress):
             def report_progress(current, total, target, phase, cancellable):
-                message = (
-                    f"正在固化 {target.label}"
-                    if phase == "prepare"
-                    else f"{target.label}：{phase}"
-                )
+                message = "正在准备文档…" if phase == "prepare" else str(phase)
                 progress(TaskProgress(message, current - 1, total, cancellable))
 
             return apply_batch_solidification(
@@ -2071,6 +2082,7 @@ class WindowActionsMixin:
         from dualign.services.report_io import (
             ReportError,
             load_report,
+            relation_anomalies_from_report,
             relation_ids_from_report,
             report_matches_documents,
         )
@@ -2087,6 +2099,7 @@ class WindowActionsMixin:
                 self._alignment_snapshot.src_list,
                 self._alignment_snapshot.tgt_list,
                 relation_ids_from_report(data),
+                relation_anomalies_from_report(data),
             )
         except (ReportError, ValueError):
             return None

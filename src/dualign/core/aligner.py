@@ -10,7 +10,7 @@ import numpy as np
 Operation = Tuple[Tuple[int, ...], Tuple[int, ...], float]
 
 ALGORITHM_MDL_V1 = "mdl-v1"
-ALIGN_CACHE_REVISION = "mdl-gated-composition.4"
+ALIGN_CACHE_REVISION = "mdl-gated-composition.5"
 # Kept under the historical public name, but this is a semantic algorithm
 # revision rather than the package release. Patch releases must not invalidate
 # reusable alignments when their relations are unchanged.

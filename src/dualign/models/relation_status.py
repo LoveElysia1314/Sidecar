@@ -139,13 +139,16 @@ class RelationStatus:
         NON_1TO1 基于两侧行数是否平衡（编辑/拆分产生 n:n 平衡结构时消失）。
         MIX 基于当前文本重新检测。
         FLAGGED 是用户动作。
-        LOW_SCORE 是原始评分属性，不出现在此。
+        LOW_SCORE 是当前基线关系的评分诊断；文本编辑不会凭空产生新的
+        可比对齐分布，因此它保持到重新对齐建立新基线为止。
         """
         labels = []
         if self.n_src != self.n_tgt:
             labels.append("NON_1TO1")
         if self.has_language_mix:
             labels.append("MIX")
+        if self.is_low_score:
+            labels.append("LOW_SCORE")
         if self.is_flagged:
             labels.append("FLAGGED")
         return labels
@@ -386,6 +389,7 @@ def project_relation_statuses(repair_state, k: float = 3.0) -> List[RelationStat
         for source, target, score in snapshot.original_ops
         if len(source) == 1 and len(target) == 1
     ]
+    persisted_anomalies = snapshot.baseline_anomalies
     actions_by_ordinal: dict[int, list[RepairAction]] = {}
     for action in repair_log:
         for ordinal in repair_state.action_ordinals(action):
@@ -396,10 +400,15 @@ def project_relation_statuses(repair_state, k: float = 3.0) -> List[RelationStat
         initial_source_count = len(source)
         initial_target_count = len(target)
         initial_target_text = "\n".join(snapshot.tgt_text(index) for index in target)
+        persisted = persisted_anomalies[ordinal] if persisted_anomalies else frozenset()
         initial_has_mix = (
-            detect_language_mix(initial_target_text)
-            if initial_target_text.strip()
-            else False
+            "MIX" in persisted
+            if persisted_anomalies
+            else (
+                detect_language_mix(initial_target_text)
+                if initial_target_text.strip()
+                else False
+            )
         )
         group = chapter.group(ordinal)
         current_source_text = (
@@ -432,9 +441,13 @@ def project_relation_statuses(repair_state, k: float = 3.0) -> List[RelationStat
                 init_type=f"{initial_source_count}:{initial_target_count}",
                 init_score=float(score),
                 is_low_score=(
-                    _calc_low_score(scores_1to1, float(score), k=k)
-                    if initial_source_count == initial_target_count == 1
-                    else False
+                    "LOW_SCORE" in persisted
+                    if persisted_anomalies
+                    else (
+                        _calc_low_score(scores_1to1, float(score), k=k)
+                        if initial_source_count == initial_target_count == 1
+                        else False
+                    )
                 ),
                 init_has_language_mix=initial_has_mix,
                 n_src=current_source_count,
