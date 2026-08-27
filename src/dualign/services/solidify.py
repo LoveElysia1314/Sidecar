@@ -20,6 +20,7 @@ from dualign.models.action import RepairAction
 from dualign.models.pair_editing import PairEditingState
 from dualign.services._text_diff import unified_text_diff
 from dualign.services.alignment_io import create_alignment_pair
+from dualign.services.cancellation import CancellationError
 from dualign.services.pair_save import (
     PairSaveError,
     PairSaveResult,
@@ -312,6 +313,7 @@ class BatchSolidificationResult:
     succeeded: tuple[SolidifyTarget, ...]
     failed: tuple[BatchSolidificationIssue, ...]
     skipped: tuple[BatchSolidificationIssue, ...]
+    cancelled: bool = False
 
 
 @dataclass(frozen=True)
@@ -675,14 +677,23 @@ def solidify_report(
 
 
 def plan_batch_solidification(
-    targets: Iterable[SolidifyTarget], policy: SolidifyPolicy
+    targets: Iterable[SolidifyTarget],
+    policy: SolidifyPolicy,
+    *,
+    cancellation_token=None,
+    progress_callback=None,
 ) -> BatchSolidificationPlan:
     """Build an immutable, exact batch preview without modifying any file."""
 
+    target_items = tuple(targets)
     ready: list[BatchSolidificationItem] = []
     skipped: list[BatchSolidificationIssue] = []
     seen: set[tuple[str, str, str]] = set()
-    for target in targets:
+    for index, target in enumerate(target_items, 1):
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
+        if progress_callback is not None:
+            progress_callback(index, len(target_items), target)
         identity = tuple(
             os.path.normcase(str(Path(path).resolve()))
             for path in (
@@ -722,14 +733,23 @@ def plan_batch_solidification(
 
 def apply_batch_solidification(
     batch: BatchSolidificationPlan,
+    *,
+    cancellation_token=None,
+    progress_callback=None,
 ) -> BatchSolidificationResult:
     """Commit exactly the plans shown in a batch preview, one transaction each."""
 
     succeeded: list[SolidifyTarget] = []
     failed: list[BatchSolidificationIssue] = []
-    for item in batch.ready:
+    cancelled = False
+    for index, item in enumerate(batch.ready, 1):
+        if cancellation_token is not None and cancellation_token.is_cancelled:
+            cancelled = True
+            break
         plan = item.plan
         target = item.target
+        if progress_callback is not None:
+            progress_callback(index, len(batch.ready), target, "prepare", True)
         try:
             save_pair_transaction(
                 plan.solidified,
@@ -743,8 +763,27 @@ def apply_batch_solidification(
                 solidification_policy=batch.policy.to_dict(),
                 applied_repairs=plan.applied,
                 changed_relation_ids=plan.changed_relation_ids,
+                cancellation_token=cancellation_token,
+                progress_callback=(
+                    (
+                        lambda message, cancellable, i=index, t=target: progress_callback(
+                            i,
+                            len(batch.ready),
+                            t,
+                            message,
+                            cancellable,
+                        )
+                    )
+                    if progress_callback is not None
+                    else None
+                ),
             )
             succeeded.append(target)
+        except CancellationError:
+            cancelled = True
+            break
         except (OSError, ValueError, PairSaveError) as exc:
             failed.append(BatchSolidificationIssue(target, str(exc), error=True))
-    return BatchSolidificationResult(tuple(succeeded), tuple(failed), batch.skipped)
+    return BatchSolidificationResult(
+        tuple(succeeded), tuple(failed), batch.skipped, cancelled
+    )

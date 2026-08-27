@@ -500,6 +500,49 @@ def test_batch_plan_and_apply_share_the_exact_previewed_transactions(tmp_path: P
     assert second[1].read_text(encoding="utf-8") == "B\n"
 
 
+def test_batch_cancellation_stops_between_recoverable_transactions(tmp_path: Path):
+    from dualign.services.cancellation import CancellationToken
+
+    cases = []
+    for label, source, target in (("first", "甲\n", "A\n"), ("second", "乙\n", "B\n")):
+        folder = tmp_path / label
+        folder.mkdir()
+        cases.append(
+            _report_case(
+                folder,
+                source,
+                target,
+                [((0,), (0,), 0.9)],
+                [
+                    RepairAction.make_edit(
+                        "L000001", source="user", new_tgt_lines=[f"{target.strip()}1"]
+                    )
+                ],
+            )
+        )
+    batch = plan_batch_solidification(
+        [
+            SolidifyTarget(label, *(str(path) for path in case))
+            for label, case in zip(("first", "second"), cases)
+        ],
+        SolidifyPolicy(frozenset({"edit_b"})),
+    )
+    token = CancellationToken()
+
+    def progress(current, _total, _target, phase, _cancellable):
+        if current == 2 and phase == "prepare":
+            token.cancel()
+
+    result = apply_batch_solidification(
+        batch, cancellation_token=token, progress_callback=progress
+    )
+
+    assert result.cancelled
+    assert [target.label for target in result.succeeded] == ["first"]
+    assert cases[0][1].read_text(encoding="utf-8") == "A1\n"
+    assert cases[1][1].read_text(encoding="utf-8") == "B\n"
+
+
 def test_batch_cli_uses_the_gui_manifest_and_is_preview_only_by_default(
     tmp_path: Path, capsys
 ):

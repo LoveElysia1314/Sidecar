@@ -480,6 +480,106 @@ class TestActionEdgeCases:
         state2 = simple_state.apply(action)
         assert state2.action_for_relation(relation_id) is not None
 
+    def test_content_action_for_relation_ignores_a_later_flag(self):
+        snapshot = AlignmentSnapshot.from_alignment(
+            [((0,), (), 0.0), ((1,), (0,), 0.8)],
+            ["专长", "无特别专长。"],
+            ["Special skills: None in particular."],
+        )
+        state = RepairService.repair_bundle_relations(RepairState(snapshot), [0, 1])
+        relation_id = snapshot.relation_id(0)
+        flagged = state.apply(RepairAction.make_flag(relation_id, note="检查字段边界"))
+
+        assert flagged.action_for_relation(relation_id).kind == "flag"
+        content = flagged.content_action_for_relation(relation_id)
+        assert content.kind == "merge"
+        assert content.relation_ids == ("L000001", "L000002")
+
+    def test_current_relation_scope_and_baseline_text_cover_cross_edit(self):
+        state = RepairState.from_ops(
+            [((0,), (0,), 0.8), ((1,), (), 0.0), ((2,), (1,), 0.7)],
+            ["甲", "乙", "丙"],
+            ["A", "C"],
+        )
+        edit = state.make_action(
+            "edit",
+            0,
+            ordinals=(0, 1, 2),
+            source="user",
+            new_src_lines=["甲乙", "丙"],
+            new_tgt_lines=["AB", "C"],
+        )
+        edited = state.apply(edit)
+
+        assert edited.current_relation_ordinals(0) == (0, 1, 2)
+        assert edited.original_text_lines((0, 1, 2), "src") == ["甲", "乙", "丙"]
+        assert edited.original_text_lines((0, 1, 2), "tgt") == ["A", "C"]
+
+    def test_cross_relation_ok_resolves_all_flags_and_survives_reload(self):
+        state = RepairState.from_ops(
+            [((0,), (0,), 0.8), ((), (1,), 0.0), ((1,), (2,), 0.7)],
+            ["甲", "丙"],
+            ["A", "修正", "C"],
+        )
+        edit = state.make_action(
+            "edit",
+            0,
+            ordinals=(0, 1, 2),
+            source="user",
+            new_src_lines=["甲", "丙"],
+            new_tgt_lines=["A", "C"],
+        )
+        edited = state.apply_many(
+            [
+                edit,
+                state.make_action("flag", 1, source="ai", note="name"),
+                state.make_action("flag", 2, source="auto", note="structure"),
+            ]
+        )
+        approval = edited.make_action(
+            "ok", 0, ordinals=edited.current_relation_ordinals(0), source="user"
+        )
+        approved = edited.apply(approval)
+
+        payload = [
+            RepairAction.from_dict(action.to_dict()) for action in approved.repair_log
+        ]
+        reloaded = RepairState(state.snapshot, payload)
+
+        assert len(reloaded.repair_log) == 1
+        assert reloaded.repair_log[0].relation_ids == (
+            "L000001",
+            "L000002",
+            "L000003",
+        )
+        assert reloaded.repair_log[0].is_user_approved
+        assert {row.marker for row in reloaded.current.group(0).rows} == {"[E] [OK]"}
+
+    def test_multi_relation_delete_removes_the_visible_group(self):
+        state = RepairState.from_ops(
+            [((0,), (0,), 0.8), ((1,), (1,), 0.7)], ["甲", "乙"], ["A", "B"]
+        )
+        bundled = RepairService.repair_bundle_relations(state, [0, 1])
+        deletion = bundled.make_action(
+            "delete", 0, ordinals=bundled.current_relation_ordinals(0), source="user"
+        )
+
+        deleted = bundled.apply(deletion)
+
+        assert deleted.current.groups == ()
+
+    def test_visible_selection_expands_bundles_without_reenabling_structure_ops(self):
+        state = RepairState.from_ops(
+            [((0, 1), (0,), 0.8), ((2,), (1,), 0.7), ((3,), (2,), 0.7)],
+            ["甲", "乙", "丙", "丁"],
+            ["A", "B", "C"],
+        )
+        bundled = RepairService.repair_bundle_relations(state, [0, 1])
+
+        assert bundled.current_relation_selection([0, 2]) == (0, 1, 2)
+        assert not RepairService.valid_selection_operations(bundled, [0])["merge"]
+        assert RepairService.valid_selection_operations(bundled, [0, 2])["merge"]
+
     def test_repair_log_property(self, simple_state):
         assert simple_state.repair_log == []
         state2 = simple_state.apply(simple_state.make_action("ok", 0))

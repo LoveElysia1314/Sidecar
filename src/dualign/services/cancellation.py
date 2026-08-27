@@ -22,6 +22,12 @@ class CancellationToken:
     def is_cancelled(self) -> bool:
         return self._event.is_set()
 
+    @property
+    def event(self) -> threading.Event:
+        """Expose the cancellation signal to compatible stop-event APIs."""
+
+        return self._event
+
     def cancel(self) -> bool:
         """Cancel once and invoke every currently registered cleanup callback."""
         with self._lock:

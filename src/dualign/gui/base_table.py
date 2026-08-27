@@ -229,15 +229,26 @@ def relation_text_changes(
     if action is None:
         return False, False
 
-    s_idx, t_idx, _ = snapshot.original_ops[ordinal]
+    operation_indices = (ordinal,)
+    relation_ids = tuple(getattr(action, "relation_ids", ()))
+    if len(relation_ids) > 1:
+        try:
+            operation_indices = snapshot.operation_indices(relation_ids)
+        except (AttributeError, KeyError, ValueError):
+            operation_indices = (ordinal,)
+
+    orig_src = []
+    orig_tgt = []
+    for operation_index in operation_indices:
+        s_idx, t_idx, _ = snapshot.original_ops[operation_index]
+        orig_src.extend(snapshot.src_text(i) for i in s_idx)
+        orig_tgt.extend(snapshot.tgt_text(j) for j in t_idx)
 
     if action.kind == "edit":
         d = action.data
         new_src = d.get("new_src_lines")
         new_tgt = d.get("new_tgt_lines")
         edit_side = d.get("edit_side")
-        orig_src = [snapshot.src_text(i) for i in s_idx]
-        orig_tgt = [snapshot.tgt_text(j) for j in t_idx]
         src_ch = (new_src is not None) and (new_src != orig_src)
         tgt_ch = (new_tgt is not None) and (new_tgt != orig_tgt)
         if edit_side == "src" and src_ch:
@@ -255,8 +266,6 @@ def relation_text_changes(
         d = action.data or {}
         new_src = d.get("new_src_lines")
         new_tgt = d.get("new_tgt_lines")
-        orig_src = [snapshot.src_text(i) for i in s_idx]
-        orig_tgt = [snapshot.tgt_text(j) for j in t_idx]
         src_ch = (new_src is not None) and (new_src != orig_src)
         tgt_ch = (new_tgt is not None) and (new_tgt != orig_tgt)
         return src_ch, tgt_ch

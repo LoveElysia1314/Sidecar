@@ -15,7 +15,7 @@ from dualign.models.relation_status import (
 )
 from dualign.models.source import SOURCE_USER
 from dualign.models.state import AlignmentSnapshot
-from dualign.services.repair import RepairState
+from dualign.services.repair import RepairService, RepairState
 
 
 class _Emitter:
@@ -525,3 +525,108 @@ def test_ai_panel_can_auto_expand_without_user_collapse(monkeypatch):
 
     assert not window._bottom_collapsed
     assert window.toggle_origins == [False]
+
+
+def test_manual_edit_of_a_bundled_group_keeps_its_full_original_scope(monkeypatch):
+    snapshot = AlignmentSnapshot.from_alignment(
+        [((0,), (), 0.0), ((1,), (0,), 0.8)],
+        ["专长", "无特别专长。"],
+        ["Special skills: None in particular."],
+    )
+    state = RepairService.repair_bundle_relations(RepairState(snapshot), [0, 1])
+    captured = {}
+
+    class Dialog:
+        DialogCode = SimpleNamespace(Accepted=1)
+
+        def __init__(
+            self,
+            src_lines,
+            tgt_lines,
+            _parent,
+            *,
+            initial_src_lines,
+            initial_tgt_lines,
+        ):
+            captured["src"] = src_lines
+            captured["tgt"] = tgt_lines
+            captured["initial_src"] = initial_src_lines
+            captured["initial_tgt"] = initial_tgt_lines
+            self.result_src_lines = ["专长：无特别专长。"]
+            self.result_tgt_lines = ["Special skills: None in particular."]
+
+        def exec(self):
+            return self.DialogCode.Accepted
+
+    class Harness(WindowActionsMixin):
+        def __init__(self):
+            self._repair_state = state
+            self.applied = None
+
+        def _apply_action(self, action, auto=False):
+            self.applied = action
+
+    monkeypatch.setattr("dualign.gui.window_actions.BlockEditDialog", Dialog)
+    window = Harness()
+
+    window.do_edit_single(0)
+
+    assert captured["initial_src"] == ["专长", "无特别专长。"]
+    assert captured["initial_tgt"] == ["Special skills: None in particular."]
+    assert window.applied.relation_ids == ("L000001", "L000002")
+
+
+def test_ok_on_a_bundled_group_targets_its_complete_scope():
+    snapshot = AlignmentSnapshot.from_alignment(
+        [((0,), (0,), 0.8), ((), (1,), 0.0)],
+        ["甲"],
+        ["A", "correction"],
+    )
+    state = RepairService.repair_multi_edit(
+        RepairState(snapshot), [0, 1], ["甲"], ["A"]
+    )
+
+    class Harness(WindowActionsMixin):
+        def __init__(self):
+            self._repair_state = state
+            self.applied = None
+
+        def _apply_action(self, action, auto=False):
+            self.applied = action
+
+    window = Harness()
+    window.do_ok(0)
+
+    assert window.applied.kind == "ok"
+    assert window.applied.relation_ids == ("L000001", "L000002")
+
+
+def test_cross_relation_edit_color_compares_against_the_complete_baseline():
+    snapshot = AlignmentSnapshot.from_alignment(
+        [((0,), (0,), 0.8), ((1,), (1,), 0.7)], ["甲", "乙"], ["A", "B"]
+    )
+    unchanged = RepairAction.make_edit(
+        ("L000001", "L000002"),
+        source="user",
+        new_src_lines=["甲", "乙"],
+        new_tgt_lines=["A", "B"],
+    )
+
+    assert relation_text_changes(0, unchanged, snapshot) == (False, False)
+
+
+def test_copying_a_bundled_group_describes_its_full_scope():
+    snapshot = AlignmentSnapshot.from_alignment(
+        [((0,), (), 0.0), ((1,), (0,), 0.8)],
+        ["专长", "无特别专长。"],
+        ["Special skills: None in particular."],
+    )
+    state = RepairService.repair_bundle_relations(RepairState(snapshot), [0, 1])
+    window = SimpleNamespace(_repair_state=state)
+
+    markdown = WindowTableMixin._format_relations(window, [0], fmt="markdown")
+    tsv = WindowTableMixin._format_relations(window, [0], fmt="tsv")
+
+    assert "| 0/1 | 1:0+1:1 |" in markdown
+    assert "专长" in markdown and "无特别专长。" in markdown
+    assert "relation[0/1]\tinit=1:0+1:1" in tsv

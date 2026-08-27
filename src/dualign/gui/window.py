@@ -596,6 +596,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._status_bar = StatusBar()
         self._status_bar.view_mode_toggled.connect(self._on_view_mode_toggled)
         self._table_page_layout.addWidget(self._status_bar)
+        self._table_page_layout.addWidget(self._create_find_bar())
 
         # ── 竖直 QSplitter ──
         self._main_splitter = QSplitter(Qt.Vertical)
@@ -1632,6 +1633,10 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             QKeySequence("Ctrl+Y"),
         )
         em.addSeparator()
+        em.addAction("查找文本", self._show_find_bar, QKeySequence.StandardKey.Find)
+        em.addAction("查找下一个", self._find_next, QKeySequence("F3"))
+        em.addAction("查找上一个", self._find_previous, QKeySequence("Shift+F3"))
+        em.addSeparator()
         self._reset_current_action = em.addAction(
             "重置当前校订",
             self._on_reset_current_relation,
@@ -2160,6 +2165,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             if not self._cancel_current_load(drain_retired=True):
                 self._safe_status("后台任务仍在结束中，请稍后再次关闭窗口")
                 event.ignore()
+                QTimer.singleShot(250, self.close)
                 return
         except Exception:
             import traceback as _tb
@@ -2167,11 +2173,10 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             _tb.print_exc()
         auto_repair_worker = getattr(self, "_auto_repair_worker", None)
         if auto_repair_worker is not None and auto_repair_worker.isRunning():
-            auto_repair_worker.wait(15000)
-            if auto_repair_worker.isRunning():
-                self._safe_status("自动修复仍在结束中，请稍后再次关闭窗口")
-                event.ignore()
-                return
+            self._safe_status("自动修复仍在结束中，请稍后再次关闭窗口")
+            event.ignore()
+            QTimer.singleShot(250, self.close)
+            return
         # ScoreManager 清理（停止 worker 线程）
         try:
             if hasattr(self, "_score_mgr") and self._score_mgr is not None:

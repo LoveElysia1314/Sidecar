@@ -508,6 +508,10 @@ def replay(snapshot: AlignmentSnapshot, log: List[RepairAction]) -> ChapterState
             elif act.kind == "edit":
                 state = _apply_multi_relation_edit(state, act, operation_indices)
                 continue
+            elif act.kind == "delete":
+                for operation_index in operation_indices:
+                    state = state.remove_relation(operation_index)
+                continue
 
         # info-free: merge, delete, placeholder, flag, ok
         if act.kind in (
@@ -818,6 +822,22 @@ class RepairState:
             self._ai_proposal_store,
         )
 
+    def reset_relations(self, relation_ids) -> RepairState:
+        """Reset every decision intersecting one current relation scope."""
+
+        selected = {str(value) for value in relation_ids}
+        for relation_id in selected:
+            self._snapshot.operation_index(relation_id)
+        return RepairState(
+            self._snapshot,
+            [
+                action
+                for action in self._repair_log
+                if not selected.intersection(action.relation_ids)
+            ],
+            self._ai_proposal_store,
+        )
+
     def action_for_relation(self, relation_id: str) -> Optional[RepairAction]:
         """查找指定稳定关系身份的最新动作。"""
         self._snapshot.operation_index(relation_id)
@@ -825,6 +845,59 @@ class RepairState:
             if relation_id in action.relation_ids:
                 return action
         return None
+
+    def content_action_for_relation(self, relation_id: str) -> Optional[RepairAction]:
+        """查找决定指定关系当前文本与结构的动作。"""
+        self._snapshot.operation_index(relation_id)
+        for action in reversed(self._repair_log):
+            if (
+                action.kind in CONTENT_ACTION_KINDS
+                and relation_id in action.relation_ids
+            ):
+                return action
+        return None
+
+    def current_relation_ordinals(self, ordinal: int) -> tuple[int, ...]:
+        """Return the immutable relations represented by one current group.
+
+        A cross-relation edit or merge is rendered as a single group anchored
+        at its first relation.  Commands concerning that visible group must
+        operate on the whole action scope, not only on its anchor.
+        """
+
+        relation_id = self._snapshot.relation_id(ordinal)
+        action = self.content_action_for_relation(relation_id)
+        if action is None:
+            return (ordinal,)
+        action_ordinals = self.action_ordinals(action)
+        return action_ordinals if len(action_ordinals) > 1 else (ordinal,)
+
+    def current_relation_selection(self, ordinals) -> tuple[int, ...]:
+        """Expand visible group anchors into a de-duplicated baseline scope."""
+
+        expanded: set[int] = set()
+        for ordinal in ordinals:
+            expanded.update(self.current_relation_ordinals(int(ordinal)))
+        return tuple(sorted(expanded))
+
+    def original_text_lines(
+        self, ordinals: tuple[int, ...] | list[int], side: str
+    ) -> list[str]:
+        """Collect baseline text for a current relation scope."""
+
+        if side not in {"src", "tgt"}:
+            raise ValueError("side must be 'src' or 'tgt'")
+        result: list[str] = []
+        for ordinal in ordinals:
+            source_indices, target_indices, _score = self._snapshot.original_ops[
+                ordinal
+            ]
+            indices = source_indices if side == "src" else target_indices
+            text_at = (
+                self._snapshot.src_text if side == "src" else self._snapshot.tgt_text
+            )
+            result.extend(text_at(index) for index in indices)
+        return result
 
     def relation_text_changed(self, relation_id: str) -> bool:
         """Whether current row texts/layout differ from the immutable baseline."""
@@ -1271,7 +1344,8 @@ class RepairService:
         Keeping the rule here prevents toolbar and context-menu drift.
         """
 
-        selected = sorted(set(ordinals))
+        visible_selection = sorted(set(ordinals))
+        selected = list(state.current_relation_selection(visible_selection))
         keys = (
             "merge",
             "split",
@@ -1282,14 +1356,11 @@ class RepairService:
             "placeholder",
             "reset",
         )
-        if not selected:
+        if not visible_selection:
             return {key: False for key in keys}
 
-        per_relation = [
-            RepairService.valid_operations(state, ordinal) for ordinal in selected
-        ]
-        if len(selected) == 1:
-            operations = per_relation[0]
+        if len(visible_selection) == 1:
+            operations = RepairService.valid_operations(state, visible_selection[0])
             return {
                 "merge": operations["merge"],
                 "split": operations["split_src"] or operations["split_tgt"],
@@ -1300,6 +1371,10 @@ class RepairService:
                 "placeholder": operations["placeholder"],
                 "reset": operations["reset"],
             }
+
+        per_relation = [
+            RepairService.valid_operations(state, ordinal) for ordinal in selected
+        ]
 
         contiguous = RepairService.selection_is_contiguous(selected)
         return {
@@ -1339,10 +1414,11 @@ class RepairService:
         action = state.action_for_relation(relation_id)
         has_action = action is not None
         g = state.current.group(ordinal)
+        is_cross_group = len(state.current_relation_ordinals(ordinal)) > 1
         return {
-            "merge": is_non11 and not is_10 and not is_01,
-            "split_src": ls > 1 and lt == 1,
-            "split_tgt": ls == 1 and lt > 1,
+            "merge": is_non11 and not is_10 and not is_01 and not is_cross_group,
+            "split_src": ls > 1 and lt == 1 and not is_cross_group,
+            "split_tgt": ls == 1 and lt > 1 and not is_cross_group,
             "edit": True,
             # Approval is an idempotent review decision, not a structural
             # transition.  Any extant relation can be confirmed—including a
@@ -1351,7 +1427,7 @@ class RepairService:
             "ok": g is not None,
             "flag": True,
             "delete": True,
-            "placeholder": is_10 or is_01,
+            "placeholder": (is_10 or is_01) and not is_cross_group,
             "reset": has_action,
         }
 

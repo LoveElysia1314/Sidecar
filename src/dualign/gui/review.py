@@ -1043,9 +1043,13 @@ class ReviewController(QWidget):
             # 获取初始文本（action 前）— 从 snapshot 原始文本获取
             ini_src, ini_tgt = "", ""
             if snapshot and 0 <= ordinal < len(snapshot.original_ops):
-                s_idx, t_idx, _ = snapshot.original_ops[ordinal]
-                ini_src_lines = [snapshot.src_text(i) for i in s_idx]
-                ini_tgt_lines = [snapshot.tgt_text(j) for j in t_idx]
+                action_ordinals = snapshot.operation_indices(action.relation_ids)
+                ini_src_lines = []
+                ini_tgt_lines = []
+                for action_ordinal in action_ordinals:
+                    s_idx, t_idx, _ = snapshot.original_ops[action_ordinal]
+                    ini_src_lines.extend(snapshot.src_text(i) for i in s_idx)
+                    ini_tgt_lines.extend(snapshot.tgt_text(j) for j in t_idx)
                 ini_src = (
                     "\n".join(ini_src_lines)
                     if len(ini_src_lines) > 1

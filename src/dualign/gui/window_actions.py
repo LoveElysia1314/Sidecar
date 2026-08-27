@@ -372,20 +372,16 @@ class WindowActionsMixin:
         超时后仍在运行的线程由窗口保留所有权，直到其 finished 信号到达。
         """
         self._load_op_id += 1
-        wait_ms = 0 if drain_retired else 15000
-        self._retire_load_thread("_enc_thread", wait_ms)
-        self._retire_load_thread("_worker", wait_ms)
+        # Never wait for an old encoder/aligner on the GUI thread. Generation
+        # IDs already make late results harmless, while retained ownership
+        # prevents QThread destruction until each worker finishes naturally.
+        self._retire_load_thread("_enc_thread", 0)
+        self._retire_load_thread("_worker", 0)
 
         retired = getattr(self, "_retired_load_threads", set())
         if drain_retired and retired:
-            import time
-
-            deadline = time.monotonic() + 15
             for thread in tuple(retired):
                 thread.stop()
-                remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
-                if remaining_ms:
-                    thread.wait(remaining_ms)
                 if not thread.isRunning():
                     retired.discard(thread)
         return not any(thread.isRunning() for thread in retired)
@@ -961,10 +957,13 @@ class WindowActionsMixin:
         g = ch.group(ordinal)
         snapshot = self._repair_state.snapshot
 
+        # 跨关系合并/校订在当前表格中表现为一个锚点组；对话框的初始
+        # 参考和后续编辑必须继承这个组的完整范围，不能退回到锚点关系。
+        edit_ordinals = self._repair_state.current_relation_ordinals(ordinal)
+
         # 初始文本（原始对齐输出，始终不变）
-        s_idx, t_idx, _sc = snapshot.original_ops[ordinal]
-        initial_src = [snapshot.src_text(i) for i in s_idx]
-        initial_tgt = [snapshot.tgt_text(j) for j in t_idx]
+        initial_src = self._repair_state.original_text_lines(edit_ordinals, "src")
+        initial_tgt = self._repair_state.original_text_lines(edit_ordinals, "tgt")
 
         if g is not None and g.rows:
             from dualign.models.marker import is_merge
@@ -994,25 +993,33 @@ class WindowActionsMixin:
             action = self._repair_state.make_action(
                 "edit",
                 ordinal,
+                ordinals=edit_ordinals,
                 new_src_lines=new_src,
                 new_tgt_lines=new_tgt,
             )
             self._apply_action(action)
 
     def do_ok(self, ordinal: int):
-        """审核通过 — 认可当前 1:1 状态，不做任何文本修改。"""
+        """审核通过 — 认可当前可见关系组，不做任何文本修改。"""
         if self._repair_state is not None:
-            self._apply_action(self._repair_state.make_action("ok", ordinal))
+            scope = self._repair_state.current_relation_ordinals(ordinal)
+            self._apply_action(
+                self._repair_state.make_action("ok", ordinal, ordinals=scope)
+            )
 
     def do_flag(self, ordinal: int):
         """打开单个文本对的标记编辑器。"""
-        self.do_flag_selected([ordinal])
+        if self._repair_state is None:
+            return
+        self.do_flag_selected(
+            list(self._repair_state.current_relation_ordinals(ordinal))
+        )
 
     def do_flag_selected(self, ordinals: List[int]):
         """为一个或多个文本对编辑标记注释。"""
         if self._repair_state is None:
             return
-        selected = sorted(set(ordinals))
+        selected = list(self._repair_state.current_relation_selection(ordinals))
         flags = [
             self._repair_state.flag_for_relation(
                 self._repair_state.snapshot.relation_id(si)
@@ -1078,12 +1085,16 @@ class WindowActionsMixin:
     def do_delete(self, ordinal: int):
         """删除文本对。"""
         if self._repair_state is not None:
-            self._apply_action(self._repair_state.make_action("delete", ordinal))
+            scope = self._repair_state.current_relation_ordinals(ordinal)
+            self._apply_action(
+                self._repair_state.make_action("delete", ordinal, ordinals=scope)
+            )
 
     def _delete_selected_relations(self, ordinals: List[int]):
         """逐个删除选中的关系。"""
         if self._repair_state is None or len(ordinals) < 1:
             return
+        ordinals = list(self._repair_state.current_relation_selection(ordinals))
         self._undo_stack.append(self._repair_state)
         self._redo_stack.clear()
         state = self._repair_state
@@ -1117,7 +1128,7 @@ class WindowActionsMixin:
         """跨关系手动校订。所有选中文本对合并编辑。"""
         if self._repair_state is None or len(ordinals) < 1:
             return
-        selected = sorted(set(ordinals))
+        selected = list(self._repair_state.current_relation_selection(ordinals))
         capabilities = RepairService.valid_selection_operations(
             self._repair_state, selected
         )
@@ -1222,7 +1233,7 @@ class WindowActionsMixin:
         """跨关系合并：将多个关系捆绑为一个文本对。两侧文本均合并。"""
         if self._repair_state is None or len(ordinals) < 2:
             return
-        selected = sorted(set(ordinals))
+        selected = list(self._repair_state.current_relation_selection(ordinals))
         capabilities = RepairService.valid_selection_operations(
             self._repair_state, selected
         )
@@ -1248,9 +1259,13 @@ class WindowActionsMixin:
             return
         self._undo_stack.append(self._repair_state)
         self._redo_stack.clear()
-        relation_id = self._repair_state.snapshot.relation_id(ordinal)
-        self._repair_state = self._repair_state.reset_relation(relation_id)
-        self._invalidate_relation_scores([ordinal])
+        scope = self._repair_state.current_relation_ordinals(ordinal)
+        relation_ids = [
+            self._repair_state.snapshot.relation_id(value) for value in scope
+        ]
+        self._repair_state = self._repair_state.reset_relations(relation_ids)
+        self._invalidate_relation_scores(list(scope))
+        self._reset_accepted_proposals(list(scope))
         self._save_session()
         self._refresh()
         self._set_temp_status(f"已重置关系[{ordinal}]", "info")
@@ -1598,15 +1613,17 @@ class WindowActionsMixin:
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        from dualign.services.pair_save import (
-            PairSaveError,
-            save_pair_transaction,
-        )
+        from dualign.services.pair_save import save_pair_transaction
         from dualign.services.realignment import rebuild_alignment
         from dualign.services.report_io import load_report
 
-        try:
-            result = save_pair_transaction(
+        from dualign.gui.task_progress import TaskProgress, run_modal_task
+
+        def solidify(token, progress):
+            def report_progress(message, cancellable):
+                progress(TaskProgress(message, cancellable=cancellable))
+
+            return save_pair_transaction(
                 plan.solidified,
                 document_a_path=self._src_path,
                 document_b_path=self._tgt_path,
@@ -1622,11 +1639,25 @@ class WindowActionsMixin:
                     document_a,
                     document_b,
                     config=self._align_config,
+                    cancellation_token=token,
                 ),
+                cancellation_token=token,
+                progress_callback=report_progress,
             )
-        except (PairSaveError, ValueError) as exc:
-            QMessageBox.critical(self, "固化修改失败", str(exc))
+
+        outcome = run_modal_task(
+            self,
+            title="正在固化修改",
+            message="正在准备固化后的文档…",
+            operation=solidify,
+        )
+        if outcome.cancelled:
+            self._set_temp_status("已停止固化，未开始的修改未写入", "info")
             return
+        if outcome.error:
+            QMessageBox.critical(self, "固化修改失败", outcome.error)
+            return
+        result = outcome.result
 
         self._report_file_hash = result.report_sha256
         self._report_file_present = True
@@ -1712,6 +1743,7 @@ class WindowActionsMixin:
             apply_batch_solidification,
             plan_batch_solidification,
         )
+        from dualign.gui.task_progress import TaskProgress, run_modal_task
 
         targets = self._batch_solidify_targets()
         if not targets:
@@ -1720,10 +1752,34 @@ class WindowActionsMixin:
         try:
             if self._repair_state is not None:
                 self._save_session(raise_on_error=True)
-            batch = plan_batch_solidification(targets, self._current_solidify_policy())
+            policy = self._current_solidify_policy()
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "批量固化计划失败", str(exc))
             return
+
+        def plan_operation(token, progress):
+            return plan_batch_solidification(
+                targets,
+                policy,
+                cancellation_token=token,
+                progress_callback=lambda current, total, target: progress(
+                    TaskProgress(f"正在检查 {target.label}", current, total)
+                ),
+            )
+
+        plan_outcome = run_modal_task(
+            self,
+            title="准备批量固化",
+            message="正在检查工作报告…",
+            operation=plan_operation,
+        )
+        if plan_outcome.cancelled:
+            self._set_temp_status("已停止准备批量固化", "info")
+            return
+        if plan_outcome.error:
+            QMessageBox.critical(self, "批量固化计划失败", plan_outcome.error)
+            return
+        batch = plan_outcome.result
 
         if not batch.ready:
             errors = [issue for issue in batch.skipped if issue.error]
@@ -1766,7 +1822,34 @@ class WindowActionsMixin:
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        result = apply_batch_solidification(batch)
+        def apply_operation(token, progress):
+            def report_progress(current, total, target, phase, cancellable):
+                message = (
+                    f"正在固化 {target.label}"
+                    if phase == "prepare"
+                    else f"{target.label}：{phase}"
+                )
+                progress(TaskProgress(message, current - 1, total, cancellable))
+
+            return apply_batch_solidification(
+                batch,
+                cancellation_token=token,
+                progress_callback=report_progress,
+            )
+
+        apply_outcome = run_modal_task(
+            self,
+            title="正在批量固化",
+            message="正在固化文档…",
+            operation=apply_operation,
+        )
+        if apply_outcome.cancelled:
+            self._set_temp_status("批量固化已停止；已完成的文件对保持有效", "info")
+            return
+        if apply_outcome.error:
+            QMessageBox.critical(self, "批量固化失败", apply_outcome.error)
+            return
+        result = apply_outcome.result
         succeeded_reports = {
             os.path.normcase(str(Path(target.report_path).resolve()))
             for target in result.succeeded
@@ -1776,6 +1859,12 @@ class WindowActionsMixin:
             self._repair_state = None
             self._score_cache.clear()
             self._reload_current_pair()
+
+        if result.cancelled:
+            self._set_temp_status(
+                f"批量固化已停止；已安全完成 {len(result.succeeded)} 对", "info"
+            )
+            return
 
         detail = ""
         if result.failed:

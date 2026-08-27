@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import tempfile
 import uuid
@@ -14,6 +15,7 @@ from dualign.config import get_cache_root
 from dualign.models.pair_editing import PairEditingState
 from dualign.models.state import MISSING
 from dualign.services.alignment_io import document_sha256, document_sha256_from_text
+from dualign.services.cancellation import CancellationError
 from dualign.services.report_io import (
     build_report,
 )
@@ -163,6 +165,8 @@ def save_pair_transaction(
     applied_repairs=(),
     changed_relation_ids=(),
     alignment_runner=None,
+    cancellation_token=None,
+    progress_callback=None,
 ) -> PairSaveResult:
     """Save two documents and their rebased report as one transaction.
 
@@ -171,6 +175,15 @@ def save_pair_transaction(
     relation identities; positional indices are never treated as identity.
     """
 
+    token = cancellation_token
+
+    def checkpoint(message: str, *, cancellable: bool = True) -> None:
+        if progress_callback is not None:
+            progress_callback(message, cancellable)
+        if cancellable and token is not None:
+            token.raise_if_cancelled()
+
+    checkpoint("正在核对文件状态…")
     path_a = Path(document_a_path).resolve()
     path_b = Path(document_b_path).resolve()
     report_target = Path(report_path).resolve()
@@ -220,11 +233,29 @@ def save_pair_transaction(
     relation_map: tuple[int | None, ...] | None = None
     rebuilt: RebuiltAlignment | None = None
     if solidification_policy is not None:
-        runner = alignment_runner or rebuild_alignment
+        checkpoint("正在重新对齐固化后的文本…")
         try:
-            rebuilt = runner(
-                list(state.document_a.blocks), list(state.document_b.blocks)
-            )
+            if alignment_runner is None:
+                supports_cancellation = (
+                    "cancellation_token"
+                    in inspect.signature(rebuild_alignment).parameters
+                )
+                if token is None or not supports_cancellation:
+                    rebuilt = rebuild_alignment(
+                        list(state.document_a.blocks),
+                        list(state.document_b.blocks),
+                    )
+                else:
+                    rebuilt = rebuild_alignment(
+                        list(state.document_a.blocks),
+                        list(state.document_b.blocks),
+                        cancellation_token=token,
+                    )
+            else:
+                rebuilt = alignment_runner(
+                    list(state.document_a.blocks), list(state.document_b.blocks)
+                )
+            checkpoint("正在协调可复用的校订状态…")
             operations = list(rebuilt.operations)
             reconciliation = reconcile_relation_state(
                 source_operations=intermediate_operations,
@@ -247,6 +278,8 @@ def save_pair_transaction(
             )
             relation_map = reconciliation.relation_map
             relation_ids = reconciliation.relation_ids
+        except CancellationError:
+            raise
         except Exception as exc:
             raise PairSaveError(f"固化后的文本重新对齐失败: {exc}") from exc
     else:
@@ -337,6 +370,7 @@ def save_pair_transaction(
     )
     report_text = json.dumps(rebased_report, ensure_ascii=False, indent=2) + "\n"
 
+    checkpoint("正在准备原子写入…")
     transaction_id = uuid.uuid4().hex
     root = Path(transaction_dir or Path(get_cache_root()) / "transactions")
     journal_path = root / f"pair-save-{transaction_id}.json"
@@ -362,6 +396,9 @@ def save_pair_transaction(
         journal = {"version": 1, "id": transaction_id, "targets": targets}
         _write_journal(journal_path, journal)
 
+        # From this point cancellation is deliberately deferred. Interrupting
+        # a three-file install is less safe than finishing it or rolling it back.
+        checkpoint("正在原子写入正文与报告；当前阶段不可中断…", cancellable=False)
         for item in targets:
             target = Path(item["path"])
             temporary = Path(item["temporary"])
