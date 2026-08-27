@@ -495,7 +495,7 @@ class ReviewController(QWidget):
         # 策略选择只占一列；剩余两列用于章节级工作流选项。
         dg.addWidget(QLabel("对齐策略："), 1, 0)
         self._strategy_combo = QComboBox()
-        self._strategy_combo.addItems(["最小信息量", "文档A为准", "文档B为准"])
+        self._strategy_combo.addItems(["最小结构修改", "文档A为准", "文档B为准"])
         self._strategy_combo.setCurrentIndex(1)
         self._strategy_combo.currentIndexChanged.connect(self.strategy_changed.emit)
         self._strategy_combo.setMinimumContentsLength(6)

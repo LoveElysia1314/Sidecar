@@ -22,6 +22,7 @@ from dualign.algorithms.mdl.composition_mdl import (
     ExplicitMDLResult,
     align_counterfactual_composition_mdl,
 )
+from dualign.algorithms.mdl.cosine_observation import observed_cosine_matrix
 from dualign.algorithms.mdl.mdl_aligner import (
     Operation,
     _elias_delta_length,
@@ -344,14 +345,24 @@ def _raw_composition_edges(
     result = []
     for edge in atomic_edges:
         if len(edge.source) > 1:
+            block_text = relation_text[(edge.source, edge.target)]
             semantic = float(
-                by_text[relation_text[(edge.source, edge.target)]]
-                @ target_vectors[edge.target[0]]
+                observed_cosine_matrix(
+                    [block_text],
+                    [lines_b[edge.target[0]]],
+                    by_text[block_text][np.newaxis, :],
+                    target_vectors[edge.target[0]][np.newaxis, :],
+                )[0, 0]
             )
         elif len(edge.target) > 1:
+            block_text = relation_text[(edge.source, edge.target)]
             semantic = float(
-                source_vectors[edge.source[0]]
-                @ by_text[relation_text[(edge.source, edge.target)]]
+                observed_cosine_matrix(
+                    [lines_a[edge.source[0]]],
+                    [block_text],
+                    source_vectors[edge.source[0]][np.newaxis, :],
+                    by_text[block_text][np.newaxis, :],
+                )[0, 0]
             )
         else:
             semantic = edge.raw_score
@@ -381,7 +392,7 @@ def align_local_recursive_mdl(
     target = normalize_embeddings(embeddings_b)
     if source.shape[0] != len(lines_a) or target.shape[0] != len(lines_b):
         raise ValueError("局部文本与嵌入行数不一致")
-    scores = source @ target.T
+    scores = observed_cosine_matrix(lines_a, lines_b, source, target)
     evidence = mutual_rank_code_evidence(scores)
     atomic_edges = _all_gapless_edges(scores, evidence)
     candidate_operations = [

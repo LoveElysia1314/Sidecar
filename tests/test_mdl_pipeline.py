@@ -83,6 +83,24 @@ def test_pipeline_uses_rank_scaffold_and_returns_complete_alignment():
     ]
 
 
+def test_pipeline_gives_repeated_identical_text_pairs_identical_scores():
+    vectors_a = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]], dtype=np.float64)
+    vectors_b = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]], dtype=np.float64)
+
+    result = align_mdl_pipeline(
+        ["separator", "content", "separator"],
+        ["separator", "content", "separator"],
+        vectors_a,
+        vectors_b,
+        lambda texts: np.ones((len(texts), 2)),
+        _calibration(),
+    )
+
+    assert result.gate.accepted
+    assert result.gate.order is not None
+    assert result.gate.order.relative_loss == 0.0
+
+
 def test_single_line_parallel_document_is_not_rejected_for_lack_of_permutation_power():
     scores = np.array([[1.0]])
 

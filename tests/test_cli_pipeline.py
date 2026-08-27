@@ -29,6 +29,19 @@ class MockEncoder:
         return vectors
 
 
+class ContentEncoder:
+    _model = "mock-content"
+
+    def encode(self, texts, normalize_embeddings=True, **_kwargs):
+        if isinstance(texts, str):
+            texts = [texts]
+        vectors = np.zeros((len(texts), 8), dtype=np.float32)
+        for row, value in enumerate(texts):
+            key = value.strip().rstrip(".!！").casefold()
+            vectors[row, 0 if key == "a" else 1] = 1.0
+        return vectors
+
+
 def align_documents(*args, **kwargs):
     """Historical report lifecycle cases exercise the explicit legacy CLI."""
 
@@ -201,6 +214,12 @@ def test_changed_algorithm_cache_revision_still_invalidates_report(tmp_path):
         "success"
     ]
     data = load_report(report)
+    first_relation_id = data["ops"][0]["id"]
+    data["repair_log"] = [
+        RepairAction.make_flag(first_relation_id, "保留校订").to_dict()
+    ]
+    data["scores"] = {first_relation_id: {"0": 0.75}}
+    data["ai_review"] = {"status": "completed", "model": "test"}
     data["provenance"]["algorithm"]["cache_revision"] = "different-relations"
     documents = data["documents"]
     data["alignment_key"] = AlignmentKey.from_values(
@@ -213,6 +232,59 @@ def test_changed_algorithm_cache_revision_still_invalidates_report(tmp_path):
     rebuilt = align_documents(str(source), str(target), str(report), model=encoder)
 
     assert rebuilt["success"] and not rebuilt["cache_hit"]
+    assert rebuilt["work_state_reconciliation"]["preserved_relations"] == len(
+        rebuilt["ops"]
+    )
+    refreshed = load_report(report)
+    assert any(
+        action["kind"] == "flag" and action["relation_ids"] == [first_relation_id]
+        for action in refreshed["repair_log"]
+    )
+    assert refreshed["scores"] == {first_relation_id: {"0": 0.75}}
+    assert refreshed["ai_review"] == {"status": "completed", "model": "test"}
+
+
+def test_document_punctuation_change_only_invalidates_affected_work(tmp_path):
+    source, target = _pair(tmp_path)
+    report = tmp_path / "chapter.report.json"
+    encoder = ContentEncoder()
+    assert align_documents(str(source), str(target), str(report), model=encoder)[
+        "success"
+    ]
+    old = load_report(report)
+    old_ids = tuple(item["id"] for item in old["ops"])
+    assert len(old_ids) == 2
+    old["repair_log"] = [
+        RepairAction.make_flag(relation_id, relation_id).to_dict()
+        for relation_id in old_ids
+    ]
+    old["scores"] = {
+        relation_id: {"0": float(index)} for index, relation_id in enumerate(old_ids)
+    }
+    old["ai_review"] = {"status": "completed", "model": "test"}
+    save_report(old, report)
+    reusable_report = tmp_path / ".chapter.report.json.reuse"
+    report.replace(reusable_report)
+
+    source.write_text("A\n\nB!\n", encoding="utf-8")
+    rebuilt = align_documents(
+        str(source),
+        str(target),
+        str(report),
+        model=encoder,
+        previous_report_path=reusable_report,
+    )
+
+    assert rebuilt["success"] and not rebuilt["cache_hit"]
+    assert rebuilt["work_state_reconciliation"]["preserved_relations"] == 1
+    refreshed = load_report(report)
+    assert [
+        action["relation_ids"]
+        for action in refreshed["repair_log"]
+        if action["kind"] == "flag"
+    ] == [[old_ids[0]]]
+    assert refreshed["scores"] == {old_ids[0]: {"0": 0.0}}
+    assert refreshed["ai_review"] == {}
 
 
 def test_reset_work_state_reuses_alignment_but_discards_review_markers(tmp_path):
@@ -335,7 +407,7 @@ def test_empty_document_still_produces_a_replayable_report(tmp_path):
     assert json.loads(report.read_text(encoding="utf-8"))["ops"] == [
         {"id": "L000001", "s": [], "t": [0], "sc": 0.0}
     ]
-    assert load_report(report)["repair_log"][0]["kind"] == "delete"
+    assert load_report(report)["repair_log"][0]["kind"] == "placeholder_src"
 
 
 def test_new_default_abstains_when_embedding_calibration_is_unavailable(tmp_path):

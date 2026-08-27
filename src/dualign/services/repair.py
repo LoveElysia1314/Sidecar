@@ -857,15 +857,15 @@ class RepairService:
         核心原则: 每种策略保持首选侧不动，修改另一侧。
           - src-first:  保持原文不动 → 修改译文侧
           - tgt-first:  保持译文不动 → 修改原文侧
-          - minimal:    不引入新信息（只合并，不拆分/插入）
+          - minimal:    保留已有信息，以合并或缺失侧占位避免破坏性修改
 
         策略矩阵:
           | Type   | src-first        | tgt-first        | minimal     |
           |--------|------------------|------------------|-------------|
           | N:1    | split tgt  [S]   | merge src  [M]   | merge src [M]|
           | 1:M    | merge tgt  [M]   | split src  [S]   | merge tgt [M]|
-          | 1:0    | placeholder [P]  | delete     [D]   | delete    [D]|
-          | 0:1    | delete     [D]   | placeholder [P]  | delete    [D]|
+          | 1:0    | placeholder [P]  | delete     [D]   | placeholder [P]|
+          | 0:1    | delete     [D]   | placeholder [P]  | placeholder [P]|
 
         拆分需要 model。无 model 时保留原生关系，不得静默换成相反动作。
         """

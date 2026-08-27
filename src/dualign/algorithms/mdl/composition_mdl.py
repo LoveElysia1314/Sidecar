@@ -21,6 +21,7 @@ from typing import Callable
 
 import numpy as np
 
+from dualign.algorithms.mdl.cosine_observation import observed_cosine_matrix
 from dualign.core.text import smart_join_lines as _smart_join_lines
 from dualign.algorithms.mdl.mdl_aligner import (
     Operation,
@@ -345,11 +346,16 @@ def _prepare_counterfactual_composition_models(
             raw_score = float(matrix[selected_source, selected_target])
             posterior_semantic = dld_semantic = semantic
         elif len(source) > 1:
-            block_vectors = np.vstack(
-                [by_text[text] for text in variants[(source, target)]]
+            variant_texts = variants[(source, target)]
+            block_vectors = np.vstack([by_text[text] for text in variant_texts])
+            variant_scores = observed_cosine_matrix(
+                variant_texts,
+                lines_b,
+                block_vectors,
+                target_vectors,
             )
-            full_scores = np.dot(block_vectors[0], target_vectors.T)
-            ablated_scores = np.dot(block_vectors[1:], target_vectors.T)
+            full_scores = variant_scores[0]
+            ablated_scores = variant_scores[1:]
             _wins, gains = counterfactual_diagnostics(full_scores, ablated_scores)
             atomic_by_target = bits[np.array(source), :].sum(axis=0)
             correction = conditional_rank_evidence(atomic_by_target, gains)
@@ -399,11 +405,16 @@ def _prepare_counterfactual_composition_models(
                 }
             )
         else:
-            block_vectors = np.vstack(
-                [by_text[text] for text in variants[(source, target)]]
+            variant_texts = variants[(source, target)]
+            block_vectors = np.vstack([by_text[text] for text in variant_texts])
+            variant_scores = observed_cosine_matrix(
+                lines_a,
+                variant_texts,
+                source_vectors,
+                block_vectors,
             )
-            full_scores = np.dot(source_vectors, block_vectors[0])
-            ablated_scores = np.dot(block_vectors[1:], source_vectors.T)
+            full_scores = variant_scores[:, 0]
+            ablated_scores = variant_scores[:, 1:].T
             _wins, gains = counterfactual_diagnostics(full_scores, ablated_scores)
             atomic_by_source = bits[:, np.array(target)].sum(axis=1)
             correction = conditional_rank_evidence(atomic_by_source, gains)

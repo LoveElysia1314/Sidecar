@@ -18,10 +18,10 @@ class AutoRepairPlan:
 
 
 def strategy_for_ai_review(strategy: str) -> str:
-    """Map the automatic-repair policy to the intentional AI review policy."""
+    """Validate and preserve the repair policy selected for AI review."""
     if strategy not in VALID_REPAIR_STRATEGIES:
         raise ValueError(f"未知对齐策略: {strategy}")
-    return "src" if strategy == "minimal" else strategy
+    return strategy
 
 
 def choose_auto_repair(n_src: int, n_tgt: int, strategy: str) -> AutoRepairPlan | None:
@@ -49,13 +49,13 @@ def choose_auto_repair(n_src: int, n_tgt: int, strategy: str) -> AutoRepairPlan 
     if n_src > 0 and n_tgt == 0:
         return (
             AutoRepairPlan("placeholder_tgt")
-            if strategy == "src"
+            if strategy in {"src", "minimal"}
             else AutoRepairPlan("delete")
         )
     if n_src == 0 and n_tgt > 0:
         return (
             AutoRepairPlan("placeholder_src")
-            if strategy == "tgt"
+            if strategy in {"tgt", "minimal"}
             else AutoRepairPlan("delete")
         )
     return None

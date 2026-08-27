@@ -138,7 +138,8 @@ def test_review_shortcuts_cover_every_direct_review_operation():
 
 def test_auto_action_preview_uses_the_auto_repair_strategy_matrix():
     assert ReviewController._predict_auto_action(1, 0, "src") == "placeholder"
-    assert ReviewController._predict_auto_action(1, 0, "minimal") == "delete"
+    assert ReviewController._predict_auto_action(1, 0, "minimal") == "placeholder"
+    assert ReviewController._predict_auto_action(0, 1, "minimal") == "placeholder"
 
 
 def test_handled_last_item_advances_when_enabled():

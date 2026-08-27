@@ -13,6 +13,7 @@ from dualign.algorithms.mdl.composition_mdl import (
     align_counterfactual_composition_models_mdl,
     decision_relevant_candidates,
 )
+from dualign.algorithms.mdl.cosine_observation import observed_cosine_matrix
 from dualign.algorithms.mdl.candidate_graph import (
     CenteredFrontierMDLResult,
     align_centered_frontier_mdl,
@@ -220,7 +221,12 @@ def align_mdl_pipeline(
     if not lines_a or not lines_b:
         raise ValueError("统计门控研究管线要求两侧文档均非空")
 
-    scores = np.dot(source_vectors, target_vectors.T)
+    scores = observed_cosine_matrix(
+        lines_a,
+        lines_b,
+        source_vectors,
+        target_vectors,
+    )
     gate, evidence = _assess_alignment_applicability(scores, calibration)
     gate_seconds = time.perf_counter() - started
     if not gate.accepted:

@@ -16,14 +16,20 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
+from dualign.common import load_text_lines
 from dualign.models.action import RepairAction, canonicalize_action_payload
 from dualign.models.relation_identity import normalize_relation_ids
 from dualign.models.state import AlignmentSnapshot
 from dualign.models.score_cache import RelationScoreCache
 from dualign.services.alignment_io import document_sha256
 from dualign.services.repair import RepairService, RepairState
+from dualign.services.state_reconciliation import (
+    relation_fingerprints,
+    relation_fingerprints_from_report,
+    relation_identity_payload,
+)
 
 REPORT_FORMAT = "dualign-report/v1"
 
@@ -206,6 +212,17 @@ def _canonicalize_relation_state(data: dict[str, Any]) -> None:
     data["scores"] = RelationScoreCache.from_dict(
         data.get("scores"), relation_ids
     ).to_dict()
+    identity = data.get("relation_identity")
+    if isinstance(identity, Mapping) and isinstance(identity.get("fingerprints"), list):
+        if len(identity["fingerprints"]) != len(relation_ids):
+            # An API caller may intentionally replace ``ops`` before saving.
+            # A stale identity is less safe than a legacy report, so downgrade
+            # this one report instead of attaching the old fingerprints.
+            data.pop("relation_identity", None)
+    try:
+        relation_fingerprints_from_report(data, expected_count=len(relation_ids))
+    except ValueError as exc:
+        raise ReportError(str(exc)) from exc
 
 
 def build_report(
@@ -223,6 +240,8 @@ def build_report(
     previous: Mapping[str, Any] | None = None,
     document_a_sha256_value: str = "",
     document_b_sha256_value: str = "",
+    document_a_lines: Sequence[str] | None = None,
+    document_b_lines: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Build a complete report while retaining review data from a valid report."""
 
@@ -230,6 +249,18 @@ def build_report(
     path_b = Path(document_b_path)
     ops = operations_payload(operations, relation_ids)
     normalized_relation_ids = tuple(item["id"] for item in ops)
+    operation_list = operations_from_report({"ops": ops})
+    lines_a = (
+        list(document_a_lines)
+        if document_a_lines is not None
+        else load_text_lines(str(path_a))
+    )
+    lines_b = (
+        list(document_b_lines)
+        if document_b_lines is not None
+        else load_text_lines(str(path_b))
+    )
+    content_fingerprints = relation_fingerprints(operation_list, lines_a, lines_b)
     documents = {
         "a": {
             "path": path_a.name,
@@ -265,6 +296,7 @@ def build_report(
         "tgt_hash": documents["b"]["sha256"],
         "segmentation": "content-line",
         "ops": ops,
+        "relation_identity": relation_identity_payload(content_fingerprints),
         "snapshot_fingerprint": fingerprint,
         "alignment_key": alignment_key.to_dict(),
         "provenance": dict(provenance),
