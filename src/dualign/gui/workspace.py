@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 import json
-from typing import List, Tuple, Optional, Set
+from typing import List, Tuple, Optional
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QSize
@@ -64,10 +64,9 @@ class FileQueueItem:
 
 
 class WorkspacePanel(QWidget):
-    file_pair_requested = Signal(str, str, str)
+    pair_selected = Signal(object)  # FileQueueItem，完整保留 entry 元数据
     add_queue_requested = Signal()
     doc_remove_requested = Signal()
-    entry_selected = Signal(object)  # 导航时携带 ChapterEntry 更新 _current_entry
     chapter_nav_requested = Signal(int)
 
     _RF = os.path.join(os.path.expanduser("~"), ".dualign", "recent_pairs.json")
@@ -76,7 +75,6 @@ class WorkspacePanel(QWidget):
         super().__init__(parent)
         self._queue: List[FileQueueItem] = []
         self._selected: Optional[FileQueueItem] = None
-        self._selected_set: Set[FileQueueItem] = set()
         self._recent_pairs: List[Tuple[str, str, str]] = self._load_recent()
         self._build_ui()
         self._rrc()
@@ -93,7 +91,7 @@ class WorkspacePanel(QWidget):
         r.setContentsMargins(2, 2, 2, 2)
         r.setSpacing(4)
 
-        # ── 添加文件对（补上原文/译文标签）──
+        # ── 添加文件对 ──
         pg = QGroupBox("添加文件对")
         pl = QVBoxLayout(pg)
         pl.setContentsMargins(6, 8, 6, 4)
@@ -101,13 +99,13 @@ class WorkspacePanel(QWidget):
         self._se = DragDropLineEdit("拖拽或浏览 .md/.txt")
         self._te = DragDropLineEdit("拖拽或浏览 .md/.txt")
         for ic, label, ed, slt in [
-            ("📄", "原文:", self._se, self._on_browse_src),
-            ("📄", "译文:", self._te, self._on_browse_tgt),
+            ("📄", "文档 A:", self._se, self._on_browse_src),
+            ("📄", "文档 B:", self._te, self._on_browse_tgt),
         ]:
             rr = QHBoxLayout()
             rr.setSpacing(4)
             lbl = QLabel(label)
-            lbl.setFixedWidth(36)
+            lbl.setFixedWidth(58)
             lbl.setStyleSheet("")
             rr.addWidget(lbl)
             ed.setMinimumWidth(0)
@@ -141,15 +139,15 @@ class WorkspacePanel(QWidget):
         self._qc = QLabel("文件 (0)")
         h.addWidget(self._qc)
         h.addStretch()
-        for tx, sig, tip in [
-            ("◀ 上一章", "prev", "切换到上一章"),
-            ("▶ 下一章", "next", "切换到下一章"),
-            ("删除", "delete", "删除选中"),
+        for tx, handler, tip in [
+            ("◀ 上一章", self._on_prev_chapter, "切换到上一章"),
+            ("▶ 下一章", self._on_next_chapter, "切换到下一章"),
+            ("删除", self._on_remove_selected, "从列表移除选中文件对"),
         ]:
             b = QPushButton(tx)
             b.setFixedHeight(22)
             b.setToolTip(tip)
-            b.clicked.connect(lambda v=sig: self._on_list_action(v))
+            b.clicked.connect(handler)
             h.addWidget(b)
         ql.addLayout(h)
 
@@ -157,7 +155,6 @@ class WorkspacePanel(QWidget):
         self._qlw = QListWidget()
         self._qlw.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._qlw.itemClicked.connect(self._on_item_clicked)
-        self._qlw.itemDoubleClicked.connect(self._on_item_double)
         self._qlw.setMinimumHeight(28)
         ql.addWidget(self._qlw, 1)
         qg.setMinimumHeight(160)
@@ -177,19 +174,16 @@ class WorkspacePanel(QWidget):
         if r is not None:
             r.addWidget(g, 1)
 
-    def set_gating(self, **kwargs):
-        pass
-
     def _on_browse_src(self):
         p, _ = QFileDialog.getOpenFileName(
-            self, "选择原文", "", "Markdown (*.md);;Text (*.txt);;All (*)"
+            self, "选择文档 A", "", "Markdown (*.md);;Text (*.txt);;All (*)"
         )
         if p:
             self._se.setText(p)
 
     def _on_browse_tgt(self):
         p, _ = QFileDialog.getOpenFileName(
-            self, "选择译文", "", "Markdown (*.md);;Text (*.txt);;All (*)"
+            self, "选择文档 B", "", "Markdown (*.md);;Text (*.txt);;All (*)"
         )
         if p:
             self._te.setText(p)
@@ -200,10 +194,10 @@ class WorkspacePanel(QWidget):
         if not s or not t:
             return
         if not os.path.exists(s):
-            print(f"⚠ 原文不存在: {s}")
+            print(f"⚠ 文档 A 不存在: {s}")
             return
         if not os.path.exists(t):
-            print(f"⚠ 译文不存在: {t}")
+            print(f"⚠ 文档 B 不存在: {t}")
             return
         lb = Path(s).stem.split(".")[0]
         self._add_to_recent(lb, s, t)
@@ -230,6 +224,11 @@ class WorkspacePanel(QWidget):
     def selected_item(self):
         return self._selected
 
+    def queue_items(self):
+        """Return a snapshot of the file queue for document-level batch actions."""
+
+        return list(self._queue)
+
     def _rebuild(self):
         """重建文件列表，每项显示两行：标题 + 路径概要。
 
@@ -242,9 +241,9 @@ class WorkspacePanel(QWidget):
             if it.src_path or it.tgt_path:
                 paths = []
                 if it.src_path:
-                    paths.append(f"源: {Path(it.src_path).name}")
+                    paths.append(f"A: {Path(it.src_path).name}")
                 if it.tgt_path:
-                    paths.append(f"译: {Path(it.tgt_path).name}")
+                    paths.append(f"B: {Path(it.tgt_path).name}")
                 lines.append("  " + "  ".join(paths))
             text = "\n".join(lines)
             if it.aligned:
@@ -262,33 +261,20 @@ class WorkspacePanel(QWidget):
                     self._qlw.setCurrentRow(i)
                     break
 
-    def _on_list_action(self, action: str):
-        """文件列表操作按钮回调：prev/next/delete。"""
-        if action in ("prev", "next"):
-            self.chapter_nav_requested.emit(-1 if action == "prev" else 1)
-            return
-        if action == "delete":
-            # 优先用当前选中项（_selected），若焦点丢失则用 QListWidget 选中项
-            target = self._selected
-            if target is None:
-                sel = self._qlw.selectedItems()
-                if sel:
-                    target = sel[0].data(Qt.ItemDataRole.UserRole)
-            if target is not None and target in self._queue:
-                self._queue.remove(target)
-                self._selected = None
-                self._rebuild()
+    def _on_prev_chapter(self):
+        self.chapter_nav_requested.emit(-1)
+
+    def _on_next_chapter(self):
+        self.chapter_nav_requested.emit(1)
+
+    def _on_remove_selected(self):
+        self.remove_selected()
 
     def _on_item_clicked(self, item):
         it = item.data(Qt.ItemDataRole.UserRole)
         if it is not None and item.isSelected():
             self._selected = it
-            if it.entry is not None:
-                self.entry_selected.emit(it.entry)
-            self.file_pair_requested.emit(it.src_path, it.tgt_path, it.label)
-
-    def _on_item_double(self, item):
-        self._on_item_clicked(item)
+            self.pair_selected.emit(it)
 
     def _add_to_recent(self, lb, s, t):
         self._recent_pairs = [
@@ -371,8 +357,13 @@ class WorkspacePanel(QWidget):
         self._add_to_recent(item.label, item.src_path, item.tgt_path)
 
     def remove_selected(self):
-        if self._selected and self._selected in self._queue:
-            self._queue.remove(self._selected)
+        target = self._selected
+        if target is None:
+            selected = self._qlw.selectedItems()
+            if selected:
+                target = selected[0].data(Qt.ItemDataRole.UserRole)
+        if target is not None and target in self._queue:
+            self._queue.remove(target)
             self._selected = None
             self._rebuild()
 
@@ -403,26 +394,16 @@ class WorkspacePanel(QWidget):
         else:
             return
         self._select(nxt)
-        if nxt.entry is not None:
-            self.entry_selected.emit(nxt.entry)
-        self.file_pair_requested.emit(nxt.src_path, nxt.tgt_path, nxt.label)
+        self.pair_selected.emit(nxt)
 
     def _nav_next(self):
         if not self._queue:
             return
         if self._selected is None:
             self._select(self._queue[0])
-            if self._queue[0].entry is not None:
-                self.entry_selected.emit(self._queue[0].entry)
-            self.file_pair_requested.emit(
-                self._queue[0].src_path, self._queue[0].tgt_path, self._queue[0].label
-            )
+            self.pair_selected.emit(self._queue[0])
             return
         idx = next((i for i, q in enumerate(self._queue) if q is self._selected), -1)
         nxt = idx + 1 if idx + 1 < len(self._queue) else 0
         self._select(self._queue[nxt])
-        if self._queue[nxt].entry is not None:
-            self.entry_selected.emit(self._queue[nxt].entry)
-        self.file_pair_requested.emit(
-            self._queue[nxt].src_path, self._queue[nxt].tgt_path, self._queue[nxt].label
-        )
+        self.pair_selected.emit(self._queue[nxt])

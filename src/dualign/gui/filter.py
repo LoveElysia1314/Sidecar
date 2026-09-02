@@ -3,7 +3,7 @@ Dualign — 筛选面板
 
 两组独立筛选，并行展示：
   - 异常类型: 非1:1, 语言杂糅, 低分, 标记待查
-  - 处理状态: 未处理, 自动修复, AI 审校, 用户审校
+  - 处理状态: 未处理, 拟修复, AI 审校, 用户审校
 
 同组内 OR，跨组 AND，空组=全部通过。
 """
@@ -13,8 +13,7 @@ from __future__ import annotations
 from typing import Optional
 from dataclasses import dataclass
 
-from PySide6.QtCore import Signal, QSize, QRectF
-from PySide6.QtGui import QLinearGradient, QPainter, QColor, QPen, QFont
+from PySide6.QtCore import Signal, QSize
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -29,16 +28,16 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 
-from dualign.gui.theme import FG_SECONDARY, BORDER_DIM, disabled_fg
+from dualign.gui.theme import disabled_fg
 from dualign.gui.base_table import _ANOMALY_COLORS
 
 # ═══════════════════════════════════════════════════════════════
-# SnapFilter — 筛选条件数据类
+# RelationFilter — 筛选条件数据类
 # ═══════════════════════════════════════════════════════════════
 
 
 @dataclass
-class SnapFilter:
+class RelationFilter:
     """筛选条件。
 
     同组 OR / AND 由 cross_group_op 控制。空组 = 不过滤（该维度全通）。
@@ -70,67 +69,11 @@ _ORIGIN_LABELS = {
 
 _STATE_LABELS = {
     "none": "未处理",
-    "auto": "自动修复",
+    # key 保留 auto 以兼容旧报告与 QSettings，用户语义是未审核的拟修复。
+    "auto": "拟修复",
     "agent": "AI 审校",
     "user": "用户审校",
 }
-
-# ═══════════════════════════════════════════════════════════════
-# ScoreGradientBar — 连续渐变分数图例
-# ═══════════════════════════════════════════════════════════════
-
-
-class ScoreGradientBar(QWidget):
-    """用 QPainter 绘制从红→黄→绿的连续渐变色带 + 刻度标签。
-
-    高度固定 24px，宽度自适应父容器。
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMinimumHeight(24)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
-        padding = 4
-        w = self.width()
-        bar_h = 10
-        bar_y = 2
-        label_y = bar_y + bar_h + 2
-
-        bar_rect = QRectF(padding, bar_y, w - padding, bar_h)
-        grad = QLinearGradient(padding, 0, w, 0)
-        grad.setColorAt(0.0, QColor(220, 20, 50))
-        grad.setColorAt(0.5, QColor(220, 220, 50))
-        grad.setColorAt(1.0, QColor(30, 200, 50))
-
-        painter.setPen(QPen(QColor(BORDER_DIM), 1))
-        painter.setBrush(grad)
-        painter.drawRoundedRect(bar_rect, 2, 2)
-
-        font = QFont()
-        font.setPixelSize(9)
-        painter.setFont(font)
-        painter.setPen(QColor(FG_SECONDARY))
-
-        labels = [("0%", 0.0), ("50%", 0.5), ("100%", 1.0)]
-        for text, ratio in labels:
-            x = int(w * ratio)
-            if ratio == 0.0:
-                x = 4
-            elif ratio == 1.0:
-                x = w - painter.fontMetrics().horizontalAdvance(text) - 4
-            else:
-                x = x - painter.fontMetrics().horizontalAdvance(text) // 2
-            painter.drawText(x, label_y + 9, text)
-
-        painter.end()
-
-    def minimumSizeHint(self):
-        return QSize(60, 24)
 
 
 class FilterPanel(QWidget):
@@ -138,7 +81,7 @@ class FilterPanel(QWidget):
 
     两组独立筛选，并行展示：
       - 异常类型: 非1:1, 语言杂糅, 低分, 标记待查
-      - 处理状态: 未处理, 自动修复, AI 审校, 用户审校
+      - 处理状态: 未处理, 拟修复, AI 审校, 用户审校
 
     同组 OR，跨组 AND。未勾选的组=全部通过。
     """
@@ -339,10 +282,10 @@ class FilterPanel(QWidget):
         return {k for k, cb in self._state_checks.items() if cb.isChecked()}
 
     @property
-    def snap_filter(self) -> SnapFilter:
-        """当前筛选条件的 SnapFilter 对象。"""
+    def relation_filter(self) -> RelationFilter:
+        """当前筛选条件。"""
         _op_text = self._cross_group_combo.currentText()
-        sf = SnapFilter(cross_group_op="AND" if _op_text == "交集" else "OR")
+        sf = RelationFilter(cross_group_op="AND" if _op_text == "交集" else "OR")
         for k in self.active_origin_keys:
             setattr(sf, k, True)
         for k in self.active_state_keys:

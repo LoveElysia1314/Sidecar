@@ -16,19 +16,14 @@ import traceback
 import numpy as np
 from PySide6.QtCore import QThread, Signal
 
-from dualign.core import (
-    align,
-    AlignConfig,
-    AlignmentResult,
-)
+from dualign.core import align, AlignConfig, AlignmentResult
 from dualign.common import (
     load_text_lines,
     content_hash as _content_hash,
 )
-from dualign.config import (
-    get_embedding_cache_dir,
-)
+from dualign.config import get_embedding_cache_path
 from dualign.services.embedding import (
+    EncodingCancelled,
     load_model_for_provider,
     _try_lazy_load_model,
 )
@@ -60,6 +55,7 @@ class EncodeThread(QThread):
         str,
     )
     text_ready_signal = Signal(str, str, list, list)
+    cache_hit_signal = Signal(object)
     error_signal = Signal(str, str)
 
     def __init__(
@@ -70,6 +66,8 @@ class EncodeThread(QThread):
         src_lines=None,
         tgt_lines=None,
         entry_id="",
+        report_path="",
+        expected_provenance=None,
     ):
         super().__init__(parent)
         self.src_path = src_path
@@ -77,6 +75,9 @@ class EncodeThread(QThread):
         self._src_lines = src_lines
         self._tgt_lines = tgt_lines
         self.entry_id = entry_id
+        self.report_path = report_path
+        self.expected_provenance = expected_provenance
+        self.formal_alignment_error = ""
         self.time_s = 0.0
         self._stop_event = threading.Event()
 
@@ -86,6 +87,8 @@ class EncodeThread(QThread):
     def run(self):
         try:
             self._run_impl()
+        except EncodingCancelled:
+            return
         except Exception as e:
             tb_str = _format_worker_exception("EncodeThread")
             self.error_signal.emit(f"编码失败: {e}", tb_str)
@@ -101,7 +104,26 @@ class EncodeThread(QThread):
             tgt_lines = load_text_lines(self.tgt_path)
         src_hash = _content_hash(src_lines)
         tgt_hash = _content_hash(tgt_lines)
+
+        # A current report is the sole persisted alignment/session source.
+        cached = self._load_cached_alignment(src_hash, tgt_hash)
+        if cached is not None:
+            self.status_signal.emit("✓ 已加载对齐工作文件…")
+            self.cache_hit_signal.emit(
+                (cached, src_lines, tgt_lines, src_hash, tgt_hash)
+            )
+            return
+
+        # 只有缓存 miss 才先渲染逐行预览；命中时直接渲染最终对齐表，
+        # 避免同一大章节连续构造两张表。
         self.text_ready_signal.emit(src_hash, tgt_hash, src_lines, tgt_lines)
+        if self.formal_alignment_error:
+            self.status_signal.emit(
+                f"正式对齐关系不可用：{self.formal_alignment_error}；将重新对齐…"
+            )
+        self.status_signal.emit("未找到可复用的对齐报告，正在加载嵌入向量…")
+        if self._stop_event.is_set():
+            return
 
         # ── 加载模型 ──
         model = _try_lazy_load_model()
@@ -119,23 +141,23 @@ class EncodeThread(QThread):
             return
 
         # ── CachedEncoder: 统一缓存代理 ──
-        cache_dir = get_embedding_cache_dir(self.entry_id)
-        db_path = os.path.join(cache_dir, "vecs.db")
-        cache = EmbeddingCache(db_path)
+        cache = EmbeddingCache(get_embedding_cache_path())
         try:
             cenc = CachedEncoder(model, cache)
 
             # ── 缓存优先编码（内部自动查缓存 / 编码 / 回存）──
-            src_emb = cenc.encode(src_lines)
+            src_emb = cenc.encode(src_lines, stop_event=self._stop_event)
             if self._stop_event.is_set():
                 return
-            tgt_emb = cenc.encode(tgt_lines)
+            tgt_emb = cenc.encode(tgt_lines, stop_event=self._stop_event)
 
             self.time_s = time.time() - t0
+            total_vectors = cenc.hit_count + cenc.miss_count
             self.status_signal.emit(
-                f"✓ 嵌入编码完成 — {self.time_s:.1f}s "
-                f"({len(src_lines)}×{len(tgt_lines)} 行, "
-                f"缓存命中率 {cenc.cache_hit_rate:.0%})"
+                f"✓ 嵌入向量就绪 — {self.time_s:.1f}s "
+                f"({len(src_lines)}×{len(tgt_lines)} 相似度矩阵；"
+                f"向量缓存命中 {cenc.hit_count}/{total_vectors} "
+                f"({cenc.cache_hit_rate:.0%})，未命中 {cenc.miss_count})"
             )
         finally:
             cache.close()
@@ -147,6 +169,65 @@ class EncodeThread(QThread):
             src_hash,
             tgt_hash,
         )
+
+    def _load_cached_alignment(self, src_hash: str, tgt_hash: str):
+        """Restore a report only while its semantic alignment key matches."""
+        if self.report_path and os.path.isfile(self.report_path):
+            from dualign.services.report_io import (
+                load_report,
+                operations_from_report,
+                report_matches_alignment,
+                report_matches_documents,
+            )
+
+            try:
+                report = load_report(self.report_path)
+                if not report_matches_documents(report, self.src_path, self.tgt_path):
+                    raise ValueError("源文档已变化")
+                if (
+                    self.expected_provenance is not None
+                    and not report_matches_alignment(
+                        report,
+                        self.src_path,
+                        self.tgt_path,
+                        self.expected_provenance,
+                    )
+                ):
+                    raise ValueError("对齐模型或算法配置已变化")
+                result = AlignmentResult(
+                    all_ops=operations_from_report(report),
+                    stats=dict(report.get("stats") or {}),
+                    status=str(
+                        (report.get("alignment") or {}).get("status", "aligned")
+                    ),
+                    reason=str((report.get("alignment") or {}).get("reason") or ""),
+                    gate=dict((report.get("alignment") or {}).get("gate") or {}),
+                    uncertain_regions=tuple(
+                        (
+                            (
+                                int(item["start"]["source"]),
+                                int(item["start"]["target"]),
+                            ),
+                            (
+                                int(item["end"]["source"]),
+                                int(item["end"]["target"]),
+                            ),
+                        )
+                        for item in (report.get("alignment") or {}).get(
+                            "uncertain_regions", []
+                        )
+                    ),
+                    algorithm=str(
+                        (report.get("alignment") or {}).get(
+                            "algorithm", "legacy-anchor-v1"
+                        )
+                    ),
+                )
+                result.stats["load_origin"] = "report"
+                return result
+            except (OSError, ValueError) as exc:
+                self.formal_alignment_error = str(exc)
+        return None
 
 
 # ── 对齐线程 ────────────────────────────────────────────────
@@ -203,10 +284,9 @@ class AlignWorker(QThread):
         # ── CachedEncoder: 合并文本编码也走缓存 ──
         encode_fn = self.encode_fn
         _cache_to_close = None
-        if self.entry_id and encode_fn:
-            cache_dir = get_embedding_cache_dir(self.entry_id)
-            db_path = os.path.join(cache_dir, "vecs.db")
-            cache = EmbeddingCache(db_path)
+        model = None
+        if encode_fn:
+            cache = EmbeddingCache(get_embedding_cache_path())
             _cache_to_close = cache
             # 从 encode_fn 反查 model 引用（window_actions 传入的是 model.encode）
             from dualign.services.embedding import _try_lazy_load_model
@@ -216,6 +296,11 @@ class AlignWorker(QThread):
                 cenc = CachedEncoder(model, cache)
                 encode_fn = cenc.encode
 
+        from dualign.core.calibration import resolve_alignment_calibration
+
+        resolved = resolve_alignment_calibration(
+            model, calibration_id=self.config.calibration_id
+        )
         try:
             result = align(
                 self.src_lines,
@@ -224,18 +309,20 @@ class AlignWorker(QThread):
                 self.tgt_emb,
                 self.config,
                 encode_fn=encode_fn,
+                calibration=resolved.calibration if resolved is not None else None,
             )
         finally:
             if _cache_to_close is not None:
                 _cache_to_close.close()
         self.progress_signal.emit(100)
         s = result.stats
-        self.status_signal.emit(
-            f"✓ 对齐完成 — 真锚点 {s['n_true_anchors']}/{s['n_restricted_ops']}, "
-            f"{len(result.all_ops)} ops (μ{s['avg_similarity']:.3f}), "
-            f"矩阵 {s['sim_time_s']:.2f}s + 锚点 {s['anchor_time_s']:.2f}s "
-            f"+ DP {s['dp_time_s']:.2f}s = {s['align_time_s']:.2f}s"
-        )
+        if result.status == "rejected":
+            self.status_signal.emit(f"对齐已拒绝 — {result.reason}")
+        else:
+            self.status_signal.emit(
+                f"✓ MDL 对齐完成 — {result.status}, {len(result.all_ops)} ops, "
+                f"{s.get('total_seconds', 0.0):.2f}s"
+            )
         self.finished_signal.emit(result)
 
 
@@ -269,11 +356,11 @@ class AutoRepairWorker(QThread):
         self.status_signal.emit("一键修复中…")
         try:
             try:
-                before = len(self._state._repair_log)
+                before = len(self._state.repair_log)
                 result = RepairService.auto_repair(
                     self._state, self._strategy, model=self._model, cache=self._cache
                 )
-                for act in result._repair_log[before:]:
+                for act in result.repair_log[before:]:
                     act.data["approvals"] = {"auto"}
                 self.finished_signal.emit(result)
             finally:
@@ -316,20 +403,17 @@ class EnvCheckThread(QThread):
                 ok, detail, models = ProviderManager.health_check(active)
                 result["embed_ok"] = ok
                 result["embed_detail"] = detail
-                result["embed_provider"] = active.label
                 result["embed_model"] = active.model_name
                 result["models_available"] = models
             else:
                 result["embed_ok"] = False
                 result["embed_detail"] = "未配置嵌入提供方"
-                result["embed_provider"] = ""
                 result["embed_model"] = ""
                 result["models_available"] = []
         except Exception as e:
             traceback.print_exc()
             result["embed_ok"] = False
             result["embed_detail"] = f"检测失败: {e}"
-            result["embed_provider"] = ""
             result["embed_model"] = ""
             result["models_available"] = []
 

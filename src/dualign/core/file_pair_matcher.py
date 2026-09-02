@@ -53,7 +53,6 @@ class MatchRule:
         tgt_pattern: 目标文件匹配模式 (仅 glob/regex 时有效)
         id_group:    正则捕获组编号 (仅 regex 时有效)
         suffix_pair: 后缀对，如 (".source.md", ".target.md")，用于 prefix 模式
-        sort_key:    当多个候选时如何排序以配对
     """
 
     type: Literal["prefix", "glob", "regex", "json_map"] = "prefix"
@@ -61,7 +60,6 @@ class MatchRule:
     tgt_pattern: str = "*.target.md"
     id_group: int = 1
     suffix_pair: tuple[str, str] = (".source.md", ".target.md")
-    sort_key: str = "natural"  # "name" | "numeric" | "natural"
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -24,15 +24,19 @@ from PySide6.QtWidgets import (
 
 from dualign.services.repair import (
     RepairService,
-    TableRow,
     make_table_view,
-    compute_spans,
+    current_score_slot_exists,
+    current_score_texts,
 )
+from dualign.models.state import RelationRow
+from dualign.services.table_projection import project_table_cells
 from dualign.models.marker import (
     is_deleted,
     is_merge,
+    needs_zero_score,
     format_anomaly_line,
 )
+from dualign.models.relation_status import RelationAnomaly
 from dualign.gui.base_table import (
     CHANGED_FLAG_ROLE,
     type_cl,
@@ -40,9 +44,9 @@ from dualign.gui.base_table import (
     anomaly_cl,
     priority_anomaly_type,
     compute_text_colors,
-    has_snap_text_changed,
+    relation_text_changes,
     text_color_for_side,
-    calc_snap_width,
+    calc_relation_width,
     make_score_cell,
 )
 import dualign.gui.base_table as _color_table  # 主题感知颜色，通过模块访问避免 import 时固化
@@ -52,13 +56,13 @@ import dualign.gui.base_table as _color_table  # 主题感知颜色，通过模�
 # ═══════════════════════════════════════════════════════════════
 
 COLUMN_HEADERS = [
-    "Snap",
+    "关系",
     "初始类型",
     "初始评分",
     "当前状态",
     "当前评分",
-    "原文",
-    "译文",
+    "文档 A",
+    "文档 B",
 ]
 
 
@@ -71,73 +75,94 @@ class WindowTableMixin:
     """WindowTableMixin — 通过多重继承为 DualignWindow 提供方法。"""
 
     @property
-    def selected_snaps(self) -> Set[int]:
-        """当前选中的 snap 集合（只读）。委托给 FocusManager。"""
-        return frozenset(self._focus.selected_snaps)
+    def selected_ordinals(self) -> Set[int]:
+        """当前选中的关系序号集合（只读）。"""
+        return frozenset(self._focus.selected_ordinals)
 
-    def _set_selected_snaps(self, snaps: Set[int], emit_indicator: bool = True):
+    def _set_selected_ordinals(self, ordinals: Set[int], emit_indicator: bool = True):
         """选中写入口，委托给 FocusManager。"""
-        snaps = snaps or set()
+        ordinals = ordinals or set()
         # 标准选中
-        if snaps == self._focus.selected_snaps:
+        if ordinals == self._focus.selected_ordinals:
             return
         if emit_indicator:
-            self._focus.select_snaps(snaps, source="table")
+            self._focus.select_ordinals(ordinals, source="table")
         else:
             # 静默更新（框选拖拽时由 mouse_release 触发 emit）
-            self._focus.selected_snaps = snaps
+            self._focus.selected_ordinals = ordinals
             self._update_table_highlight()
 
-    def _emit_indicator(self, snaps: Set[int]):
+    def _emit_indicator(self, ordinals: Set[int]):
         """根据选中集更新审校面板定位器。
 
         多选时始终用浏览模式。
         单选异常时用 go()（带进度信息）。
         非异常时切换到浏览模式（不清除 AI 建议焦点）。
         """
-        sorted_snaps = sorted(snaps) if snaps else sorted(self._focus.selected_snaps)
-        if not sorted_snaps:
+        selected = (
+            sorted(ordinals) if ordinals else sorted(self._focus.selected_ordinals)
+        )
+        if not selected:
             return
         if not self._anomalies:
-            self._review.show_browsing(sorted_snaps)
+            self._review.show_browsing(selected)
             return
-        if len(sorted_snaps) == 1:
+        if len(selected) == 1:
             for i, a in enumerate(self._anomalies):
-                a_list = a.get("snap_indices", [a.get("snap_index")])
-                if {s for s in a_list if s is not None} == set(sorted_snaps):
+                if set(a.ordinals) == set(selected):
                     self._review.go(i, scroll_to=False)
-                    self._focus.navigate_anomaly(i)
                     return
-        self._review.show_browsing(sorted_snaps)
+        self._review.show_browsing(selected)
 
-    def _on_go_to_row(self, snap_i: int):
-        """选中属于 snap_i 的全部行（含跨行合并的 sub-rows）。
+    def _on_go_to_row(self, ordinal: int):
+        """选中属于 ordinal 的全部行（含跨行合并的子行）。
 
         由 ◀▶ 定位器 / AI 建议表格点击触发，走 FocusManager 同时
         滚动对齐表到目标行。直接点击对齐表行不走此路径。
         """
-        self._focus.go_to_snap(snap_i, source="table")
-        # 滚动对齐表到目标行（直接点击时不滚动，由 _on_snap_focused 决定不滚）
+        self._focus.go_to_ordinal(ordinal, source="table")
+        # 滚动对齐表到目标行（直接点击时不滚动）
         # 此路径为 ◀▶ 定位 / AI 点击，需要对齐表跟随
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
-            if item is not None and item.data(Qt.ItemDataRole.UserRole) == snap_i:
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == ordinal:
                 self.table.scrollToItem(
                     item, QAbstractItemView.ScrollHint.PositionAtCenter
                 )
                 break
 
+    def _initial_focus_target(self) -> Optional[int]:
+        """返回新章节应聚焦的文本对。"""
+        if self._anomalies:
+            return self._anomalies[0].ordinal
+        if (
+            not getattr(self, "_all_anomaly_ordinals", set())
+            and self._filter_panel.show_all
+            and self._row_op_map
+        ):
+            return self._row_op_map[min(self._row_op_map)]
+        return None
+
+    def _focus_initial_text_pair(self):
+        """新章节载入后建立明确的初始焦点。"""
+        ordinal = self._initial_focus_target()
+        if ordinal is None:
+            return
+        if self._anomalies:
+            self._review.go(0, scroll_to=False)
+        self._on_go_to_row(ordinal)
+
     def _on_row_clicked(self, item):
         """itemClicked → 同步所有焦点组件。委托给 FocusManager。
 
-        Ctrl/Shift 多选时不移动焦点（避免覆盖用户选中的起始 snap）。
+        Ctrl/Shift 多选时不移动焦点（避免覆盖用户选中的起始关系）。
         """
         if item is None:
             return
-        snap_i = item.data(Qt.ItemDataRole.UserRole)
-        if snap_i is None:
+        ordinal = item.data(Qt.ItemDataRole.UserRole)
+        if ordinal is None:
             return
-        # 框选拖拽结束时 _table_mouse_release 设置此旗标，跳过 go_to_snap
+        # 框选拖拽结束时 _table_mouse_release 设置此旗标，跳过焦点切换
         if getattr(self, "_suppress_next_click", False):
             self._suppress_next_click = False
             return
@@ -151,10 +176,14 @@ class WindowTableMixin:
                 or mods == Qt.KeyboardModifier.ShiftModifier
             ):
                 return
-            self._focus.go_to_snap(snap_i, source="table")
+            self._focus.go_to_ordinal(ordinal, source="table")
 
-    def _get_selected_snaps_sorted(self) -> List[int]:
-        return sorted(self._focus.selected_snaps) if self._focus.selected_snaps else []
+    def _get_selected_ordinals_sorted(self) -> List[int]:
+        return (
+            sorted(self._focus.selected_ordinals)
+            if self._focus.selected_ordinals
+            else []
+        )
 
     def eventFilter(self, obj, event):
         from PySide6.QtCore import QEvent
@@ -189,12 +218,10 @@ class WindowTableMixin:
             elif tp == QEvent.Type.FocusOut:
                 self._hover_cancel()
                 self._review.show_browsing([])
-                self._ai_focus_lost = True
                 return False
             elif tp == QEvent.Type.FocusIn:
-                self._ai_focus_lost = False
-                if self._focus.selected_snaps:
-                    self._emit_indicator(self._focus.selected_snaps)
+                if self._focus.selected_ordinals:
+                    self._emit_indicator(self._focus.selected_ordinals)
                 return False
 
         # ── AI 建议表格 viewport ──
@@ -213,45 +240,45 @@ class WindowTableMixin:
     def _table_mouse_press(self, event):
         from PySide6.QtWidgets import QApplication
 
-        # ── 右键：仅保存快照，不修改选择 ──
+        # ── 右键：仅保存关系选择，不修改选择 ──
         if event.button() == Qt.MouseButton.RightButton:
-            self._context_saved_snaps = self._get_selected_snaps_sorted()
+            self._context_saved_ordinals = self._get_selected_ordinals_sorted()
             return False
 
         modifiers = QApplication.keyboardModifiers()
         row = self.table.rowAt(int(event.position().toPoint().y()))
-        snap_i = self._row_op_map.get(row)
-        if snap_i is None:
+        ordinal = self._row_op_map.get(row)
+        if ordinal is None:
             return False
 
         if modifiers == Qt.KeyboardModifier.NoModifier:
-            # 纯点击：选 snap，鼠标拖拽才启动框选
-            self._rubber_origin_snap = snap_i
+            # 纯点击：选关系，鼠标拖拽才启动框选
+            self._rubber_origin_ordinal = ordinal
             self._rubber_active = False
-            self._set_selected_snaps({snap_i}, emit_indicator=False)
+            self._set_selected_ordinals({ordinal}, emit_indicator=False)
         elif modifiers == Qt.KeyboardModifier.ControlModifier:
             self._rubber_active = False
-            self._rubber_origin_snap = None
-            new = set(self._focus.selected_snaps)
-            if snap_i in new:
-                new.discard(snap_i)
+            self._rubber_origin_ordinal = None
+            new = set(self._focus.selected_ordinals)
+            if ordinal in new:
+                new.discard(ordinal)
             else:
-                new.add(snap_i)
-            self._set_selected_snaps(new)
+                new.add(ordinal)
+            self._set_selected_ordinals(new)
         elif modifiers == Qt.KeyboardModifier.ShiftModifier:
             self._rubber_active = False
-            self._rubber_origin_snap = None
-            if self._focus.selected_snaps:
-                lo = min(min(self._focus.selected_snaps), snap_i)
-                hi = max(max(self._focus.selected_snaps), snap_i)
+            self._rubber_origin_ordinal = None
+            if self._focus.selected_ordinals:
+                lo = min(min(self._focus.selected_ordinals), ordinal)
+                hi = max(max(self._focus.selected_ordinals), ordinal)
                 new = set()
                 for r in range(self.table.rowCount()):
                     si = self._row_op_map.get(r)
                     if si is not None and lo <= si <= hi:
                         new.add(si)
-                self._set_selected_snaps(new)
+                self._set_selected_ordinals(new)
             else:
-                self._set_selected_snaps({snap_i})
+                self._set_selected_ordinals({ordinal})
         return False
 
     def _table_hover_track(self, event):
@@ -280,8 +307,8 @@ class WindowTableMixin:
         # itemAt 对合并单元格返回 span anchor（左上格），
         # 记录 anchor 行号以确保后续 item(row, col) 有值
         row = item.row()
-        snap_i = self._row_op_map.get(row)
-        if snap_i is None:
+        ordinal = self._row_op_map.get(row)
+        if ordinal is None:
             self._hover_cancel()
             return
 
@@ -292,9 +319,7 @@ class WindowTableMixin:
         # 切换了单元格 → 重置延迟
         self._hovered_row = row
         self._hovered_col = col
-        self._hovered_snap = snap_i
-        self._hover_is_ai = False
-        self._hovered_pos = pos
+        self._hovered_ordinal = ordinal
         TextHoverPopup.hide_text()
         self._hover_timer.start()
 
@@ -303,9 +328,7 @@ class WindowTableMixin:
         self._hover_timer.stop()
         self._hovered_row = -1
         self._hovered_col = -1
-        self._hovered_snap = -1
-        self._hover_is_ai = False
-        self._hovered_pos = None
+        self._hovered_ordinal = -1
         from dualign.gui.text_hover import TextHoverPopup
 
         TextHoverPopup.hide_text()
@@ -313,14 +336,14 @@ class WindowTableMixin:
     def _on_hover_show(self):
         """悬停延迟到期：仅对星标单元格弹出初始文本悬浮窗。
 
-        以 snap 侧为单位聚合所有子行的初始文本。无星标不弹窗。
+        以关系侧为单位聚合所有子行的初始文本。无星标不弹窗。
         仅主对齐表有悬浮窗，AI 建议表依赖原生 tooltip。
         """
         from dualign.gui.text_hover import TextHoverPopup
         from dualign.gui.base_table import CHANGED_FLAG_ROLE
 
-        snap_i = getattr(self, "_hovered_snap", -1)
-        if snap_i < 0:
+        ordinal = getattr(self, "_hovered_ordinal", -1)
+        if ordinal < 0:
             return
         col = getattr(self, "_hovered_col", -1)
 
@@ -329,13 +352,13 @@ class WindowTableMixin:
             self._hover_cancel()
             return
 
-        # 聚合该 snap 该侧所有子行的初始文本
+        # 聚合该关系该侧所有子行的初始文本
         initial_text = ""
         cell_rect = None
         if self._repair_state is not None:
             snapshot = self._repair_state.snapshot
-            if 0 <= snap_i < len(snapshot.original_ops):
-                s_idx, t_idx, _ = snapshot.original_ops[snap_i]
+            if 0 <= ordinal < len(snapshot.original_ops):
+                s_idx, t_idx, _ = snapshot.original_ops[ordinal]
                 if col == 5:
                     if s_idx:
                         initial_text = "\n".join(snapshot.src_text(i) for i in s_idx)
@@ -371,165 +394,188 @@ class WindowTableMixin:
         TextHoverPopup.adjust_theme()
 
     def _table_mouse_move(self, event):
-        if self._rubber_active is not True and self._rubber_origin_snap is not None:
+        if self._rubber_active is not True and self._rubber_origin_ordinal is not None:
             # 首次移动：启动框选
             self._rubber_active = True
             self._hover_cancel()
-        if not self._rubber_active or self._rubber_origin_snap is None:
+        if not self._rubber_active or self._rubber_origin_ordinal is None:
             return False
         row = self.table.rowAt(int(event.position().toPoint().y()))
-        snap_i = self._row_op_map.get(row)
-        if snap_i is None:
+        ordinal = self._row_op_map.get(row)
+        if ordinal is None:
             return False
-        lo = min(self._rubber_origin_snap, snap_i)
-        hi = max(self._rubber_origin_snap, snap_i)
+        lo = min(self._rubber_origin_ordinal, ordinal)
+        hi = max(self._rubber_origin_ordinal, ordinal)
         new = set()
         for r in range(self.table.rowCount()):
             si = self._row_op_map.get(r)
             if si is not None and lo <= si <= hi:
                 new.add(si)
-        self._set_selected_snaps(new, emit_indicator=False)
+        self._set_selected_ordinals(new, emit_indicator=False)
         return False
 
     def _table_mouse_release(self, event):
         if self._rubber_active:
             self._rubber_active = False
-            self._emit_indicator(self._focus.selected_snaps)
+            self._emit_indicator(self._focus.selected_ordinals)
             # 阻止后续 itemClicked → _on_row_clicked 覆盖框选结果
             self._suppress_next_click = True
-        self._rubber_origin_snap = None
+        self._rubber_origin_ordinal = None
         return False
 
     def _on_row_double_clicked(self, row: int):
         """双击行 → 打开编辑对话框。"""
-        snap_i = self._row_op_map.get(row)
-        if snap_i is not None:
-            self.do_edit_single(snap_i)
+        ordinal = self._row_op_map.get(row)
+        if ordinal is not None:
+            self.do_edit_single(ordinal)
 
     def _on_context_menu(self, pos):
         """右键菜单 — 根据当前选中文本对动态显示可用操作。"""
         menu = QMenu(self)
 
         # 从右键保存的快照恢复选择（防止 Qt 内建右键行为重置多选）
-        selected_snaps: List[int] = getattr(self, "_context_saved_snaps", []) or []
-        if not selected_snaps:
-            selected_snaps = self._get_selected_snaps_sorted()
-        if not selected_snaps:
+        selected_ordinals: List[int] = (
+            getattr(self, "_context_saved_ordinals", []) or []
+        )
+        if not selected_ordinals:
+            selected_ordinals = self._get_selected_ordinals_sorted()
+        if not selected_ordinals:
             return
 
         # 如果多选被 Qt 重置，从真理源恢复表格视觉选中
-        if len(selected_snaps) > 1 and len(self._get_selected_snaps_sorted()) == 1:
-            self._set_selected_snaps(set(selected_snaps), emit_indicator=False)
+        if (
+            len(selected_ordinals) > 1
+            and len(self._get_selected_ordinals_sorted()) == 1
+        ):
+            self._set_selected_ordinals(set(selected_ordinals), emit_indicator=False)
 
-        snap_i = selected_snaps[0]
+        ordinal = selected_ordinals[0]
 
         # ── 复制格式 ──
         copy_menu = menu.addMenu("📋 复制格式")
         copy_md = copy_menu.addAction("Markdown 表格")
-        copy_md.triggered.connect(lambda: self._copy_snap_as_markdown(selected_snaps))
+        copy_md.triggered.connect(
+            lambda: self._copy_relations_as_markdown(selected_ordinals)
+        )
         copy_tsv = copy_menu.addAction("TSV（制表符分隔）")
-        copy_tsv.triggered.connect(lambda: self._copy_snap_as_tsv(selected_snaps))
+        copy_tsv.triggered.connect(
+            lambda: self._copy_relations_as_tsv(selected_ordinals)
+        )
         menu.addSeparator()
 
-        ops = RepairService.valid_operations(self._repair_state, snap_i)
+        capabilities = RepairService.valid_selection_operations(
+            self._repair_state, selected_ordinals
+        )
 
-        if ops.get("merge"):
+        if len(selected_ordinals) == 1:
             a = menu.addAction("合并 [M]")
-            a.triggered.connect(lambda: self.do_merge(snap_i))
-        if ops.get("split_tgt") or ops.get("split_src"):
-            a = menu.addAction("拆分 [S]")
-            a.triggered.connect(lambda: self.do_split(snap_i))
+            a.setEnabled(capabilities["merge"])
+            a.triggered.connect(lambda: self.do_merge(ordinal))
+        else:
+            a = menu.addAction(f"⤓ 合并选中 ({len(selected_ordinals)} → 1) [M]")
+            a.setEnabled(capabilities["merge"])
+            if not capabilities["merge"]:
+                a.setToolTip("跨关系合并要求选择连续文本对")
+            a.triggered.connect(lambda: self.do_bundle_relations(selected_ordinals))
 
-        # 跨 snap 合并 — 多选时可用
-        if len(selected_snaps) > 1:
-            menu.addSeparator()
-            a = menu.addAction(f"⤓ 合并选中 ({len(selected_snaps)} → 1) [M]")
-            a.setToolTip("将多个 snap 捆绑合并为一个文本对，原文和译文均合并")
-            a.triggered.connect(lambda: self.do_bundle_snaps(selected_snaps))
+        a = menu.addAction("拆分 [S]")
+        a.setEnabled(capabilities["split"])
+        a.triggered.connect(lambda: self.do_split(ordinal))
 
         menu.addSeparator()
 
-        if len(selected_snaps) > 1:
-            a = menu.addAction(f"校订选中 ({len(selected_snaps)} 组) [E]")
-            a.triggered.connect(lambda: self.do_edit_selected(selected_snaps))
-        elif ops.get("edit"):
+        if len(selected_ordinals) > 1:
+            a = menu.addAction(f"校订选中 ({len(selected_ordinals)} 组) [E]")
+            a.setEnabled(capabilities["edit"])
+            if not capabilities["edit"]:
+                a.setToolTip("跨关系校订要求选择连续文本对")
+            a.triggered.connect(lambda: self.do_edit_selected(selected_ordinals))
+        else:
             a = menu.addAction("校订 [E]")
-            a.triggered.connect(lambda: self.do_edit_single(snap_i))
+            a.setEnabled(capabilities["edit"])
+            a.triggered.connect(lambda: self.do_edit_single(ordinal))
 
         a = menu.addAction("审核通过")
-        a.setEnabled(ops.get("ok", False))
-        a.triggered.connect(lambda: self.do_ok(snap_i))
-        a = menu.addAction("标记异常")
-        a.triggered.connect(lambda: self.do_flag(snap_i))
-        if len(selected_snaps) > 1:
-            a = menu.addAction(f"✕ 删除选中 ({len(selected_snaps)} 组)")
-            a.triggered.connect(lambda: self._delete_selected_snaps(selected_snaps))
+        a.setEnabled(len(selected_ordinals) == 1 and capabilities["ok"])
+        a.triggered.connect(lambda: self.do_ok(ordinal))
+        flag_label = "编辑标记…" if len(selected_ordinals) == 1 else "批量编辑标记…"
+        a = menu.addAction(flag_label)
+        a.setEnabled(capabilities["flag"])
+        a.triggered.connect(lambda: self.do_flag_selected(selected_ordinals))
+        if len(selected_ordinals) > 1:
+            a = menu.addAction(f"✕ 删除选中 ({len(selected_ordinals)} 组)")
+            a.triggered.connect(
+                lambda: self._delete_selected_relations(selected_ordinals)
+            )
         else:
             a = menu.addAction("✕ 删除")
-            a.triggered.connect(lambda: self.do_delete(snap_i))
+            a.triggered.connect(lambda: self.do_delete(ordinal))
 
-        if ops.get("placeholder"):
-            a = menu.addAction("▸ 占位")
-            a.triggered.connect(lambda: self.do_placeholder(snap_i))
+        a = menu.addAction("▸ 占位")
+        a.setEnabled(len(selected_ordinals) == 1 and capabilities["placeholder"])
+        a.triggered.connect(lambda: self.do_placeholder(ordinal))
 
         menu.addSeparator()
 
-        if ops.get("reset"):
-            a = menu.addAction("↺ 重置")
-            a.triggered.connect(lambda: self.do_reset(snap_i))
+        a = menu.addAction("↺ 重置")
+        a.setEnabled(len(selected_ordinals) == 1 and capabilities["reset"])
+        a.triggered.connect(lambda: self.do_reset(ordinal))
 
         # ── AI 选项 ──
         menu.addSeparator()
-        a = menu.addAction("AI 分析此对")
-        a.triggered.connect(lambda: self._review.analyze_snaps([snap_i]))
-        if len(selected_snaps) > 1:
-            a = menu.addAction(f"AI 批量分析 ({len(selected_snaps)} 对)")
-            a.triggered.connect(lambda: self._review.analyze_snaps(selected_snaps))
+        if len(selected_ordinals) == 1:
+            a = menu.addAction("AI 分析此对")
+            a.triggered.connect(lambda: self._review.analyze_relations([ordinal]))
+        else:
+            a = menu.addAction(f"AI 批量分析 ({len(selected_ordinals)} 对)")
+            a.triggered.connect(
+                lambda: self._review.analyze_relations(selected_ordinals)
+            )
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
-    def _copy_snap_as_markdown(self, snaps: List[int]):
-        """将选中 snaps 的文本复制为 Markdown 表格格式。"""
-        text = self._format_snaps(snaps, fmt="markdown")
+    def _copy_relations_as_markdown(self, ordinals: List[int]):
+        """将选中关系复制为 Markdown 表格格式。"""
+        text = self._format_relations(ordinals, fmt="markdown")
         QApplication.clipboard().setText(text)
-        self._safe_status(f"📋 已复制 {len(snaps)} 个 snap (Markdown)")
+        self._safe_status(f"📋 已复制 {len(ordinals)} 个关系 (Markdown)")
 
-    def _copy_snap_as_tsv(self, snaps: List[int]):
-        """将选中 snaps 的文本复制为 TSV 格式。"""
-        text = self._format_snaps(snaps, fmt="tsv")
+    def _copy_relations_as_tsv(self, ordinals: List[int]):
+        """将选中关系复制为 TSV 格式。"""
+        text = self._format_relations(ordinals, fmt="tsv")
         QApplication.clipboard().setText(text)
-        self._safe_status(f"📋 已复制 {len(snaps)} 个 snap (TSV)")
+        self._safe_status(f"📋 已复制 {len(ordinals)} 个关系 (TSV)")
 
-    def _format_snaps(self, snaps: List[int], fmt: str = "markdown") -> str:
-        """将 snaps 格式化为人类可读文本。
+    def _format_relations(self, ordinals: List[int], fmt: str = "markdown") -> str:
+        """将关系格式化为人类可读文本。
 
-        fmt='markdown': 单张统一 Markdown 表格（多 snap 时合并为一张表）
+        fmt='markdown': 单张统一 Markdown 表格（多关系时合并为一张表）
         fmt='tsv':      制表符分隔，便于粘贴到 Excel
         """
         if self._repair_state is None:
             return ""
-        snap = self._repair_state.snapshot
+        snapshot = self._repair_state.snapshot
         # 获取当前表格视图（含当前状态文本）
         from dualign.services.repair import make_table_view
 
         view = make_table_view(self._repair_state)
-        # 按 snap_index 分组当前行
-        cur_rows: Dict[int, List[TableRow]] = {}
+        # 按当前关系序号分组当前行
+        cur_rows: Dict[int, List[RelationRow]] = {}
         for r in view.rows:
-            cur_rows.setdefault(r.snap_index, []).append(r)
+            cur_rows.setdefault(r.ordinal, []).append(r)
 
         if fmt == "markdown":
             # ── 统一单张 Markdown 表格 ──
             md_lines: List[str] = []
-            md_lines.append("| Snap | 类型 | 标记 | 原文 | 译文 |")
+            md_lines.append("| 关系 | 类型 | 标记 | 文档 A | 文档 B |")
             md_lines.append("|---|---|---|---|---|")
-            for si in snaps:
-                if si >= len(snap.original_ops):
+            for ordinal in ordinals:
+                if ordinal >= len(snapshot.original_ops):
                     continue
-                s_idx, t_idx, sc = snap.original_ops[si]
+                s_idx, t_idx, sc = snapshot.original_ops[ordinal]
                 ls, lt = len(s_idx), len(t_idx)
                 init_type = f"{ls}:{lt}"
-                rows = cur_rows.get(si, [])
+                rows = cur_rows.get(ordinal, [])
                 r0 = rows[0] if rows else None
                 marker = r0.marker if r0 else ""
                 cur_src_lines = [r.src_text for r in rows]
@@ -538,27 +584,27 @@ class WindowTableMixin:
                 for k in range(cnt):
                     s = cur_src_lines[k] if k < len(cur_src_lines) else ""
                     t = cur_tgt_lines[k] if k < len(cur_tgt_lines) else ""
-                    snap_label = str(si) if k == 0 else ""
+                    relation_label = str(ordinal) if k == 0 else ""
                     type_label = init_type if k == 0 else ""
                     marker_label = marker if (k == 0 and marker) else ""
                     # 转义管道符和换行
                     s = s.replace("|", "\\|").replace("\n", " ")
                     t = t.replace("|", "\\|").replace("\n", " ")
                     md_lines.append(
-                        f"| {snap_label} | {type_label} | {marker_label} | {s} | {t} |"
+                        f"| {relation_label} | {type_label} | {marker_label} | {s} | {t} |"
                     )
             md_lines.append("")
             return "\n".join(md_lines)
 
         # ── TSV 格式 ──
         lines: List[str] = []
-        for si in snaps:
-            if si >= len(snap.original_ops):
+        for ordinal in ordinals:
+            if ordinal >= len(snapshot.original_ops):
                 continue
-            s_idx, t_idx, sc = snap.original_ops[si]
+            s_idx, t_idx, sc = snapshot.original_ops[ordinal]
             ls, lt = len(s_idx), len(t_idx)
             init_type = f"{ls}:{lt}"
-            rows = cur_rows.get(si, [])
+            rows = cur_rows.get(ordinal, [])
             r0 = rows[0] if rows else None
             cur_type = r0.cur_type if r0 else init_type
             cur_score = r0.score if r0 else float(sc)
@@ -568,7 +614,7 @@ class WindowTableMixin:
 
             marker_s = f" [{marker}]" if marker else ""
             lines.append(
-                f"snap[{si}]\tinit={init_type}\tscore={sc:.1%}"
+                f"relation[{ordinal}]\tinit={init_type}\tscore={sc:.1%}"
                 f"\tcur={cur_type}\tscore={cur_score:.1%}{marker_s}"
             )
             cnt = max(len(cur_src_lines), len(cur_tgt_lines))
@@ -594,7 +640,7 @@ class WindowTableMixin:
         self._update_doc_summary()
         self._update_status_bar()
         self._sync_undo_redo()
-        # 操作后立即触发一次轮询，加速 pending snap 的评分刷新
+        # 操作后立即触发一次轮询，加速待计算关系的评分刷新
         _sm = getattr(self, "_score_mgr", None)
         if _sm is not None:
             _sm.poll_now()
@@ -609,38 +655,72 @@ class WindowTableMixin:
             return
         self._score_mgr.set_text_provider(self._get_subrow_text_for_score)
         for g in self._repair_state.current.groups:
+            text_changed = self._repair_state.relation_text_changed(g.relation_id)
+            action = self._repair_state.action_for_relation(g.relation_id)
+            split_scores = (
+                action.data.get("split_scores", [])
+                if action is not None and action.kind == "split"
+                else []
+            )
+            relation_id = g.relation_id
             for r in g.rows:
-                key = f"{g.snap_i}_{r.sub}"
-                score = getattr(self, "_score_cache", {}).get(key)
+                # 关系级评分只注册 anchor 槽；其余子行由跨行单元格覆盖。
+                if not current_score_slot_exists(g, r.sub):
+                    continue
+                if needs_zero_score(r.marker):
+                    self._score_cache.discard(relation_id, r.sub)
+                    self._score_mgr.set_ready_score(g.ordinal, r.sub, 0.0)
+                    continue
+                if not text_changed:
+                    # 当前文本就是初始文本：两列评分必须共享同一事实。
+                    # 丢弃旧版曾为未修改行异步重算出的派生缓存。
+                    self._score_cache.discard(relation_id, r.sub)
+                    self._score_mgr.set_ready_score(g.ordinal, r.sub, r.orig_score)
+                    continue
+                score = (
+                    split_scores[r.sub]
+                    if r.sub < len(split_scores)
+                    else self._score_cache.get(relation_id, r.sub)
+                )
                 if score is not None:
-                    self._score_mgr.set_ready_score(g.snap_i, r.sub, score)
+                    score = float(score)
+                    self._score_mgr.set_ready_score(g.ordinal, r.sub, score)
+                    self._score_cache.set(relation_id, r.sub, score)
                 else:
                     # 无持久化分数→留 pending，_poll 异步重算
-                    self._score_mgr.set_ready_score(g.snap_i, r.sub, r.score)
-                    self._score_mgr.invalidate(g.snap_i, r.sub)
+                    self._score_mgr.set_ready_score(g.ordinal, r.sub, r.score)
+                    self._score_mgr.invalidate(g.ordinal, r.sub)
         self._score_mgr.start_polling()
 
-    def _get_subrow_text_for_score(self, snap_index: int, sub: int):
-        """供 ScoreManager 轮询使用的文本提供器。按子行独立评分。
+    def _get_subrow_text_for_score(self, ordinal: int, sub: int):
+        """供 ScoreManager 轮询使用的文本提供器。
+
+        split/edit 的当前 1:1 按子行评分；非对称关系和 merge 按完整关系评分。
 
         Returns:
             (src_text, tgt_text) or None（子行不存在时）
         """
         if self._repair_state is None:
             return None
-        g = self._repair_state.current.group(snap_index)
-        if g is None or sub >= len(g.rows):
+        g = self._repair_state.current.group(ordinal)
+        if g is None:
             return None
-        r = g.rows[sub]
-        return (r.src_text or "", r.tgt_text or "")
+        if g.rows and needs_zero_score(g.rows[0].marker):
+            return None
+        return current_score_texts(g, sub)
 
-    def _on_score_updated(self, snap_index: int, sub: int, new_score: float):
+    def _on_score_updated(self, ordinal: int, sub: int, new_score: float):
         """单子行分数就绪 → 持久化 + 更新单元格。"""
+        if self._repair_state is None or not (
+            0 <= ordinal < len(self._repair_state.snapshot.original_ops)
+        ):
+            # ScoreManager normally rejects results from an invalidated
+            # document generation.  Keep the GUI boundary defensive against
+            # third-party/custom score managers emitting stale ordinals.
+            return
         # 持久化
-        key = f"{snap_index}_{sub}"
-        if not hasattr(self, "_score_cache"):
-            self._score_cache = {}
-        self._score_cache[key] = new_score
+        relation_id = self._repair_state.snapshot.relation_id(ordinal)
+        self._score_cache.set(relation_id, sub, new_score)
 
         if getattr(self, "_render_in_progress", False):
             return
@@ -649,7 +729,7 @@ class WindowTableMixin:
             getattr(self, "_filter_panel", None) and self._filter_panel.show_scores
         )
         for row_idx, row in enumerate(getattr(self, "_render_cache_rows", [])):
-            if row.snap_index == snap_index and row.sub == sub:
+            if row.ordinal == ordinal and row.sub == sub:
                 cell = self.table.item(row_idx, 4)
                 if cell:
                     from dualign.gui.base_table import make_score_cell
@@ -675,11 +755,11 @@ class WindowTableMixin:
             )
         self._render_preview()
 
-    def _on_score_status_changed(self, snap_index: int, sub: int, state: str):
+    def _on_score_status_changed(self, ordinal: int, sub: int, state: str):
         """评分状态变更。"""
         if state == "failed":
-            self._safe_status(f"snap[{snap_index}] 评分计算失败")
-            self._set_temp_status(f"snap[{snap_index}] 评分计算失败", "warning")
+            self._safe_status(f"关系[{ordinal}] 评分计算失败")
+            self._set_temp_status(f"关系[{ordinal}] 评分计算失败", "warning")
 
     def _on_theme_changed(self, scheme: str):
         """主题切换（dark/light）时刷新所有 QSS 依赖色。
@@ -718,7 +798,7 @@ class WindowTableMixin:
             # 不需要显式设置，QPalette 已处理
 
     def _rebuild_anomalies(self, k: Optional[float] = None):
-        """重建异常列表。使用 SnapState 体系。
+        """从唯一 RepairState 投影当前异常列表。
         Args:
             k: Z-score 阈值，为 None 时使用默认值 3.0。
         """
@@ -726,25 +806,16 @@ class WindowTableMixin:
             self._anomalies = []
             return
 
-        from dualign.models.snap_state import build_snap_states, refresh_snap_states
+        from dualign.models.relation_status import project_relation_statuses
 
         state = self._repair_state
         ch = state.current
-        snap = state.snapshot
 
-        # 构建 SnapState
-        snap_states = build_snap_states(
-            snapshot=snap,
-            src_lines=list(snap.original_src_lines),
-            tgt_lines=list(snap.original_tgt_lines),
-            repair_log=state.repair_log,
-            k=k,
-        )
-        snap_states = refresh_snap_states(snap_states, snap, ch, state.repair_log)
+        relation_statuses = project_relation_statuses(state, k=3.0 if k is None else k)
 
-        # ── 记录所有含异常类型的 snap（不受筛选影响），供 _apply_filter 判断"纯 1:1"用 ──
-        self._all_anomaly_snaps = {
-            si for si, st in enumerate(snap_states) if st.anomaly_types
+        # 记录所有含异常类型的关系（不受筛选影响），供筛选判断“纯 1:1”。
+        self._all_anomaly_ordinals = {
+            si for si, st in enumerate(relation_statuses) if st.initial_anomaly_types
         }
 
         # 从 filter_panel 获取筛选条件
@@ -759,21 +830,24 @@ class WindowTableMixin:
             self._review.set_anomalies([])
             return
 
-        sf = fp.snap_filter
+        sf = fp.relation_filter
         self._anomalies = []
         # 直接构建当前文本异常映射，供 _render_table 读取
         self._current_atypes_map: Dict[int, Set[str]] = {}
 
         for g in ch.groups:
-            si = g.snap_i
-            st = snap_states[si]
+            si = g.ordinal
+            st = relation_statuses[si]
             r0 = g.rows[0]
-            action = state.action_for_op(si)
+            action = state.action_for_relation(g.relation_id)
+            flag_action = (
+                state.flag_for_relation(g.relation_id) if st.is_flagged else None
+            )
 
             # ── 异常匹配（同组 OR）──
             # 按检测依据模式选择 anomaly 来源：
-            #   - 初始文本: SnapState.initial_anomaly_types（Layer 1 不可变事实）
-            #   - 当前文本: SnapState.current_anomaly_types（Layer 2 可变状态）
+            #   - 初始文本: RelationStatus.initial_anomaly_types
+            #   - 当前文本: RelationStatus.current_anomaly_types
             # FLAGGED 不是对齐器检测的，独立于 ref_current 模式处理
             atypes = (
                 st.current_anomaly_types if fp.ref_current else st.initial_anomaly_types
@@ -803,27 +877,30 @@ class WindowTableMixin:
             if not has_origin and action is None and not st.is_deleted:
                 continue
 
-            # 跨 snap 校订
-            snap_indices = [si]
+            # 跨关系校订
+            ordinals = (si,)
+            relation_ids = (g.relation_id,)
             resolution = action.kind if action else ""
-            if action and action.data.get("orig_snaps"):
-                snap_indices = sorted(action.data["orig_snaps"])
+            if action:
+                ordinals = tuple(sorted(self._repair_state.action_ordinals(action)))
+                relation_ids = action.relation_ids
 
             self._anomalies.append(
-                {
-                    "snap_index": si,
-                    "snap_indices": snap_indices,
-                    "src_text": r0.src_text,
-                    "tgt_text": r0.tgt_text,
-                    "init_type": r0.init_type,
-                    "cur_type": r0.cur_type,
-                    "score": r0.score,
-                    "marker": r0.marker,
-                    "resolution": resolution,
-                    "approval": st.approval,
-                    "signals": st.signals,
-                    "anomaly_types": st.initial_anomaly_types,
-                }
+                RelationAnomaly(
+                    relation_ids=relation_ids,
+                    ordinals=ordinals,
+                    src_text=r0.src_text,
+                    tgt_text=r0.tgt_text,
+                    init_type=r0.init_type,
+                    cur_type=r0.cur_type,
+                    score=r0.score,
+                    marker=r0.marker,
+                    resolution=resolution,
+                    note=flag_action.data.get("note", "") if flag_action else "",
+                    approval=st.approval,
+                    signals=tuple(st.signals),
+                    anomaly_types=tuple(st.initial_anomaly_types),
+                )
             )
             # 构建当前文本异常映射（col 3 Layer 2 用）
             self._current_atypes_map[si] = set(st.current_anomaly_types)
@@ -834,19 +911,9 @@ class WindowTableMixin:
         """筛选 + 渲染表格。先重建异常列表以反映最新质量控制勾选。
 
         预览模式：按原始行索引平坦排列，诚实展示逐行对照和错位问题。
-        拒绝文档（不可靠对齐）自动锁定预览模式，此时无 snap 概念。
+        拒绝文档（不可靠对齐）自动锁定预览模式，此时无关系投影。
         """
         self._rebuild_anomalies()
-
-        if self._repair_state is None:
-            return
-
-        # ── 不可靠对齐自动锁定预览模式 ──
-        qa = getattr(self, "_last_quality_assessment", None)
-        is_unreliable = qa and qa.get("quality") == "unreliable"
-        if is_unreliable and not self._preview_active:
-            self._on_view_mode_toggled(True)
-            # 视图模式开关也会相应更新（由 toggled 信号链触发）
 
         # 切换预览/普通模式 — 由 StatusBar 视图模式切换触发
         preview = self._preview_active
@@ -854,44 +921,49 @@ class WindowTableMixin:
             self._render_preview()
             return
 
+        if self._repair_state is None:
+            return
+
         view = make_table_view(self._repair_state)
         all_rows = view.rows
 
-        anomaly_snaps: Dict[int, Set[str]] = {}
+        anomaly_ordinals: Dict[int, Set[str]] = {}
         anomaly_signals: Dict[int, List[str]] = {}
         for a in self._anomalies:
-            si = a["snap_index"]
-            if si not in anomaly_snaps:
-                anomaly_snaps[si] = set()
-            anomaly_snaps[si].update(a["anomaly_types"])
-            sigs = a.get("signals", [])
-            if sigs:
-                anomaly_signals[si] = sigs
+            si = a.ordinal
+            if si is None:
+                continue
+            if si not in anomaly_ordinals:
+                anomaly_ordinals[si] = set()
+            anomaly_ordinals[si].update(a.anomaly_types)
+            if a.signals:
+                anomaly_signals[si] = list(a.signals)
         # FLAGGED 在 initial_anomaly_types 中已移除，但颜色条和异常标记仍需展示
         for a in self._anomalies:
-            if a.get("resolution") == "flag":
-                si = a["snap_index"]
-                anomaly_snaps.setdefault(si, set()).add("FLAGGED")
+            if a.resolution == "flag" and a.ordinal is not None:
+                anomaly_ordinals.setdefault(a.ordinal, set()).add("FLAGGED")
         ctx = self._filter_panel.context_lines
-        context_snaps: Set[int] = set()
+        context_ordinals: Set[int] = set()
 
-        # ── 确定应当显示的 snap 集合 ──
-        show_snaps = set(anomaly_snaps.keys())
-        for snap_i in show_snaps:
+        # ── 确定应当显示的关系集合 ──
+        show_ordinals = set(anomaly_ordinals)
+        for ordinal in show_ordinals:
             for offset in range(-ctx, ctx + 1):
                 if offset != 0:
-                    context_snaps.add(snap_i + offset)
+                    context_ordinals.add(ordinal + offset)
 
-        # ── 筛选表行（含 FocusManager.force_show_snaps 覆盖）──
-        filtered: List[TableRow] = []
+        # ── 筛选表行（含 FocusManager.force_show_ordinals 覆盖）──
+        filtered: List[RelationRow] = []
         self._row_op_map = {}
-        force_show = self._focus.force_show_snaps if hasattr(self, "_focus") else set()
+        force_show = (
+            self._focus.force_show_ordinals if hasattr(self, "_focus") else set()
+        )
         for row in all_rows:
-            is_anomaly = row.snap_index in anomaly_snaps
-            is_context = row.snap_index in context_snaps and not is_anomaly
-            is_force = row.snap_index in force_show
+            is_anomaly = row.ordinal in anomaly_ordinals
+            is_context = row.ordinal in context_ordinals and not is_anomaly
+            is_force = row.ordinal in force_show
             # show_all: 所有未被当前筛选标记为异常的行以普通行显示
-            # 不引入 _all_anomaly_snaps——用户取消勾选的异常类对应的 snap
+            # 不引入全部异常关系——用户取消勾选的异常类对应关系
             # 应以普通行出现在表中，而非被隐藏。
             is_plain = (
                 self._filter_panel.show_all
@@ -902,9 +974,11 @@ class WindowTableMixin:
 
             if is_anomaly or is_context or is_force or is_plain:
                 filtered.append(row)
-                self._row_op_map[len(filtered) - 1] = row.snap_index
+                self._row_op_map[len(filtered) - 1] = row.ordinal
 
-        self._render_table(filtered, anomaly_snaps, anomaly_signals, context_snaps)
+        self._render_table(
+            filtered, anomaly_ordinals, anomaly_signals, context_ordinals
+        )
 
         # ── 无异常且非显示全部 → 切换到空状态提示页 ──
         if not self._filter_panel.show_all and not filtered:
@@ -935,13 +1009,13 @@ class WindowTableMixin:
 
         原文列 = 按序收集当前状态的原文行
         译文列 = 按序收集当前状态的译文行
-        两侧长度可以不等，不插入空行补位，不按 snap 配对。
+        两侧长度可以不等，不插入空行补位，不按关系配对。
 
         规则:
           - [D] 删除 → 整组跳过不输出
           - [M] 合并 → _smart_join 多行文本为一行（与 render_rows/导出一致）
-          - [E]/[S]/[P] → 取 AlignedRow 的内联文本
-          - 无标记 → 取 AlignedRow 的原始文本，短侧空行跳过
+          - [E]/[S]/[P] → 取 RelationRow 的内联文本
+          - 无标记 → 取 RelationRow 的原始文本，短侧空行跳过
 
         Returns:
             (src_lines, tgt_lines)
@@ -949,10 +1023,9 @@ class WindowTableMixin:
         if self._repair_state is None:
             return [], []
 
-        from dualign.core import _smart_join_lines
+        from dualign.core.text import smart_join_lines
 
         ch = self._repair_state.current
-        snap = self._repair_state.snapshot
         src_out: list[str] = []
         tgt_out: list[str] = []
 
@@ -967,9 +1040,12 @@ class WindowTableMixin:
 
             if is_merge(marker):
                 # [M]: 智能合并为一行（与 render_rows / 导出文件一致）
-                s_idx, t_idx, _ = snap.original_ops[g.snap_i]
-                src_out.append(_smart_join_lines([snap.src_text(i) for i in s_idx]))
-                tgt_out.append(_smart_join_lines([snap.tgt_text(j) for j in t_idx]))
+                src_out.append(
+                    smart_join_lines([r.src_text for r in g.rows if r.src_text])
+                )
+                tgt_out.append(
+                    smart_join_lines([r.tgt_text for r in g.rows if r.tgt_text])
+                )
             else:
                 # [E]/[S]/[P]/[OK]/[F]/无标记: 取子行文本，跳过空串
                 for r in g.rows:
@@ -991,8 +1067,8 @@ class WindowTableMixin:
           3. 缺行：淡橙高亮
 
         核心语义：
-          - 两侧各自独立按序铺陈，不按 snap 配对，不插入空行补位
-          - 2:1 snap → src 2 行、tgt 1 行，下一 snap 的 tgt 自动补位到第二行
+          - 两侧各自独立按序铺陈，不按关系配对，不插入空行补位
+          - 2:1 关系 → A 侧 2 行、B 侧 1 行；后一关系按各侧顺序继续铺陈
           - [D] 删除 → 整组不输出
         """
         from dualign.gui.base_table import make_score_cell
@@ -1118,54 +1194,29 @@ class WindowTableMixin:
     # ── _render_table 子逻辑（纯数据计算，提取以降低圈复杂度）──
 
     @staticmethod
-    def _compute_divider_cells(
-        rows: List[TableRow],
-        spans: dict,
-        spanned_cells: Set[Tuple[int, int]],
-    ) -> Set[Tuple[int, int]]:
-        """计算合并 [M] 行之间的分隔虚线单元格。"""
-        divider_cells: Set[Tuple[int, int]] = set()
-        for ri, row in enumerate(rows):
-            if (
-                row.sub > 0
-                and ri - 1 >= 0
-                and rows[ri - 1].snap_index == row.snap_index
-            ):
-                first = rows[ri - row.sub]
-                if "[M]" in (first.marker or ""):
-                    prev = ri - 1
-                    for col in (5, 6):
-                        if (prev, col) not in spanned_cells and (
-                            prev,
-                            col,
-                        ) not in spans:
-                            divider_cells.add((prev, col))
-        return divider_cells
-
-    @staticmethod
-    def _compute_snap_display(row: TableRow) -> str:
-        """计算 Snap 列显示文本（col 0）。"""
+    def _compute_relation_display(row: RelationRow) -> str:
+        """计算关系列显示文本（col 0）。"""
         if row.sub != 0:
             return ""
         init_lines = row.init_type.split("\n") if row.init_type else []
-        snap_nums = []
+        relation_ordinals = []
         for ln in init_lines:
-            if ln.startswith("snap "):
+            if ln.startswith("关系 "):
                 try:
-                    snap_nums.append(int(ln.split()[1]))
+                    relation_ordinals.append(int(ln.split()[1]))
                 except (IndexError, ValueError):
                     pass
-        if len(snap_nums) > 1:
-            return "\n---\n".join(str(s) for s in snap_nums)
-        return str(row.snap_index)
+        if len(relation_ordinals) > 1:
+            return "\n---\n".join(str(value) for value in relation_ordinals)
+        return str(row.ordinal)
 
     @staticmethod
-    def _compute_init_type_display(row: TableRow) -> str:
+    def _compute_init_type_display(row: RelationRow) -> str:
         """计算初始类型列显示文本（col 1）。"""
         init_lines = row.init_type.split("\n") if row.init_type else []
         bundled = len(init_lines) > 1 and ("---" in row.init_type)
         if bundled and row.sub == 0:
-            pure_types = [ln for ln in init_lines if not ln.startswith("snap ")]
+            pure_types = [ln for ln in init_lines if not ln.startswith("关系 ")]
             return "  ".join(pure_types)
         elif bundled:
             return init_lines[-1] if len(init_lines) >= 2 else ""
@@ -1175,7 +1226,7 @@ class WindowTableMixin:
 
     @staticmethod
     def _compute_cur_type_text(
-        row: TableRow, cur_atypes: Set[str], show_cur: bool
+        row: RelationRow, cur_atypes: Set[str], show_cur: bool
     ) -> str:
         """计算当前状态列文本（col 3, 两层: 标记 + 异常标签）。"""
         if not show_cur:
@@ -1190,46 +1241,46 @@ class WindowTableMixin:
             return l2
         return ""
 
-    def _compute_snap_text_changes(
-        self, rows: List[TableRow]
+    def _compute_relation_text_changes(
+        self, rows: List[RelationRow]
     ) -> Tuple[Set[int], Set[int]]:
-        """预计算 snap 级文本变化标记（用于星标）。
+        """预计算关系级文本变化标记（用于星标）。
 
-        遍历每个 snap 的全部 repair_log actions，只要有任何一条操作
+        遍历每个关系的全部 repair_log actions，只要有任何一条操作
         改变了文本内容（edit/placeholder/split），即标星。
-        返回 (changed_src_snaps, changed_tgt_snaps)。
+        返回两侧发生文本变化的关系序号集合。
         """
-        snap_changed_src: Set[int] = set()
-        snap_changed_tgt: Set[int] = set()
+        changed_src: Set[int] = set()
+        changed_tgt: Set[int] = set()
         if self._repair_state is not None:
             snapshot = self._repair_state.snapshot
             for row in rows:
-                si = row.snap_index
-                if si in snap_changed_src and si in snap_changed_tgt:
+                si = row.ordinal
+                if si in changed_src and si in changed_tgt:
                     continue
                 for action in self._repair_state.repair_log:
-                    if action.op_index != si:
+                    if si not in self._repair_state.action_ordinals(action):
                         continue
-                    sc, tc = has_snap_text_changed(si, action, snapshot)
+                    sc, tc = relation_text_changes(si, action, snapshot)
                     if sc:
-                        snap_changed_src.add(si)
+                        changed_src.add(si)
                     if tc:
-                        snap_changed_tgt.add(si)
-                    if si in snap_changed_src and si in snap_changed_tgt:
+                        changed_tgt.add(si)
+                    if si in changed_src and si in changed_tgt:
                         break
-        return snap_changed_src, snap_changed_tgt
+        return changed_src, changed_tgt
 
     def _render_table(
         self,
-        rows: List[TableRow],
-        anomaly_snaps: Dict[int, Set[str]],
+        rows: List[RelationRow],
+        anomaly_ordinals: Dict[int, Set[str]],
         anomaly_signals: Dict[int, List[str]],
-        context_snaps: Set[int],
+        context_ordinals: Set[int],
     ):
         """渲染 7 列表格。每格颜色在创建时即确定，无后置覆盖。
 
         着色规则:
-          col 0 (Snap):      #888 灰色
+          col 0 (关系):       #888 灰色
           col 1 (init_type):  type_cl(init_type) — 1:1 灰 / N:M 金 / 1:0 红
           col 2 (init_score): score_to_color(orig) — 连续渐变
           col 3 (cur_type):    marker_cl > type_cl(cur_type) — 有标记则优先
@@ -1250,35 +1301,27 @@ class WindowTableMixin:
 
         hdr = table.horizontalHeader()
 
-        # 跨行合并（含 Snap 列 col 0）
-        spans = compute_spans(rows, col_offset=1, snap_col=0)
+        # 跨行合并（含关系列 col 0）
+        projection = project_table_cells(rows, col_offset=1, relation_col=0)
+        spans = projection.spans
         # 预计算哪些 (row, col) 被 span 覆盖（子区域），对这些格子跳过 setItem
-        spanned_cells: Set[Tuple[int, int]] = set()
+        spanned_cells: Set[Tuple[int, int]] = set(projection.covered_cells)
         for (sr, col), (rs, cs) in spans.items():
             if sr < len(rows) and rs > 1:
                 table.setSpan(sr, col, rs, cs)
-                for r in range(sr + 1, sr + rs):
-                    for c in range(col, col + cs):
-                        spanned_cells.add((r, c))
 
-        covered_cur_rows: Set[int] = set()
-        for (sr, c_), (_, cnt) in spans.items():
-            if c_ == 3 and cnt > 1:
-                for ri in range(sr + 1, sr + cnt):
-                    covered_cur_rows.add(ri)
+        covered_cur_rows = set(projection.covered_rows(3))
 
         # ── 单元格级分隔虚线 ──
-        self._divider_delegate.set_divider_cells(
-            self._compute_divider_cells(rows, spans, spanned_cells)
-        )
+        self._divider_delegate.set_divider_cells(set(projection.divider_cells))
 
-        # ── Snap 列宽：根据当前最大 snap 索引动态调整 ──
+        # ── 关系列宽：根据当前最大关系序号动态调整 ──
         if self._repair_state is not None:
-            _max_si = max((r.snap_index for r in rows), default=0)
-            hdr.resizeSection(0, calc_snap_width(_max_si))
+            _max_si = max((r.ordinal for r in rows), default=0)
+            hdr.resizeSection(0, calc_relation_width(_max_si))
 
-        # ── 预计算 snap 级文本变化标记（用于星标）──
-        snap_changed_src, snap_changed_tgt = self._compute_snap_text_changes(rows)
+        # ── 预计算关系级文本变化标记（用于星标）──
+        changed_src, changed_tgt = self._compute_relation_text_changes(rows)
 
         fp = self._filter_panel
         show_scores = fp.show_scores
@@ -1295,19 +1338,19 @@ class WindowTableMixin:
             )
 
         for i, row in enumerate(rows):
-            self._row_op_map[i] = row.snap_index
-            is_anomaly = row.snap_index in anomaly_snaps
+            self._row_op_map[i] = row.ordinal
+            is_anomaly = row.ordinal in anomaly_ordinals
             is_ctx = (
-                row.snap_index in context_snaps
+                row.ordinal in context_ordinals
                 and not is_anomaly
                 and row.marker == ""
                 and not self._filter_panel.show_all
             )
             is_del = is_deleted(row.marker)
-            show_cur = (row.sub == 0) or (i not in covered_cur_rows)
-            atypes = anomaly_snaps.get(row.snap_index, set())
+            show_cur = i not in covered_cur_rows
+            atypes = anomaly_ordinals.get(row.ordinal, set())
             # col 3 Layer 2 始终基于当前文本结构，直接读取 _rebuild_anomalies 构建的映射
-            cur_atypes = self._current_atypes_map.get(row.snap_index, set())
+            cur_atypes = self._current_atypes_map.get(row.ordinal, set())
             if is_ctx:
                 ctx_rows.add(i)
 
@@ -1315,8 +1358,8 @@ class WindowTableMixin:
             src_text = row.src_text
             tgt_text = row.tgt_text
 
-            # ── snap 号 (col 0) ──
-            snap_display = self._compute_snap_display(row)
+            # ── 关系序号 (col 0) ──
+            relation_display = self._compute_relation_display(row)
 
             # ── 初始类型 (col 1) ──
             init_display = self._compute_init_type_display(row)
@@ -1329,25 +1372,24 @@ class WindowTableMixin:
             src_changed = False
             tgt_changed = False
             if self._repair_state is not None:
-                action = self._repair_state.action_for_op(row.snap_index)
+                relation_id = self._repair_state.snapshot.relation_id(row.ordinal)
+                action = self._repair_state.action_for_relation(relation_id)
                 src_changed, tgt_changed = compute_text_colors(
-                    row.snap_index,
-                    row.marker,
-                    atypes,
+                    row.ordinal,
                     action,
                     self._repair_state.snapshot,
                 )
 
             col_colors = [
-                None,  # col 0: snap — 默认色
+                None,  # col 0: 关系 — 默认色
                 type_cl(row.init_type),  # col 1: 初始类型色
                 None,  # col 2: 评分色（由 make_score_cell 自行处理）
                 (
                     marker_cl(row.marker)
                     if row.marker
                     else (
-                        anomaly_cl(priority_anomaly_type(atypes))
-                        if atypes
+                        anomaly_cl(priority_anomaly_type(cur_atypes))
+                        if cur_atypes
                         else _color_table.TYPE_CL_11
                     )
                 ),  # col 3: Layer1 标记色 / Layer2 异常色 / 灰
@@ -1360,7 +1402,7 @@ class WindowTableMixin:
                 ),  # col 6: tgt
             ]
             texts = [
-                snap_display,
+                relation_display,
                 init_display,
                 "",  # col 2: 初始评分（由 make_score_cell 填充）
                 cur_text,
@@ -1375,34 +1417,56 @@ class WindowTableMixin:
                 if ci == 2:
                     # 初始评分列
                     it = make_score_cell(row.orig_score, show_scores)
+                    if show_scores and row.init_score_text:
+                        it.setText(row.init_score_text)
                 elif ci == 4:
-                    # 当前评分列 — 委托 ScoreManager，按子行独立评分
-                    _sm_score, _sm_state = self._score_mgr.get_score_state(
-                        row.snap_index, row.sub
-                    )
-                    # 确保 split 等操作产生的新子行已注册——否则 _poll 永远发现不了
-                    _sm_key = (row.snap_index, row.sub)
-                    if _sm_state == "pending" and _sm_key not in self._score_mgr._cache:
-                        self._score_mgr.invalidate(row.snap_index, row.sub)
-                    it = make_score_cell(
-                        _sm_score if _sm_state == "ready" else None,
-                        show_scores,
-                        state=_sm_state,
-                        precision=1,
-                    )
+                    if (i, ci) in spanned_cells:
+                        # Qt 不显示被 span 覆盖的格，也不应为它创建无意义的评分请求。
+                        it = QTableWidgetItem("")
+                    else:
+                        if needs_zero_score(row.marker):
+                            self._score_mgr.set_ready_score(row.ordinal, row.sub, 0.0)
+                        _sm_score, _sm_state = self._score_mgr.get_score_state(
+                            row.ordinal, row.sub
+                        )
+                        # 确保 split 等操作产生的新子行已注册——否则 _poll 永远发现不了
+                        _sm_key = (row.ordinal, row.sub)
+                        if (
+                            _sm_state == "pending"
+                            and _sm_key not in self._score_mgr._cache
+                        ):
+                            self._score_mgr.invalidate(row.ordinal, row.sub)
+                        it = make_score_cell(
+                            _sm_score if _sm_state == "ready" else None,
+                            show_scores,
+                            state=_sm_state,
+                            precision=1,
+                        )
                 else:
                     it = QTableWidgetItem(txt)
                     if clr is not None:
                         it.setForeground(clr)
-                it.setData(Qt.ItemDataRole.UserRole, row.snap_index)
+                it.setData(Qt.ItemDataRole.UserRole, row.ordinal)
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 items.append(it)
 
-            # ── 变化标记：该 snap 文本内容与初始对齐输出不同时，所有行均标星 ──
-            si = row.snap_index
-            if si in snap_changed_src and len(items) > 5:
+            # ── 变化标记：该关系文本与初始对齐输出不同时，所有行均标星 ──
+            si = row.ordinal
+            flag_action = (
+                self._repair_state.flag_for_relation(
+                    self._repair_state.snapshot.relation_id(si)
+                )
+                if self._repair_state is not None
+                else None
+            )
+            flag_note = flag_action.data.get("note", "") if flag_action else ""
+            if flag_note:
+                tooltip = f"标记注释：{flag_note}"
+                items[0].setToolTip(tooltip)
+                items[3].setToolTip(tooltip)
+            if si in changed_src and len(items) > 5:
                 items[5].setData(CHANGED_FLAG_ROLE, True)
-            if si in snap_changed_tgt and len(items) > 6:
+            if si in changed_tgt and len(items) > 6:
                 items[6].setData(CHANGED_FLAG_ROLE, True)
 
             # 对齐：col 0-4 居中，col 5-6 左对齐
@@ -1501,15 +1565,15 @@ class WindowTableMixin:
         # ── 同步所有列宽到底部预览表和 AI 建议表 ──
         _QTimer.singleShot(80, lambda: self._sync_all_preview_widths())
 
-        # "仅焦点"模式自动选中首个异常 snap 后高亮
+        # “仅焦点”模式自动选中首个异常关系后高亮
         if (
             hasattr(self, "_auto_select_on_render")
             and self._auto_select_on_render is not None
         ):
-            snap_i = self._auto_select_on_render
+            ordinal = self._auto_select_on_render
             self._auto_select_on_render = None
-            if snap_i is not None:
-                self._focus.go_to_snap(snap_i, source="table")
+            if ordinal is not None:
+                self._focus.go_to_ordinal(ordinal, source="table")
 
         # 渲染完成后同步 HighlightDelegate 选中行/焦点行
         self._update_table_highlight()

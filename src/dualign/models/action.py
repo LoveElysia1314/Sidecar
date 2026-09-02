@@ -9,8 +9,8 @@ Dualign — RepairAction + AiProposalStore
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field, replace
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from dualign.models.marker import from_kind as _marker_from_kind
 
@@ -29,38 +29,82 @@ _VALID_KINDS = frozenset(
 )
 
 
+def canonicalize_action_payload(
+    payload: Mapping[str, Any], relation_ids: tuple[str, ...]
+) -> dict[str, Any]:
+    """Bind a serialized action to stable IDs and remove legacy positions.
+
+    Positional fields are accepted only at the report boundary. Every caller
+    receives the same ID-only representation, including a copied ``data``
+    mapping that no longer contains the historical ``orig_snaps`` field.
+    """
+
+    result = dict(payload)
+    raw_data = result.get("data")
+    data = dict(raw_data) if isinstance(raw_data, Mapping) else {}
+    raw_ids = result.get("relation_ids") or ()
+    if isinstance(raw_ids, (str, bytes)):
+        raw_ids = ()
+    target_ids = list(dict.fromkeys(str(value) for value in raw_ids))
+    if not target_ids:
+        raw_positions = (
+            result.get("operation_indices")
+            or data.get("orig_snaps")
+            or (result.get("op_index"),)
+        )
+        if not isinstance(raw_positions, (list, tuple)):
+            raw_positions = (raw_positions,)
+        for value in raw_positions:
+            try:
+                ordinal = int(value)
+                relation_id = relation_ids[ordinal]
+            except (IndexError, TypeError, ValueError):
+                continue
+            if ordinal >= 0 and relation_id not in target_ids:
+                target_ids.append(relation_id)
+    if not target_ids or any(value not in relation_ids for value in target_ids):
+        raise ValueError("修复动作无法绑定到当前关系身份")
+    result["relation_ids"] = target_ids
+    result.pop("op_index", None)
+    result.pop("operation_indices", None)
+    data.pop("orig_snaps", None)
+    result["data"] = data
+    return result
+
+
 @dataclass
 class RepairAction:
     """单一修复操作。
 
-    op_index:      snapshot index (外部索引)
     kind:          操作类型 (merge|split|edit|delete|flag|ok|placeholder_src|placeholder_tgt)
     sub_count:     合并行数（仅 merge 使用）
     source:        来源: "auto"(CLI自动修复) / "ai"(AI Agent) / "user"(GUI手动)
     data:          附加数据（info-full 时存 new_src_lines/new_tgt_lines/scores；
-                   multi-snap 时存 orig_snaps）
+                   不保存关系身份或位置）
     timestamp:     ISO 时间戳
+    relation_ids:  稳定关系身份
     """
 
-    op_index: int
     kind: str
     sub_count: int = 1
     source: str = ""
     data: Dict[str, Any] = field(default_factory=dict)
     timestamp: str = ""
+    relation_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in _VALID_KINDS:
             raise ValueError(f"未知操作类型: {self.kind}")
         if not self.timestamp:
             self.timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
-        # 数据兼容：旧格式 report 中 source 可能存在 data 内；source="" → "auto"
-        if not self.source and "source" in self.data:
-            self.source = self.data.pop("source")
         if not self.source:
             self.source = "auto"
-
-    # ── 属性 ──
+        normalized_ids = tuple(str(value).strip() for value in self.relation_ids)
+        if not normalized_ids or any(not value for value in normalized_ids):
+            raise ValueError("关系 ID 不能为空")
+        if len(set(normalized_ids)) != len(normalized_ids):
+            raise ValueError("修复动作中的关系 ID 必须唯一")
+        self.relation_ids = normalized_ids
 
     @property
     def marker(self) -> str:
@@ -78,63 +122,98 @@ class RepairAction:
     # ── Factory methods ──
 
     @classmethod
-    def make_merge(cls, op_index: int, sub_count: int = 1, **kw) -> RepairAction:
+    def _make(
+        cls,
+        relation_ids: str | Iterable[str],
+        kind: str,
+        *,
+        sub_count: int = 1,
+        **values: Any,
+    ) -> RepairAction:
+        """Construct an action while keeping metadata out of action data."""
+
+        if isinstance(relation_ids, str):
+            relation_ids = (relation_ids,)
+        source = str(values.pop("source", ""))
+        timestamp = str(values.pop("timestamp", ""))
         return cls(
-            op_index=op_index, kind="merge", sub_count=sub_count, data=dict(**kw)
+            kind=kind,
+            sub_count=sub_count,
+            source=source,
+            data=values,
+            timestamp=timestamp,
+            relation_ids=tuple(relation_ids),
         )
 
     @classmethod
-    def make_split(cls, op_index: int, **kw) -> RepairAction:
-        return cls(op_index=op_index, kind="split", data=dict(**kw))
+    def make_merge(
+        cls, relation_ids: str | Iterable[str], sub_count: int = 1, **kw
+    ) -> RepairAction:
+        return cls._make(relation_ids, "merge", sub_count=sub_count, **kw)
 
     @classmethod
-    def make_edit(cls, op_index: int, **kw) -> RepairAction:
-        return cls(op_index=op_index, kind="edit", data=dict(**kw))
+    def make_split(cls, relation_ids: str | Iterable[str], **kw) -> RepairAction:
+        return cls._make(relation_ids, "split", **kw)
 
     @classmethod
-    def make_delete(cls, op_index: int, **kw) -> RepairAction:
-        return cls(op_index=op_index, kind="delete", data=dict(**kw))
+    def make_edit(cls, relation_ids: str | Iterable[str], **kw) -> RepairAction:
+        return cls._make(relation_ids, "edit", **kw)
 
     @classmethod
-    def make_flag(cls, op_index: int, note: str = "") -> RepairAction:
-        return cls(op_index=op_index, kind="flag", data={"note": note})
+    def make_delete(cls, relation_ids: str | Iterable[str], **kw) -> RepairAction:
+        return cls._make(relation_ids, "delete", **kw)
 
     @classmethod
-    def make_ok(cls, op_index: int) -> RepairAction:
-        return cls(op_index=op_index, kind="ok")
+    def make_flag(
+        cls, relation_ids: str | Iterable[str], note: str = "", **kw
+    ) -> RepairAction:
+        return cls._make(relation_ids, "flag", note=note, **kw)
 
     @classmethod
-    def make_placeholder_src(cls, op_index: int, **kw) -> RepairAction:
-        return cls(op_index=op_index, kind="placeholder_src", data=dict(**kw))
+    def make_ok(cls, relation_ids: str | Iterable[str], **kw) -> RepairAction:
+        return cls._make(relation_ids, "ok", **kw)
 
     @classmethod
-    def make_placeholder_tgt(cls, op_index: int, **kw) -> RepairAction:
-        return cls(op_index=op_index, kind="placeholder_tgt", data=dict(**kw))
+    def make_placeholder_src(
+        cls, relation_ids: str | Iterable[str], **kw
+    ) -> RepairAction:
+        return cls._make(relation_ids, "placeholder_src", **kw)
+
+    @classmethod
+    def make_placeholder_tgt(
+        cls, relation_ids: str | Iterable[str], **kw
+    ) -> RepairAction:
+        return cls._make(relation_ids, "placeholder_tgt", **kw)
 
     # ── 序列化 ──
 
     def to_dict(self) -> dict:
         d: Dict[str, Any] = {
-            "op_index": self.op_index,
             "kind": self.kind,
             "sub_count": self.sub_count,
             "source": self.source,
             "data": {},
             "timestamp": self.timestamp,
         }
+        d["relation_ids"] = list(self.relation_ids)
         for k, v in self.data.items():
             d["data"][k] = sorted(v) if isinstance(v, set) else v
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> RepairAction:
+        data = dict(d.get("data") or {})
+        relation_ids = tuple(
+            d.get("relation_ids") or data.pop("relation_ids", ()) or ()
+        )
+        source = d.get("source", "") or data.pop("source", "")
         return cls(
-            op_index=int(d["op_index"]),
             kind=d["kind"],
             sub_count=d.get("sub_count", 1),
-            source=d.get("source", ""),
-            data=d.get("data", {}),
+            source=source,
+            data=data,
             timestamp=d.get("timestamp", ""),
+            relation_ids=relation_ids,
         )
 
 
@@ -202,12 +281,18 @@ class AiProposal:
 
 @dataclass
 class AiProposalStore:
-    """AI 建议持久化存储。按 snap_i 分组。
+    """AI 建议持久化存储。按稳定关系 ID 分组。
 
     独立于 repair_log——重置修复不会丢失 AI 建议。
     """
 
-    proposals: Dict[int, List[AiProposal]] = field(default_factory=dict)
+    proposals: Dict[str, List[AiProposal]] = field(default_factory=dict)
+
+    @staticmethod
+    def _relation_id(action: RepairAction) -> str:
+        if not action.relation_ids:
+            raise ValueError("AI 建议动作必须先绑定稳定关系 ID")
+        return action.relation_ids[0]
 
     @staticmethod
     def _find(
@@ -216,20 +301,19 @@ class AiProposalStore:
         """Return the proposal matching an action's stable identity."""
         for proposal in proposals:
             if (
-                proposal.action.op_index == action.op_index
+                proposal.action.relation_ids == action.relation_ids
                 and proposal.action.kind == action.kind
             ):
                 return proposal
         return None
 
-    def add(self, snap_i: int, action: RepairAction, summary: str = "") -> None:
-        """添加一条 AI 建议到指定 snap。"""
-        existing = self.proposals.get(snap_i, [])
+    def add(self, action: RepairAction, summary: str = "") -> None:
+        """Add one identity-bound AI proposal."""
+
+        relation_id = self._relation_id(action)
+        existing = self.proposals.get(relation_id, [])
         for proposal in existing:
-            if (
-                proposal.action.op_index != action.op_index
-                or proposal.action.kind != action.kind
-            ):
+            if proposal.action.kind != action.kind:
                 continue
             if proposal.status == "accepted":
                 return
@@ -239,10 +323,10 @@ class AiProposalStore:
                 proposal.created_at = time.strftime("%Y-%m-%dT%H:%M:%S")
                 return
         prop = AiProposal(action=action, summary=summary)
-        self.proposals.setdefault(snap_i, []).append(prop)
+        self.proposals.setdefault(relation_id, []).append(prop)
 
-    def get(self, snap_i: int) -> List[AiProposal]:
-        return self.proposals.get(snap_i, [])
+    def get(self, relation_id: str) -> List[AiProposal]:
+        return self.proposals.get(relation_id, [])
 
     def get_pending(self) -> List[AiProposal]:
         result = []
@@ -252,51 +336,63 @@ class AiProposalStore:
                     result.append(p)
         return result
 
-    def accept(self, snap_i: int, action: RepairAction) -> bool:
-        proposal = self._find(self.proposals.get(snap_i, []), action)
+    def accept(self, action: RepairAction) -> bool:
+        proposal = self._find(self.proposals.get(self._relation_id(action), []), action)
         if proposal is None:
             return False
         proposal.accept()
         return True
 
-    def reject(self, snap_i: int, action: RepairAction) -> bool:
-        proposal = self._find(self.proposals.get(snap_i, []), action)
+    def reject(self, action: RepairAction) -> bool:
+        proposal = self._find(self.proposals.get(self._relation_id(action), []), action)
         if proposal is None:
             return False
         proposal.reject()
         return True
 
-    def restore(self, snap_i: int, action: RepairAction) -> bool:
-        proposal = self._find(self.proposals.get(snap_i, []), action)
+    def restore(self, action: RepairAction) -> bool:
+        proposal = self._find(self.proposals.get(self._relation_id(action), []), action)
         if proposal is None:
             return False
         proposal.reset()
         return True
 
-    def reset(self, snap_i: int) -> None:
-        for p in self.proposals.get(snap_i, []):
+    def reset(self, relation_id: str) -> None:
+        for p in self.proposals.get(relation_id, []):
             p.reset()
 
-    def get_status(self, snap_i: int, action: RepairAction) -> str | None:
-        proposal = self._find(self.proposals.get(snap_i, []), action)
+    def get_status(self, action: RepairAction) -> str | None:
+        proposal = self._find(self.proposals.get(self._relation_id(action), []), action)
         return proposal.status if proposal is not None else None
+
+    def validated_copy(self, validator) -> AiProposalStore:
+        """Validate proposal identities and regroup them by their stable anchor."""
+
+        validated = AiProposalStore()
+        for props in self.proposals.values():
+            for proposal in props:
+                action = validator(proposal.action)
+                validated.proposals.setdefault(action.relation_ids[0], []).append(
+                    replace(proposal, action=action)
+                )
+        return validated
 
     def to_dict(self) -> dict:
         return {
-            str(snap_i): [p.to_dict() for p in props]
-            for snap_i, props in self.proposals.items()
+            relation_id: [p.to_dict() for p in props]
+            for relation_id, props in self.proposals.items()
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> AiProposalStore:
         store = cls()
         try:
-            for snap_s, props_list in d.items():
-                snap_i = int(snap_s)
+            for raw_key, props_list in d.items():
+                key = str(raw_key)
                 for pd in props_list:
                     prop = AiProposal.from_dict(pd)
                     if prop is not None:
-                        store.proposals.setdefault(snap_i, []).append(prop)
+                        store.proposals.setdefault(key, []).append(prop)
         except Exception:
             pass
         return store

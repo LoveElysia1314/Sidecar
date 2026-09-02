@@ -29,6 +29,14 @@ ollama serve
 ollama pull leoipulsar/harrier-0.6b
 ```
 
+如果升级前已生成 `emb/{entry_id}/vecs.db`，执行：
+
+```bash
+uv run python scripts/migrate_embedding_cache.py --remove-legacy
+```
+
+脚本会先合并并逐库校验所有哈希，只在校验通过后删除旧缓存。
+
 ### 依赖分组
 
 | 分组 | 命令                      | 包含                                  |
@@ -46,13 +54,19 @@ dualign/
 ├── src/dualign/                 # 核心源码
 │   ├── __init__.py              # 公共 API
 │   ├── version.py               # 从包元数据读取版本
-│   ├── __main__.py              # CLI 入口 (gui/align/check/models)
-│   ├── common.py                # 工具函数 (hash/I/O/晋升)
+│   ├── __main__.py              # CLI 入口 (gui/align/solidify/solidify-batch/check/models)
+│   ├── common.py                # 通用工具与兼容入口
 │   ├── config.py                # 配置常量 + 缓存路径
 │   ├── providers.py             # ProviderManager (Ollama/LM Studio/自定义)
 │   │
-│   ├── core/                    # 对齐引擎（纯函数）
-│   │   ├── aligner.py           # Phase 1→5 DP 对齐
+│   ├── algorithms/              # 正式生成算法实现
+│   │   └── mdl/                 # 统计门控、候选图、组合证据与局部 MDL
+│   │
+│   ├── core/                    # 稳定公共门面与 legacy 归档
+│   │   ├── aligner.py           # mdl-v1 正式结果契约
+│   │   ├── calibration.py       # embedding 身份绑定的门控校准
+│   │   ├── legacy_anchor_aligner.py # 冻结 benchmark
+│   │   ├── legacy_anchor_quality.py # 冻结的旧报告诊断
 │   │   ├── punctuation.py       # 标点分割 + 语言检测
 │   │   └── file_pair_matcher.py # 文件对发现
 │   │
@@ -60,7 +74,7 @@ dualign/
 │   │   ├── state.py             # AlignmentSnapshot, ChapterState, etc.
 │   │   ├── action.py            # RepairAction, AiProposal, AiProposalStore
 │   │   ├── marker.py            # 操作标记编解码
-│   │   └── snap_state.py        # SnapState 三层模型 + 审批四态
+│   │   └── relation_status.py   # RepairState 的关系审阅投影 + 审批四态
 │   │
 │   ├── services/                # 业务逻辑
 │   │   ├── repair.py            # RepairState, replay(), auto_repair
@@ -69,7 +83,7 @@ dualign/
 │   │   ├── cached_encoder.py    # 缓存代理
 │   │   ├── similarity.py        # SimilarityScorer 评分器
 │   │   ├── ai_repair_agent.py   # AiRepairAgent (tool-calling)
-│   │   ├── quality_gate.py      # G1/G2/G3 质量门控
+│   │   ├── anomaly_detection.py # 对齐后异常标记（不参与接受/拒绝）
 │   │   ├── cli_pipeline.py      # CLI 对齐流水线
 │   │   ├── score_manager.py     # 异步评分管理器
 │   │   └── prompts/             # Agent 提示词 + tools.json
@@ -95,7 +109,8 @@ dualign/
 │
 ├── tests/                       # 单元测试
 ├── demo/                        # 演示文件
-└── docs/                        # 文档
+├── docs/                        # 用户文档、现行设计与压缩后的研究归档
+└── scripts/                     # 构建、迁移与可复现实验入口
 ```
 
 ---
@@ -164,10 +179,13 @@ class MyBackend(LLMBackend):
         # 实现 LLM 调用接口
         return LLMResponse(...)
 
-agent = AiRepairAgent(backend=MyBackend())
+agent = AiRepairAgent(llm_backend=MyBackend())
 ```
 
-当前内置 `DeepSeekNativeBackend`，使用 Responses API，并兼容本地 Ollama 的 `/v1/responses` 端点。
+当前命名后端只有 `deepseek`，传输层使用 Responses API；兼容该协议和工具调用格式的服务
+可以配置 `model/base_url/api_key`。其他协议应通过公开的 `llm_backend` 注入实现，不要修改
+`agent._llm` 私有字段，也不要把嵌入模型提供方配置误当作 AI 审校配置。设置页的“检测连接”
+会调用同一套 Responses 工具协议，而不是用 Chat Completions 成功来冒充审校能力可用。
 
 ---
 
@@ -195,9 +213,13 @@ python scripts/build_exe.py
 
 ```bash
 # 需安装 Inno Setup 6
-python scripts/build_exe.py --installer
-# → Dualign_Setup_v0.8.0-alpha.1.exe
+python scripts/build.py
+# → Dualign_Setup_v0.8.0-beta.1.exe
 ```
+
+`scripts/build_exe.py` 只负责 PyInstaller 目录或单文件构建；安装包、便携包和发布 ZIP
+统一由 `scripts/build.py` 生成。`scripts/setup.iss` 是从模板产生并在构建后清理的临时文件，
+不纳入版本控制。
 
 ### PyPI 发布
 

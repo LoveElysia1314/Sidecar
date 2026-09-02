@@ -1,21 +1,23 @@
 """
-Dualign — AiRepairAgent: Tool-Calling 智能校订代理 (v2)
+Dualign — AiRepairAgent: Tool-Calling 智能校订代理
 
 设计原则:
-  - 两层文本模型：初始文本（对齐器原始）+ 当前文本（待审校）
+  - 两层文本模型：初始文本（对齐器原始）+ 当前拟修复（待审校）
   - AI 只需要判断「当前文本每对 src/tgt 语义对应吗？」
-  - 所有工具操作的是初始文本，系统自动 re-repair 更新当前文本
+  - 工具以稳定关系 ID 绑定初始关系，在同一拟修复状态上确定性重放
   - 无 auto_note、无 would_*、无策略名暴露给 AI
 
 用法:
   from dualign.services.ai_repair_agent import AiRepairAgent, ChapterContext
   agent = AiRepairAgent(backend="deepseek")
-  actions = agent.run(chapter_context)
+  # initial_state 必须是构造 context 时的同一份拟修复状态。
+  result = agent.run(chapter_context, initial_state=state)
 """
 
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -23,19 +25,19 @@ import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 from dualign.models.action import RepairAction
 from dualign.models.state import AlignmentSnapshot
-from dualign.models.snap_state import (
-    SnapState,
-    SnapInfo,
-    build_snap_states,
-    refresh_snap_states,
-    snap_state_to_info,
+from dualign.models.relation_status import (
+    RelationStatus,
+    RelationReviewInfo,
+    project_relation_statuses,
+    relation_status_to_info,
     build_context_windows,
     _parse_type,
 )
+from dualign.services.repair_policy import choose_auto_repair, strategy_for_ai_review
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,25 @@ def compute_cost(
 
 
 @dataclass
+class AgentRunResult:
+    """One review conversation's explicit completion state."""
+
+    status: str
+    actions: List[RepairAction] = field(default_factory=list)
+    reviewed_ids: tuple[int, ...] = ()
+    pending_ids: tuple[int, ...] = ()
+    turns: int = 0
+    forced: bool = False
+    note: str = ""
+    model_name: str = ""
+    prompt_sha256: str = ""
+
+    @property
+    def is_complete(self) -> bool:
+        return self.status == "completed" and not self.pending_ids
+
+
+@dataclass
 class AgentEvent:
     turn: int
     type: str
@@ -77,6 +98,7 @@ class AgentEvent:
     messages: List[dict] = field(default_factory=list)
     turn_log: List[dict] = field(default_factory=list)
     review_action: Optional[RepairAction] = None
+    run_result: Optional[AgentRunResult] = None
     error: str = ""
 
 
@@ -86,24 +108,29 @@ class ChapterContext:
     chapter_title: str
     total_pairs: int
     snapshot: AlignmentSnapshot
-    snap_states: List[SnapState] = field(default_factory=list)
-    snap_infos: List[SnapInfo] = field(default_factory=list)
+    strategy: str = "src"
+    relation_statuses: List[RelationStatus] = field(default_factory=list)
+    relation_infos: List[RelationReviewInfo] = field(default_factory=list)
     reviewable_ids: List[int] = field(default_factory=list)
 
-    def get_snap_info(self, snap_id: int) -> Optional[SnapInfo]:
-        if 0 <= snap_id < len(self.snap_infos):
-            return self.snap_infos[snap_id]
+    def get_relation_info(self, ordinal: int) -> Optional[RelationReviewInfo]:
+        if 0 <= ordinal < len(self.relation_infos):
+            return self.relation_infos[ordinal]
         return None
 
-    def get_snap_state(self, snap_id: int) -> Optional[SnapState]:
-        if 0 <= snap_id < len(self.snap_states):
-            return self.snap_states[snap_id]
+    def get_relation_status(self, ordinal: int) -> Optional[RelationStatus]:
+        if 0 <= ordinal < len(self.relation_statuses):
+            return self.relation_statuses[ordinal]
         return None
 
     @property
-    def reviewable_infos(self) -> List[SnapInfo]:
-        """返回需要审校的 SnapInfo 列表。"""
-        return [si for si in self.snap_infos if si.is_reviewable]
+    def reviewable_infos(self) -> List[RelationReviewInfo]:
+        """返回需要审校的关系视图。"""
+        return [
+            self.relation_infos[ordinal]
+            for ordinal in self.reviewable_ids
+            if 0 <= ordinal < len(self.relation_infos)
+        ]
 
     @classmethod
     def from_repair_state(
@@ -117,35 +144,36 @@ class ChapterContext:
     ) -> "ChapterContext":
         """从 RepairState 构造 ChapterContext。
 
-        v2 设计：当前文本始终设置为 auto-repair 后的结果（无论传入的 state 是否已修复）。
+        当前文本始终设置为 auto-repair 后的结果（无论传入的 state 是否已修复）。
         初始文本保持原始对齐输出。AI 只需判断「当前文本正确吗？」。
         auto-repair 是内部状态，不暴露给 AI。
 
         Args:
-            model: 嵌入模型，用于 split 操作。不传时 split 回退为 merge。
-            skip_auto_repair: 为 True 时跳过内部 auto_repair（调用方已预修复）。
+            model: 嵌入模型，用于 split 操作。不传时保留原生关系。
+            skip_auto_repair: 为 True 时跳过内部 auto_repair（调用方已构造拟修复）。
         """
         from dualign.services.repair import RepairService
 
-        snap = state.snapshot
-        total = len(snap.original_ops)
+        strategy = strategy_for_ai_review(strategy)
+
+        snapshot = state.snapshot
+        total = len(snapshot.original_ops)
 
         if skip_auto_repair:
             repaired = state
         else:
             # 始终用 auto-repair 后的状态作为「当前文本」
-            repaired = RepairService.auto_repair(state, strategy=strategy, model=model)
+            repaired = RepairService.auto_repair(
+                state,
+                strategy=strategy,
+                model=model,
+                unresolved_only=True,
+            )
         ch = repaired.current
 
-        snap_states = build_snap_states(
-            snapshot=snap,
-            src_lines=list(snap.original_src_lines),
-            tgt_lines=list(snap.original_tgt_lines),
-            repair_log=repaired.repair_log,
-        )
-        snap_states = refresh_snap_states(snap_states, snap, ch, repaired.repair_log)
+        relation_statuses = project_relation_statuses(repaired)
 
-        snap_infos: List[SnapInfo] = []
+        relation_infos: List[RelationReviewInfo] = []
         for si in range(total):
             g = ch.group(si)
             src = (
@@ -158,44 +186,99 @@ class ChapterContext:
                 if g is not None
                 else ""
             )
-            info = snap_state_to_info(snap_states[si], si, src, tgt)
+            info = relation_status_to_info(relation_statuses[si], si, src, tgt)
             # 初始文本
-            s_idx, t_idx, _ = snap.original_ops[si]
+            s_idx, t_idx, _ = snapshot.original_ops[si]
             info.initial_src_text = (
-                "\n".join(snap.src_text(i) for i in s_idx) if s_idx else ""
+                "\n".join(snapshot.src_text(i) for i in s_idx) if s_idx else ""
             )
             info.initial_tgt_text = (
-                "\n".join(snap.tgt_text(j) for j in t_idx) if t_idx else ""
+                "\n".join(snapshot.tgt_text(j) for j in t_idx) if t_idx else ""
             )
             info.initial_n_src = len(s_idx)
             info.initial_n_tgt = len(t_idx)
-            snap_infos.append(info)
+            relation_infos.append(info)
         reviewable_ids = [
-            si for si, info in enumerate(snap_infos) if info.is_reviewable
+            si for si, info in enumerate(relation_infos) if info.is_reviewable
         ]
         return cls(
             chapter_id=chapter_id,
             chapter_title=chapter_title,
             total_pairs=total,
-            snapshot=snap,
-            snap_states=snap_states,
-            snap_infos=snap_infos,
+            snapshot=snapshot,
+            strategy=strategy,
+            relation_statuses=relation_statuses,
+            relation_infos=relation_infos,
             reviewable_ids=reviewable_ids,
         )
 
-    def append_reviewable(self, snap_id: int) -> bool:
-        if snap_id in self.reviewable_ids:
+    def append_reviewable(self, ordinal: int) -> bool:
+        if ordinal in self.reviewable_ids:
             return False
-        if not self.get_snap_info(snap_id):
+        if not self.get_relation_info(ordinal):
             return False
-        self.reviewable_ids.append(snap_id)
+        self.reviewable_ids.append(ordinal)
         self.reviewable_ids.sort()
         return True
+
+    def select_reviewable(self, ordinals: Iterable[int]) -> None:
+        """以调用方显式指定的文本对替换天然异常集合。"""
+        self.reviewable_ids = []
+        for ordinal in sorted(set(ordinals)):
+            self.append_reviewable(ordinal)
+
+
+@dataclass(frozen=True)
+class AgentReviewSession:
+    """Agent 一次审核所需的不可分割输入。
+
+    ``context`` 是 AI 看到的拟修复文本，``proposed_state`` 是工具执行器
+    用来解释 ``ok`` 的同一份状态。调用方不应分别构造二者。
+    """
+
+    context: ChapterContext
+    proposed_state: object
 
 
 # ═══════════════════════════════════════════════════════════════
 # 公共构造器 — 确保嵌入模型就绪
 # ═══════════════════════════════════════════════════════════════
+
+
+def build_agent_review_session(
+    state,
+    strategy: str = "src",
+    model=None,
+    chapter_id: str = "",
+    chapter_title: str = "",
+    reviewable_ids: Iterable[int] | None = None,
+) -> AgentReviewSession:
+    """同时构造 Agent 上下文和与之完全一致的拟修复状态。
+
+    该函数不自动加载嵌入模型；调用方可显式传入 model。
+    返回的 ``proposed_state`` 必须原样传给 ``AiRepairAgent.run``。
+    """
+    from dualign.services.repair import RepairService
+
+    strategy = strategy_for_ai_review(strategy)
+
+    proposed_state = RepairService.auto_repair(
+        state,
+        strategy=strategy,
+        model=model,
+        unresolved_only=True,
+    )
+    context = ChapterContext.from_repair_state(
+        proposed_state,
+        chapter_id=chapter_id,
+        chapter_title=chapter_title,
+        strategy=strategy,
+        model=model,
+        skip_auto_repair=True,
+    )
+    if reviewable_ids is not None:
+        context.select_reviewable(reviewable_ids)
+    return AgentReviewSession(context=context, proposed_state=proposed_state)
 
 
 def build_chapter_context(
@@ -205,6 +288,7 @@ def build_chapter_context(
     chapter_id: str = "",
     chapter_title: str = "",
     skip_auto_repair: bool = False,
+    reviewable_ids: Iterable[int] | None = None,
 ) -> ChapterContext:
     """从 RepairState 构建 ChapterContext，自动确保嵌入模型就绪。
 
@@ -212,26 +296,40 @@ def build_chapter_context(
     场景的 split/merge 行为一致。
 
     当 model 为 None 时自动尝试加载嵌入模型。若加载失败，
-    auto_repair 将回退到 merge（与 model=None 行为一致）。
+    需要 split 的关系保持不变，不得替换成相反的 merge 动作。
 
     Args:
-        skip_auto_repair: 为 True 时跳过内部 auto_repair（调用方已预修复）。
+        skip_auto_repair: 为 True 时跳过内部 auto_repair（调用方已构造拟修复）。
+        reviewable_ids: 用户显式指定的待审文本对；提供后不再受异常判定限制。
     """
+    strategy = strategy_for_ai_review(strategy)
     if model is None:
         try:
             from dualign.services.embedding import _try_lazy_load_model
 
             model = _try_lazy_load_model()
         except Exception as e:
-            logger.warning("嵌入模型加载失败: %s（auto_repair 将回退到 merge）", e)
-    return ChapterContext.from_repair_state(
+            logger.warning("嵌入模型加载失败: %s（需要 split 的关系将保持不变）", e)
+    if skip_auto_repair:
+        context = ChapterContext.from_repair_state(
+            state,
+            chapter_id=chapter_id,
+            chapter_title=chapter_title,
+            strategy=strategy,
+            model=model,
+            skip_auto_repair=True,
+        )
+        if reviewable_ids is not None:
+            context.select_reviewable(reviewable_ids)
+        return context
+    return build_agent_review_session(
         state,
-        chapter_id=chapter_id,
-        chapter_title=chapter_title,
         strategy=strategy,
         model=model,
-        skip_auto_repair=skip_auto_repair,
-    )
+        chapter_id=chapter_id,
+        chapter_title=chapter_title,
+        reviewable_ids=reviewable_ids,
+    ).context
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -269,51 +367,58 @@ def _get_prompts_dir() -> str:
     )
 
 
-_tools_cache: tuple[list[dict], str] | None = None
+_tool_definitions_cache: list[dict] | None = None
+_tools_cache: list[dict] | None = None
 
 
-def _load_tools() -> tuple[list[dict], str]:
-    """从 tools.json 加载工具定义，返回 (TOOLS_OPENAI, TOOLS_TEXT_DESCRIPTION)。
+def _load_tool_definitions() -> list[dict]:
+    """Load the provider-neutral tool contract once."""
+    global _tool_definitions_cache
+    if _tool_definitions_cache is not None:
+        return _tool_definitions_cache
+    tools_path = os.path.join(_get_prompts_dir(), "tools.json")
+    with open(tools_path, "r", encoding="utf-8") as handle:
+        definitions = json.load(handle)
+    for tool in definitions:
+        tool.setdefault("parameters", {}).setdefault("additionalProperties", False)
+    _tool_definitions_cache = definitions
+    return definitions
 
-    懒加载：首次调用时解析 prompts 目录。
-    """
+
+def _load_tools() -> list[dict]:
+    """Load the Responses API tool contract lazily."""
     global _tools_cache
     if _tools_cache is not None:
         return _tools_cache
-    tools_path = os.path.join(_get_prompts_dir(), "tools.json")
-    with open(tools_path, "r", encoding="utf-8") as f:
-        tools = json.load(f)
-
-    # OpenAI Responses API 格式（扁平：name/description/parameters 直接挂在工具对象上）
     openai_tools = []
-    for t in tools:
+    for tool in _load_tool_definitions():
         openai_tools.append(
             {
                 "type": "function",
-                "name": t["name"],
-                "description": t["description"],
-                "parameters": t["parameters"],
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["parameters"],
             }
         )
-
-    # Ollama XML 文本描述格式
-    lines = ["## 工具", "使用 XML 格式调用工具。每轮可调多次，顺序不影响结果。", ""]
-    for t in tools:
-        name = t["name"]
-        desc = t["description"]
-        lines.append(f"### {name} — {desc}")
-        for ex in t.get("text_examples", []):
-            lines.append(f'<tool_call name="{name}">{ex}</tool_call>')
-        lines.append("")
-
-    result = (openai_tools, "\n".join(lines).strip())
-    _tools_cache = result
-    return result
+    _tools_cache = openai_tools
+    return openai_tools
 
 
 def _get_tools_openai() -> list[dict]:
     """懒加载 TOOLS_OPENAI。"""
-    return _load_tools()[0]
+    return _load_tools()
+
+
+def agent_contract_fingerprint(strategy: str = "src") -> str:
+    """Return a stable fingerprint of the prompt and tool contract."""
+    payload = {
+        "prompt": _load_system_prompt(strategy_for_ai_review(strategy)),
+        "tools": _load_tool_definitions(),
+    }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -587,43 +692,32 @@ def _parse_pair_spec(spec) -> List[int]:
     return sorted(indices)
 
 
-def _parse_op_index(op_index) -> tuple[List[int], bool]:
+def _parse_target(target) -> tuple[List[int], bool]:
     """解析 target 字符串: "3" → ([3], False), "10-13" → ([10..13], True)"""
-    op_index = _coerce_target(op_index)
-    if op_index.isdigit():
-        return [int(op_index)], False
-    if re.match(r"^\d+-\d+$", op_index):
-        parts = op_index.split("-")
+    target = _coerce_target(target)
+    if target.isdigit():
+        return [int(target)], False
+    if re.match(r"^\d+-\d+$", target):
+        parts = target.split("-")
         start, end = int(parts[0]), int(parts[1])
         if start > end:
-            raise ValueError(f"范围起止颠倒: {op_index}")
+            raise ValueError(f"范围起止颠倒: {target}")
         return list(range(start, end + 1)), True
-    raise ValueError(f"无效 target: {op_index!r}")
+    raise ValueError(f"无效 target: {target!r}")
 
 
-def compute_auto_action_kind(snap_state, strategy: str) -> Optional[str]:
-    """根据 SnapState 的 init_type 和策略推导应执行的自动修复操作 kind。
+def compute_auto_action_kind(relation_status, strategy: str) -> Optional[str]:
+    """根据 RelationStatus 的 init_type 和策略推导自动修复操作。
 
     返回 kind 字符串（merge/split/delete/placeholder_src/placeholder_tgt），
     或 None（无需操作）。
     与 RepairService.auto_repair 的策略矩阵保持一致。
     """
-    if snap_state is None:
+    if relation_status is None:
         return None
-    in_s, in_t = _parse_type(snap_state.init_type)
-    if in_s == 1 and in_t == 1:
-        return None
-    if in_s > 1 and in_t == 1:  # N:1
-        return "split" if strategy == "src" else "merge"
-    if in_s == 1 and in_t > 1:  # 1:M
-        return "merge" if strategy == "src" else "split"
-    if in_s > 0 and in_t == 0:  # N:0
-        return "placeholder_tgt" if strategy == "src" else "delete"
-    if in_s == 0 and in_t > 0:  # 0:M
-        return "delete" if strategy == "src" else "placeholder_src"
-    if in_s > 1 and in_t > 1:  # N:M
-        return "placeholder_tgt" if strategy in ("src", "tgt") else "delete"
-    return None
+    in_s, in_t = _parse_type(relation_status.init_type)
+    plan = choose_auto_repair(in_s, in_t, strategy)
+    return plan.kind if plan else None
 
 
 class ToolExecutor:
@@ -633,7 +727,7 @@ class ToolExecutor:
         self.ctx = ctx
         self._model = model
         self._state = initial_state
-        self._strategy = strategy
+        self._strategy = strategy_for_ai_review(strategy)
         self.reviewed_ids: set[int] = set()
         self.reviewed_actions: Dict[int, RepairAction] = {}
 
@@ -653,6 +747,16 @@ class ToolExecutor:
             return json.dumps(
                 {"error": f"未知工具: {tool_call.name}"}, ensure_ascii=False
             )
+        allowed = {
+            tool["name"]: set(tool.get("parameters", {}).get("properties", {}))
+            for tool in _load_tool_definitions()
+        }.get(tool_call.name, set())
+        unknown = sorted(set(tool_call.arguments) - allowed)
+        if unknown:
+            return json.dumps(
+                {"error": f"工具 {tool_call.name} 包含未知参数: {unknown}"},
+                ensure_ascii=False,
+            )
         try:
             result = handler(tool_call.arguments)
             return (
@@ -665,14 +769,27 @@ class ToolExecutor:
 
     @staticmethod
     def _get_target(args: dict) -> object | None:
-        """Read snap targeting param; fall back to legacy names."""
-        v = args.get("target")
-        if v is None:
-            for old in ("snap_range", "snap_id", "pair_spec"):
-                if old in args and args[old] is not None:
-                    v = args[old]
-                    break
-        return v
+        """Read the sole relation-target parameter exposed by current tools."""
+
+        return args.get("target")
+
+    def _make_action(
+        self,
+        kind: str,
+        ordinals: list[int],
+        *,
+        source: str = "ai",
+        **data,
+    ) -> RepairAction:
+        relation_ids = tuple(
+            self.ctx.snapshot.relation_id(ordinal) for ordinal in ordinals
+        )
+        return RepairAction(
+            kind=kind,
+            source=source,
+            data=data,
+            relation_ids=relation_ids,
+        )
 
     def _progress(self) -> str:
         total = len(self.ctx.reviewable_ids)
@@ -689,17 +806,27 @@ class ToolExecutor:
             else f"**进度**: {done}/{total} ✅ 全部完成"
         )
 
-    def _record_review(self, snap_list: List[int], action: RepairAction) -> None:
-        for si in snap_list:
+    def _record_review(self, ordinals: List[int], action: RepairAction) -> None:
+        for si in ordinals:
             self.reviewed_ids.add(si)
             self.reviewed_actions[si] = action
+
+    def _unique_reviewed_actions(self) -> List[RepairAction]:
+        """Return range actions once even though every ordinal indexes them."""
+        actions: List[RepairAction] = []
+        seen: set[int] = set()
+        for action in self.reviewed_actions.values():
+            identity = id(action)
+            if identity not in seen:
+                seen.add(identity)
+                actions.append(action)
+        return actions
 
     def _replay_reviewed_actions(self):
         """Apply reviewed actions to the initial state in insertion order."""
         state = self._state
-        for action in self.reviewed_actions.values():
-            if action is not None:
-                state = state.apply(action)
+        for action in self._unique_reviewed_actions():
+            state = state.apply(action)
         return state
 
     def _handle_view(self, args: dict) -> str:
@@ -707,41 +834,48 @@ class ToolExecutor:
         if tgt is None:
             return "❌ view 缺少必填参数 target (如 '1-3,5,11')。请重试。"
         try:
-            snap_ids = _parse_pair_spec(tgt)
+            ordinals = _parse_pair_spec(tgt)
         except ValueError as e:
             return f"❌ view 无法解析 target: {e}"
 
-        # 用最新状态构建 snap_infos
-        snap_infos = self._build_current_snap_infos()
+        # 用最新状态构建关系信息
+        relation_infos = self._build_current_relation_infos()
 
-        snap_ids = [i for i in snap_ids if 0 <= i < len(snap_infos)]
-        if not snap_ids:
+        ordinals = [i for i in ordinals if 0 <= i < len(relation_infos)]
+        if not ordinals:
             return "❌ 所有指定的文本对均不存在"
         lines = [
-            str(snap_infos[sid]) for sid in snap_ids[:20] if snap_infos[sid] is not None
+            str(relation_infos[sid])
+            for sid in ordinals[:20]
+            if relation_infos[sid] is not None
         ]
         return "\n".join(lines)
 
-    def _build_current_snap_infos(self) -> List[SnapInfo]:
-        """如果有 initial_state，通过重放已审校操作构建最新 SnapInfo 列表。"""
+    def _build_current_relation_infos(self) -> List[RelationReviewInfo]:
+        """如果有 initial_state，投影最新关系审阅视图。"""
         if self._state is None:
-            return self.ctx.snap_infos
+            return self.ctx.relation_infos
         state = self._replay_reviewed_actions()
-        fresh_ctx = ChapterContext.from_repair_state(state)
-        return fresh_ctx.snap_infos
+        fresh_ctx = ChapterContext.from_repair_state(
+            state,
+            strategy=self._strategy,
+            model=self._model,
+            skip_auto_repair=True,
+        )
+        return fresh_ctx.relation_infos
 
-    def _get_current_snap_action(self, snap_id: int) -> Optional[RepairAction]:
-        """获取该 snap 当前已有的修复操作（不含 ok/flag 元操作）。
+    def _get_current_relation_action(self, ordinal: int) -> Optional[RepairAction]:
+        """获取该关系当前已有的修复操作（不含 ok/flag 元操作）。
 
-        结合 self._state（含预修复）和 self.reviewed_actions（Agent 已执行操作），
-        返回该 snap 的最近一次非元操作。若 snap 无修复操作（原始状态），返回 None。
+        结合 self._state（含拟修复）和 self.reviewed_actions（Agent 已执行操作），
+        返回该关系的最近一次非元操作。若无修复操作（原始状态），返回 None。
         """
         if self._state is None:
             return None
         state = self._replay_reviewed_actions()
         META_KINDS = {"ok", "flag"}
-        for a in reversed(state._repair_log):
-            if a.op_index == snap_id and a.kind not in META_KINDS:
+        for a in reversed(state.repair_log):
+            if state.action_ordinal(a) == ordinal and a.kind not in META_KINDS:
                 return a
         return None
 
@@ -750,40 +884,46 @@ class ToolExecutor:
         if tgt is None:
             return "❌ ok 缺少必填参数 target (如 '7')。请重试。"
         try:
-            snap_list, is_range = _parse_op_index(tgt)
+            ordinals, is_range = _parse_target(tgt)
         except ValueError as e:
             return f"❌ ok 无法解析 target: {e}"
-        if is_range or len(snap_list) != 1:
-            return "❌ ok 只接受单个 snap，请用 target='7' 指定一个编号。"
-        snap_id = snap_list[0]
-        anchor = snap_list[0]
+        if is_range or len(ordinals) != 1:
+            return "❌ ok 只接受单个关系，请用 target='7' 指定一个编号。"
+        ordinal = ordinals[0]
+        anchor = ordinal
 
-        # 统一语义：若 snap 已有修复操作，AI 的 ok 等同于认可该操作
-        existing = self._get_current_snap_action(snap_id)
+        relation_infos = self._build_current_relation_infos()
+        if not 0 <= ordinal < len(relation_infos):
+            return f"❌ ok 指定的关系 {ordinal} 不存在。"
+        if relation_infos[ordinal].has_missing:
+            return (
+                "❌ **ok 拒绝**: 该关系仍包含 ⟢MISSING⟣，不能标记为通过。\n\n"
+                "请用 edit 补入真实文本，或用 flag 交由人工处理。"
+            )
+
+        # 统一语义：若关系已有拟修复，AI 的 ok 等同于审核通过该方案。
+        existing = self._get_current_relation_action(ordinal)
         if existing:
             # 复制原操作的数据（split/edit 需要 new_src_lines 等）
-            ra = RepairAction(
-                op_index=anchor,
-                kind=existing.kind,
-                source="ai",
-                data=dict(existing.data),
-            )
+            ra = self._make_action(existing.kind, [anchor], **existing.data)
+            decision = f"通过拟修复 {existing.kind}"
         else:
-            # 无修复操作 → 真正的 ok（认可原始对齐结果）
-            ra = RepairAction(op_index=anchor, kind="ok", source="ai")
+            # 无拟修复 → 确认原始对齐关系，不虚构修改。
+            ra = self._make_action("ok", [anchor])
+            decision = "确认原始对齐关系（无修改）"
 
-        self._record_review(snap_list, ra)
-        return f"### ✅ 确认 — snap {snap_list}\n\n{self._progress()}"
+        self._record_review(ordinals, ra)
+        return f"### ✅ {decision} — 关系 {ordinal}\n\n{self._progress()}"
 
     def _handle_edit(self, args: dict) -> str:
         tgt = self._get_target(args)
         if tgt is None:
             return "❌ edit 缺少必填参数 target (如 '7' 或 '10-13')。请重试。"
         try:
-            snap_list, is_range = _parse_op_index(tgt)
+            ordinals, is_range = _parse_target(tgt)
         except ValueError as e:
             return f"❌ edit 无法解析 target: {e}"
-        already = [si for si in snap_list if si in self.reviewed_ids]
+        already = [si for si in ordinals if si in self.reviewed_ids]
         new_src = args.get("new_src", [])
         new_tgt = args.get("new_tgt", [])
         if isinstance(new_src, str):
@@ -791,20 +931,37 @@ class ToolExecutor:
         if isinstance(new_tgt, str):
             new_tgt = [new_tgt]
 
-        # ── 范围编辑行数校验：范围含 N 个 snap 时，任一侧行数必须等于 N ──
+        # ── 占位符防线：新文本不得包含 ⟢MISSING⟣ 占位符 ──
+        # 该符号只表示「译文缺失」，不是可固化的文本。若 AI 输出它，
+        # 拒绝并提示补译，避免占位符经 edit 固化进正文。
+        from dualign.models.state import MISSING as _MISSING
+
+        offending = [
+            line
+            for line in (*new_src, *new_tgt)
+            if isinstance(line, str) and line.strip() == _MISSING
+        ]
+        if offending:
+            return (
+                "❌ **edit 拒绝**: 新文本包含 ⟢MISSING⟣ 占位符，这不是可固化的文本。\n\n"
+                "该符号只表示『译文缺失』。请提供真实译文/原文，"
+                "若确实无法翻译请用 flag 标记该关系交由人工处理。"
+            )
+
+        # ── 范围编辑行数校验：范围含 N 个关系时，任一侧行数必须等于 N ──
         if is_range and (new_src or new_tgt):
-            n = len(snap_list)
+            n = len(ordinals)
             if new_src and len(new_src) != n:
                 return (
-                    f"❌ **edit 拒绝**: 范围 {tgt} 含 {n} 个 snap，"
+                    f"❌ **edit 拒绝**: 范围 {tgt} 含 {n} 个关系，"
                     f"但 new_src 提供了 {len(new_src)} 行。\n\n"
-                    f"请为范围内每个 snap 提供一行（或改为单个 target 编辑一个 snap）。"
+                    f"请为范围内每个关系提供一行（或改为单个 target 编辑一个关系）。"
                 )
             if new_tgt and len(new_tgt) != n:
                 return (
-                    f"❌ **edit 拒绝**: 范围 {tgt} 含 {n} 个 snap，"
+                    f"❌ **edit 拒绝**: 范围 {tgt} 含 {n} 个关系，"
                     f"但 new_tgt 提供了 {len(new_tgt)} 行。\n\n"
-                    f"请为范围内每个 snap 提供一行（或改为单个 target 编辑一个 snap）。"
+                    f"请为范围内每个关系提供一行（或改为单个 target 编辑一个关系）。"
                 )
 
         # ── 行数校验：当 AI 同时传入两侧时，长度必须相等 ──
@@ -812,14 +969,14 @@ class ToolExecutor:
             return (
                 f"❌ **edit 拒绝**: new_src ({len(new_src)} 行) 和 new_tgt ({len(new_tgt)} 行) "
                 f"行数不等，无法配对。\n\n"
-                f"此 snap 的初始原文本有 "
-                f"{len(self.ctx.snapshot.original_ops[snap_list[0]][0])} 行。\n\n"
+                f"此关系的初始文档 A 有 "
+                f"{len(self.ctx.snapshot.original_ops[ordinals[0]][0])} 行。\n\n"
                 f"edit 要求同时传入两侧时每行一一配对——确保两侧行数相等，"
                 f"或只传需要修改的一侧。"
             )
 
         # ── 语义校验：当只传一侧，但原始另一侧行数多于修改侧时，结果可能不符合预期 ──
-        anchor = snap_list[0]
+        anchor = ordinals[0]
         if not is_range:
             s_idx, t_idx, _ = self.ctx.snapshot.original_ops[anchor]
             n_orig_src = len(s_idx)
@@ -827,7 +984,7 @@ class ToolExecutor:
             if not new_src and new_tgt and n_orig_src > 1 and len(new_tgt) < n_orig_src:
                 return (
                     f"⚠️ **edit 提示**: 你只提供了 {len(new_tgt)} 行新译文，"
-                    f"但该 snap 的初始原文有 {n_orig_src} 行。\n"
+                    f"但该关系的初始文档 A 有 {n_orig_src} 行。\n"
                     f"edit 只传 new_tgt 时原文侧保留全部初始原文——"
                     f"结果将是 {n_orig_src}:{len(new_tgt)} 而非 1:1。\n\n"
                     f"如需产出 1:1：提供 {n_orig_src} 行新译文（每行对应一段原文），"
@@ -836,7 +993,7 @@ class ToolExecutor:
             if not new_tgt and new_src and n_orig_tgt > 1 and len(new_src) < n_orig_tgt:
                 return (
                     f"⚠️ **edit 提示**: 你只提供了 {len(new_src)} 行新原文，"
-                    f"但该 snap 的初始译文有 {n_orig_tgt} 行。\n"
+                    f"但该关系的初始文档 B 有 {n_orig_tgt} 行。\n"
                     f"edit 只传 new_src 时译文侧保留全部初始译文——"
                     f"结果将是 {len(new_src)}:{n_orig_tgt} 而非 1:1。\n\n"
                     f"如需产出 1:1：提供 {n_orig_tgt} 行新原文（每行对应一段译文），"
@@ -844,123 +1001,109 @@ class ToolExecutor:
                 )
 
         if is_range:
-            for i, si in enumerate(snap_list):
+            for i, si in enumerate(ordinals):
                 if si in self.reviewed_ids:
                     continue
                 _src = [new_src[i]] if i < len(new_src) and new_src[i] else []
                 _tgt = [new_tgt[i]] if i < len(new_tgt) and new_tgt[i] else []
-                ra = RepairAction(
-                    op_index=si,
-                    kind="edit",
-                    source="ai",
-                    data={"new_src_lines": _src, "new_tgt_lines": _tgt},
+                ra = self._make_action(
+                    "edit", [si], new_src_lines=_src, new_tgt_lines=_tgt
                 )
                 self.reviewed_ids.add(si)
                 self.reviewed_actions[si] = ra
         else:
             # ── 填充缺失侧：AI 只传一侧时，从当前上下文补充另一侧（保留自动修复结果）──
             if (not new_src or not new_tgt) and not is_range:
-                info = self.ctx.get_snap_info(anchor)
+                info = self.ctx.get_relation_info(anchor)
                 if info:
                     if not new_src:
                         new_src = [s for s in info.src_text.split("\n") if s]
                     if not new_tgt:
                         new_tgt = [t for t in info.tgt_text.split("\n") if t]
-            ra = RepairAction(
-                op_index=anchor,
-                kind="edit",
-                source="ai",
-                data={"new_src_lines": new_src, "new_tgt_lines": new_tgt},
+            ra = self._make_action(
+                "edit",
+                [anchor],
+                new_src_lines=new_src,
+                new_tgt_lines=new_tgt,
             )
-            self._record_review(snap_list, ra)
+            self._record_review(ordinals, ra)
 
         suffix = " (已覆盖之前的审校决定)" if already else ""
-        return f"### ✏️ 编辑 — snap {snap_list}{suffix}\n\n{self._progress()}"
+        return f"### ✏️ 编辑 — 关系 {ordinals}{suffix}\n\n{self._progress()}"
 
     def _handle_merge(self, args: dict) -> str:
         tgt = self._get_target(args)
         if tgt is None:
             return "❌ merge 缺少必填参数 target (如 '7' 或 '10-13')。请重试。"
         try:
-            snap_list, _ = _parse_op_index(tgt)
+            ordinals, _ = _parse_target(tgt)
         except ValueError as e:
             return f"❌ merge 无法解析 target: {e}"
-        already = [si for si in snap_list if si in self.reviewed_ids]
-        anchor = snap_list[0]
-        if len(snap_list) > 1:
-            ra = RepairAction(
-                op_index=anchor,
-                kind="merge",
-                source="ai",
-                data={"orig_snaps": list(snap_list)},
-            )
-            self.reviewed_ids.update(snap_list)
+        already = [si for si in ordinals if si in self.reviewed_ids]
+        anchor = ordinals[0]
+        if len(ordinals) > 1:
+            ra = self._make_action("merge", ordinals)
+            self.reviewed_ids.update(ordinals)
             self.reviewed_actions[anchor] = ra
         else:
-            ra = RepairAction.make_merge(anchor, source="ai")
-            self._record_review(snap_list, ra)
+            ra = self._make_action("merge", [anchor])
+            self._record_review(ordinals, ra)
         suffix = " (已覆盖之前的审校决定)" if already else ""
-        return f"### 🔗 合并 — snap {snap_list}{suffix}\n\n{self._progress()}"
+        return f"### 🔗 合并 — 关系 {ordinals}{suffix}\n\n{self._progress()}"
 
     def _handle_delete(self, args: dict) -> str:
         tgt = self._get_target(args)
         if tgt is None:
             return "❌ delete 缺少必填参数 target (如 '7' 或 '10-13')。请重试。"
         try:
-            snap_list, _ = _parse_op_index(tgt)
+            ordinals, _ = _parse_target(tgt)
         except ValueError as e:
             return f"❌ delete 无法解析 target: {e}"
-        already = [si for si in snap_list if si in self.reviewed_ids]
-        anchor = snap_list[0]
-        if len(snap_list) > 1:
-            ra = RepairAction(
-                op_index=anchor,
-                kind="delete",
-                source="ai",
-                data={"orig_snaps": list(snap_list)},
-            )
-            self.reviewed_ids.update(snap_list)
+        already = [si for si in ordinals if si in self.reviewed_ids]
+        anchor = ordinals[0]
+        if len(ordinals) > 1:
+            ra = self._make_action("delete", ordinals)
+            self.reviewed_ids.update(ordinals)
             self.reviewed_actions[anchor] = ra
         else:
-            ra = RepairAction.make_delete(anchor, source="ai")
-            self._record_review(snap_list, ra)
+            ra = self._make_action("delete", [anchor])
+            self._record_review(ordinals, ra)
         suffix = " (已覆盖之前的审校决定)" if already else ""
-        return f"### 🗑️ 删除 — snap {snap_list}{suffix}\n\n{self._progress()}"
+        return f"### 🗑️ 删除 — 关系 {ordinals}{suffix}\n\n{self._progress()}"
 
     def _handle_flag(self, args: dict) -> str:
         tgt = self._get_target(args)
         if tgt is None:
             return "❌ flag 缺少必填参数 target (如 '7')。请重试。"
         try:
-            snap_list, is_range = _parse_op_index(tgt)
+            ordinals, is_range = _parse_target(tgt)
         except ValueError as e:
             return f"❌ flag 无法解析 target: {e}"
-        if is_range or len(snap_list) != 1:
-            return "❌ flag 只接受单个 snap，请用 target='7' 指定一个编号。"
-        already = [si for si in snap_list if si in self.reviewed_ids]
+        if is_range or len(ordinals) != 1:
+            return "❌ flag 只接受单个关系，请用 target='7' 指定一个编号。"
+        already = [si for si in ordinals if si in self.reviewed_ids]
         note = args.get("note", "")
-        ra = RepairAction.make_flag(snap_list[0], note=note)
-        ra.source = "ai"
-        self._record_review(snap_list, ra)
+        ra = self._make_action("flag", ordinals, note=note)
+        self._record_review(ordinals, ra)
         suffix = " (已覆盖之前的审校决定)" if already else ""
-        return f"### 🚩 标记 — snap {snap_list}{suffix}\n\n{self._progress()}"
+        return f"### 🚩 标记 — 关系 {ordinals}{suffix}\n\n{self._progress()}"
 
     def _handle_append(self, args: dict) -> str:
         tgt = self._get_target(args)
         if tgt is None:
             return "❌ append 缺少必填参数 target (如 '7')。请重试。"
         try:
-            snap_list, is_range = _parse_op_index(tgt)
+            ordinals, is_range = _parse_target(tgt)
         except ValueError as e:
             return f"❌ append 无法解析 target: {e}"
-        if is_range or len(snap_list) != 1:
-            return "❌ append 只接受单个 snap，请用 target='7' 指定一个编号。"
-        snap_id = snap_list[0]
-        ok = self.ctx.append_reviewable(snap_id)
+        if is_range or len(ordinals) != 1:
+            return "❌ append 只接受单个关系，请用 target='7' 指定一个编号。"
+        ordinal = ordinals[0]
+        ok = self.ctx.append_reviewable(ordinal)
         if ok:
-            info = self.ctx.get_snap_info(snap_id)
-            return f"✅ 已追加 snap {snap_id} ({info.n_src_rows}:{info.n_tgt_rows}) 到待审列表"
-        return f"❌ **追加失败**: snap {snap_id} 不存在或已在待审列表中"
+            info = self.ctx.get_relation_info(ordinal)
+            return f"✅ 已追加关系 {ordinal} ({info.n_src_rows}:{info.n_tgt_rows}) 到待审列表"
+        return f"❌ **追加失败**: 关系 {ordinal} 不存在或已在待审列表中"
 
     def _handle_done(self, args: dict) -> str:
         remaining = [i for i in self.ctx.reviewable_ids if i not in self.reviewed_ids]
@@ -973,9 +1116,9 @@ class ToolExecutor:
         note = args.get("note", "")
         if remaining and not force:
             return (
-                f"❌ **done 拒绝**: 仍有 {len(remaining)} 个待审 snap 未处理: "
+                f"❌ **done 拒绝**: 仍有 {len(remaining)} 个待审关系未处理: "
                 f"{remaining[:15]}{'...' if len(remaining) > 15 else ''}\n\n"
-                f"请逐一审查这些 snap 后再调用 done。"
+                f"请逐一审查这些关系后再调用 done。"
                 f"如确有合理原因需要跳过，请改用 `done` 并设置 force=true，说明理由。"
             )
         suffix = " (force)" if (force and remaining) else ""
@@ -988,11 +1131,11 @@ class ToolExecutor:
 
 
 class MaxTurnsExceeded(Exception):
-    """Raised when an agent exceeds its configured turn limit."""
+    """Legacy exception retained for import compatibility."""
 
 
 class AiRepairAgent:
-    """Tool-Calling AI 校订代理 (v2)。
+    """Tool-Calling AI 校订代理。
 
     工具: ok / edit / merge / delete / flag / view / append / done
     使用 Responses API 后端，支持 DeepSeek 与本地 Ollama 工具调用。
@@ -1001,6 +1144,7 @@ class AiRepairAgent:
     def __init__(
         self,
         backend="deepseek",
+        llm_backend: LLMBackend | None = None,
         temperature=0.0,
         max_turns=20,
         verbose=True,
@@ -1011,20 +1155,34 @@ class AiRepairAgent:
         base_url: str = "https://api.deepseek.com",
         api_key: str = "",
         reasoning_effort: str = "low",
+        max_tokens: int = 8192,
+        request_timeout: float = 240.0,
     ):
         self.max_turns = max_turns
         self.verbose = verbose
         self._model = model
-        self._strategy = strategy
+        self._model_name = model_name
+        self._strategy = strategy_for_ai_review(strategy)
         self._thinking = thinking
-        self._llm = DeepSeekNativeBackend(
-            temperature=temperature,
-            max_tokens=8192,
-            model=model_name,
-            base_url=base_url,
-            api_key=api_key,
-            reasoning_effort=reasoning_effort,
-        )
+        if llm_backend is not None:
+            self._llm = llm_backend
+        elif not isinstance(backend, str) and hasattr(backend, "chat"):
+            self._llm = backend
+        elif backend == "deepseek":
+            self._llm = DeepSeekNativeBackend(
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model=model_name,
+                base_url=base_url,
+                api_key=api_key,
+                reasoning_effort=reasoning_effort,
+                request_timeout=request_timeout,
+            )
+        else:
+            raise ValueError(
+                f"不支持的 AI 审校后端: {backend}；"
+                "请传入 llm_backend 或使用 deepseek"
+            )
         self._idle_turns = 0
 
     def run(
@@ -1032,7 +1190,7 @@ class AiRepairAgent:
         ctx: ChapterContext,
         on_event: Callable[[AgentEvent], None] | None = None,
         initial_state=None,
-    ) -> List[RepairAction]:
+    ) -> AgentRunResult:
         """initial_state: 启动时的 RepairState，view 用它重放已审校操作生成最新状态。"""
         executor = ToolExecutor(
             ctx, model=self._model, initial_state=initial_state, strategy=self._strategy
@@ -1043,6 +1201,41 @@ class AiRepairAgent:
         def _emit(evt_type, **kw):
             if on_event:
                 on_event(AgentEvent(type=evt_type, turn=kw.pop("turn", 0), **kw))
+
+        def _finish(
+            status: str,
+            *,
+            turn: int,
+            note: str = "",
+            forced: bool = False,
+        ) -> AgentRunResult:
+            pending = tuple(
+                ordinal
+                for ordinal in ctx.reviewable_ids
+                if ordinal not in executor.reviewed_ids
+            )
+            if status == "completed" and pending:
+                status = "partial"
+            result = AgentRunResult(
+                status=status,
+                actions=executor._unique_reviewed_actions(),
+                reviewed_ids=tuple(sorted(executor.reviewed_ids)),
+                pending_ids=pending,
+                turns=turn,
+                forced=forced,
+                note=note,
+                model_name=self._model_name,
+                prompt_sha256=agent_contract_fingerprint(self._strategy),
+            )
+            _emit(
+                "done",
+                turn=turn,
+                actions=result.actions,
+                messages=messages,
+                turn_log=turn_log,
+                run_result=result,
+            )
+            return result
 
         if self.verbose:
             logger.info(
@@ -1061,10 +1254,13 @@ class AiRepairAgent:
             ]
             # ── 更新/追加进度消息（用显式标记识别，避免脆弱的字符串匹配）──
             if remaining:
-                _new_progress = f"### 待审进度: {len(executor.reviewed_ids)}/{len(ctx.reviewable_ids)}"
-                f" | 剩余: {remaining}\n继续审校剩余 snap。完成后调用 done。"
+                _new_progress = (
+                    f"### 待审进度: {len(executor.reviewed_ids)}/"
+                    f"{len(ctx.reviewable_ids)} | 剩余: {remaining}\n"
+                    "继续审校剩余关系。完成后调用 done。"
+                )
             else:
-                _new_progress = "### ✅ 待审列表已清空\n\n检查是否有遗漏的异常 snap——若有，用 `append` 追加后继续审校。确认无遗漏后，调用 `done` 结束。"
+                _new_progress = "### ✅ 待审列表已清空\n\n检查是否有遗漏的异常关系——若有，用 `append` 追加后继续审校。确认无遗漏后，调用 `done` 结束。"
             if messages[-1]["role"] == "user" and "### 待审" in messages[-1]["content"]:
                 messages[-1] = {"role": "user", "content": _new_progress}
             else:
@@ -1079,7 +1275,7 @@ class AiRepairAgent:
                 logger.error("LLM 调用失败 (Turn %d): %s", turn, err_msg)
                 if on_event:
                     on_event(AgentEvent(type="error", turn=turn, error=err_msg))
-                return []
+                return _finish("failed", turn=turn, note=err_msg)
 
             turn_record = {
                 "turn": turn,
@@ -1125,21 +1321,19 @@ class AiRepairAgent:
                             "强制退出" if remaining else "审校完成",
                             turn,
                         )
-                    all_actions = list(executor.reviewed_actions.values())
-                    _emit(
-                        "done",
-                        turn=turn,
-                        actions=all_actions,
-                        messages=messages,
-                        turn_log=turn_log,
-                    )
                     if remaining:
                         logger.warning(
-                            "审校强制退出，仍有 %d 个待审 snap 未处理: %s",
+                            "审校强制退出，仍有 %d 个待审关系未处理: %s",
                             len(remaining),
                             remaining,
                         )
-                    return all_actions
+                    return _finish(
+                        "partial" if remaining else "completed",
+                        turn=turn,
+                        note=(
+                            f"连续 {self._idle_turns} 轮无工具调用" if remaining else ""
+                        ),
+                    )
 
                 # 空闲提示：第 1 轮温和提醒，第 2 轮强调 done(force=true) 选项
                 if remaining:
@@ -1160,7 +1354,7 @@ class AiRepairAgent:
                 else:
                     _idle_prompt = (
                         "### ✅ 待审列表已清空\n\n"
-                        "检查是否有遗漏的异常 snap——若有，用 `append` 追加后继续审校。"
+                        "检查是否有遗漏的异常关系——若有，用 `append` 追加后继续审校。"
                         "确认无遗漏后，调用 `done` 结束。"
                     )
                 if (
@@ -1195,6 +1389,8 @@ class AiRepairAgent:
             messages.append(tc_msg)
 
             done_result = None
+            done_force = False
+            done_note = ""
             for tc in response.tool_calls:
                 _emit(
                     "tool_start", turn=turn, tool_name=tc.name, tool_args=tc.arguments
@@ -1218,8 +1414,15 @@ class AiRepairAgent:
                 )
                 if tc.name == "done":
                     done_result = result
+                    raw_force = tc.arguments.get("force", False)
+                    done_force = (
+                        raw_force.strip().lower() in ("true", "1", "yes")
+                        if isinstance(raw_force, str)
+                        else bool(raw_force)
+                    )
+                    done_note = str(tc.arguments.get("note", ""))
 
-            # ── 显式 done 检查：done 被接受才退出；被拒绝则继续让模型修复剩余 snap ──
+            # done 被接受才退出；被拒绝则继续让模型修复剩余关系。
             if done_result is not None:
                 if done_result.startswith("❌"):
                     if self.verbose:
@@ -1234,34 +1437,26 @@ class AiRepairAgent:
                     continue
                 if self.verbose:
                     logger.info("AI 调用 done，审校完成于 Turn %d", turn)
-                all_actions = list(executor.reviewed_actions.values())
-                _emit(
-                    "done",
+                return _finish(
+                    "forced" if done_force else "completed",
                     turn=turn,
-                    actions=all_actions,
-                    messages=messages,
-                    turn_log=turn_log,
+                    note=done_note,
+                    forced=done_force,
                 )
-                return all_actions
-
-        all_actions = list(executor.reviewed_actions.values())
-        _emit(
-            "done",
-            turn=self.max_turns,
-            actions=all_actions,
-            messages=messages,
-            turn_log=turn_log,
-        )
 
         # ── 审校后校验 ──
         unreviewed = [i for i in ctx.reviewable_ids if i not in executor.reviewed_ids]
         if unreviewed:
             logger.warning(
-                "审校完成但仍有 %d 个待审 snap 未处理: %s。请检查。",
+                "审校完成但仍有 %d 个待审关系未处理: %s。请检查。",
                 len(unreviewed),
                 unreviewed,
             )
-        return all_actions
+        return _finish(
+            "partial" if unreviewed else "completed",
+            turn=self.max_turns,
+            note=(f"达到最大轮数 {self.max_turns}" if unreviewed else ""),
+        )
 
     def _build_initial_messages(self, ctx: ChapterContext) -> List[dict]:
         prompt = _load_system_prompt(self._strategy)
@@ -1285,7 +1480,7 @@ class AiRepairAgent:
         score_line = ""
         if scores:
             avg = sum(scores) / len(scores)
-            # 展示待审 snap 的个体评分（不分桶，AI 可以自己判断）
+            # 展示待审关系的个体评分（不分桶，AI 可以自己判断）
             review_scores = [
                 scores[si] for si in ctx.reviewable_ids if si < len(scores)
             ]
@@ -1315,12 +1510,12 @@ class AiRepairAgent:
         if score_line:
             lines.append(f"**{score_line}**")
         lines.append("")
-        lines.append("待审区域（>> 标记异常，±3 上下文一并展示）：")
+        lines.append("待审区域（>> 标记待审文本对，±3 上下文一并展示）：")
         lines.append("")
 
         for start, end in merged_windows:
             for si in range(start, end + 1):
-                info = ctx.get_snap_info(si)
+                info = ctx.get_relation_info(si)
                 if info is None:
                     continue
                 if si not in review_set:
@@ -1355,14 +1550,23 @@ def format_action(a, ctx=None) -> str:
     """格式化一条操作为人类可读字符串。"""
     kind = a.kind
     icon = _ACTION_ICON.get(kind, "❓")
+    ordinals: tuple[int, ...] = (
+        ctx.snapshot.operation_indices(a.relation_ids) if ctx is not None else ()
+    )
+    anchor = ordinals[0] if ordinals else a.relation_ids[0]
+    targets = list(ordinals) if ordinals else list(a.relation_ids)
 
     if kind == "ok" and ctx is not None:
-        ss = ctx.get_snap_state(a.op_index) if hasattr(ctx, "get_snap_state") else None
-        resolved = compute_auto_action_kind(ss, "src") if ss else None
+        ss = ctx.get_relation_status(ordinals[0])
+        resolved = (
+            compute_auto_action_kind(ss, getattr(ctx, "strategy", "src"))
+            if ss
+            else None
+        )
         if resolved:
             resolved_icon = _ACTION_ICON.get(resolved, "❓")
-            return f"  {resolved_icon} snap[{a.op_index}]  ok \u2192 {resolved}"
-        return f"  {icon} snap[{a.op_index}] {kind}"
+            return f"  {resolved_icon} 关系[{anchor}]  ok \u2192 {resolved}"
+        return f"  {icon} 关系[{anchor}] {kind}"
 
     detail = ""
     if kind == "edit":
@@ -1379,14 +1583,13 @@ def format_action(a, ctx=None) -> str:
         elif new_src:
             detail += f" {side_label}={new_src[0]}"
     elif kind == "merge":
-        orig = a.data.get("orig_snaps", "")
-        detail += f" {'合并' + str(orig) if orig else '单snap'}"
+        detail += f" {'合并' + str(targets) if len(targets) > 1 else '单关系'}"
     elif kind == "delete":
-        detail += " 批量" if a.data.get("orig_snaps", "") else ""
+        detail += " 批量" if len(a.relation_ids) > 1 else ""
     elif kind == "flag":
         detail += f" note={a.data.get('note', '')}"
 
-    return f"  {icon} snap[{a.op_index}] {kind}{detail}"
+    return f"  {icon} 关系[{anchor}] {kind}{detail}"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1541,7 +1744,12 @@ def dump_agent_raw(
             "completion": completion_tokens,
         },
         "final_actions": [
-            {"op_index": a.op_index, "kind": a.kind, "source": a.source, "data": a.data}
+            {
+                "relation_ids": list(a.relation_ids),
+                "kind": a.kind,
+                "source": a.source,
+                "data": a.data,
+            }
             for a in actions
         ],
         "turn_log": turn_log,

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import os
 import sys
-import json
 from pathlib import Path
 from typing import List, Optional, Any, Set
 
@@ -30,34 +29,21 @@ from PySide6.QtWidgets import (
 )
 
 from dualign.core import AlignmentResult
-from dualign.common import load_text_lines, content_hash
+from dualign.common import content_hash, file_bytes_sha256, file_identity_changed
 from dualign.models.state import AlignmentSnapshot
 from dualign.models.action import RepairAction
 from dualign.services.repair import (
     RepairState,
     RepairService,
+    SPLIT_FAILURE_REALIGN,
 )
-from dualign.gui.dialogs import BlockEditDialog
+from dualign.gui.dialogs import BlockEditDialog, FlagEditDialog
 from dualign.gui.workspace import FileQueueItem
 from dualign.gui.settings import (
     DualignConfig,
     KEY_LAST_OPEN_DIR,
 )
-from dualign.core import _smart_join_lines as _join
-
-# ═══════════════════════════════════════════════════════════════
-# 常量
-# ═══════════════════════════════════════════════════════════════
-
-COLUMN_HEADERS = [
-    "Snap",
-    "初始类型",
-    "初始评分",
-    "当前状态",
-    "当前评分",
-    "原文",
-    "译文",
-]
+from dualign.core.text import smart_join_lines as _join
 
 # ═══════════════════════════════════════════════════════════════
 # DualignWindow — 方法实现（被 dualign.gui.window 采纳为方法）
@@ -67,8 +53,33 @@ COLUMN_HEADERS = [
 class WindowActionsMixin:
     """WindowActionsMixin — 通过多重继承为 DualignWindow 提供方法。"""
 
+    def _invalidate_relation_scores(self, ordinals) -> None:
+        """Invalidate runtime scores and remove persisted values for changed rows."""
+        relation_ordinals = {int(ordinal) for ordinal in ordinals}
+        score_manager = getattr(self, "_score_mgr", None)
+        if score_manager is not None:
+            score_manager.invalidate_ordinals(sorted(relation_ordinals))
+        score_cache = getattr(self, "_score_cache", None)
+        if score_cache is not None and self._repair_state is not None:
+            for ordinal in relation_ordinals:
+                score_cache.discard(self._repair_state.snapshot.relation_id(ordinal))
+
+    def _set_known_relation_scores(self, ordinal: int, scores) -> None:
+        """Seed scores already computed by split instead of scheduling them again."""
+        self._invalidate_relation_scores([ordinal])
+        score_manager = getattr(self, "_score_mgr", None)
+        score_cache = getattr(self, "_score_cache", None)
+        for sub, raw_score in enumerate(scores):
+            score = float(raw_score)
+            if score_manager is not None:
+                score_manager.set_ready_score(ordinal, sub, score)
+            if score_cache is not None:
+                score_cache.set(
+                    self._repair_state.snapshot.relation_id(ordinal), sub, score
+                )
+
     def _on_open_demo(self):
-        """打开 Demo 示例文件对。
+        """打开 Demo 示例文件对的全新临时副本。
 
         路径解析委托给 dualign.demo.get_demo_paths()，
         与 demo_gui.py 逻辑完全一致。
@@ -78,23 +89,29 @@ class WindowActionsMixin:
 
             src, tgt, label = get_demo_paths()
             self.load_file_pair(src, tgt, label=label)
+            self._safe_status("已创建并打开 Demo 临时副本；内置样例不会被覆写")
         except (ImportError, FileNotFoundError) as e:
             self._safe_status(f"Demo 文件不存在: {e}")
             self._on_open_files()
 
-    def _on_workspace_load(self, src: str, tgt: str, label: str):
-        """WorkspacePanel 请求对齐指定文件对。"""
-        self.load_file_pair(src, tgt, label)
+    def _on_workspace_pair_selected(self, item):
+        """Load exactly once from a workspace selection event."""
+
+        if item.entry is not None:
+            self._on_entry_selected(item.entry)
+            return
+        self._current_entry = None
+        self.load_file_pair(item.src_path, item.tgt_path, item.label)
 
     def _on_workspace_add_queue(self):
         """＋ 添加按钮回调：弹出文件选择器，加入队列。"""
         src_path, _ = QFileDialog.getOpenFileName(
-            self, "选择原文", "", "Markdown (*.md);;Text (*.txt);;All (*)"
+            self, "选择文档 A", "", "Markdown (*.md);;Text (*.txt);;All (*)"
         )
         if not src_path:
             return
         tgt_path, _ = QFileDialog.getOpenFileName(
-            self, "选择译文", "", "Markdown (*.md);;Text (*.txt);;All (*)"
+            self, "选择文档 B", "", "Markdown (*.md);;Text (*.txt);;All (*)"
         )
         if not tgt_path:
             return
@@ -106,7 +123,7 @@ class WindowActionsMixin:
         """对齐当前选中的文件对。"""
         sel = self._workspace.selected_item()
         if sel:
-            self.load_file_pair(sel.src_path, sel.tgt_path, sel.label)
+            self._on_workspace_pair_selected(sel)
 
     def _on_workspace_remove_checked(self):
         """移除当前选中的文件对。"""
@@ -119,28 +136,34 @@ class WindowActionsMixin:
         else:
             self._workspace._nav_next()
 
-    def _on_reset_current_snap(self):
+    def _on_reset_current_relation(self):
         """重置当前选中文本对的修复。"""
         if self._repair_state is None:
             return
-        snap_i = self._review._cur_snap_i()
-        if snap_i is None or snap_i < 0:
+        ordinal = self._review._current_ordinal()
+        if ordinal is None or ordinal < 0:
             self._safe_status("请先在审校面板中选中一个文本对")
             return
         self._undo_stack.append(self._repair_state)
-        self._repair_state = self._repair_state.reset_op(snap_i)
-        if hasattr(self, "_score_mgr"):
-            self._score_mgr.invalidate_snaps([snap_i])
-        self._reset_accepted_proposals([snap_i])
+        relation_id = self._repair_state.snapshot.relation_id(ordinal)
+        self._repair_state = self._repair_state.reset_relation(relation_id)
+        self._invalidate_relation_scores([ordinal])
+        self._reset_accepted_proposals([ordinal])
         self._refresh()
         self._save_session()
-        self._set_temp_status(f"已重置 snap[{snap_i}] 的修复", "info")
+        self._set_temp_status(f"已重置关系[{ordinal}] 的修复", "info")
 
     def load_file_pair(
         self,
         src_path: str,
         tgt_path: str,
         label: str = "",
+        *,
+        report_path: str = "",
+        document_a_id: str = "",
+        document_b_id: str = "",
+        language_a: str = "",
+        language_b: str = "",
     ):
         """加载文件对并启动对齐流水线。
 
@@ -151,9 +174,9 @@ class WindowActionsMixin:
         # ── 文件存在性检查 ──
         missing = []
         if not os.path.isfile(src_path):
-            missing.append(f"原文: {src_path}")
+            missing.append(f"文档 A: {src_path}")
         if not os.path.isfile(tgt_path):
-            missing.append(f"译文: {tgt_path}")
+            missing.append(f"文档 B: {tgt_path}")
         if missing:
             from PySide6.QtWidgets import QMessageBox
 
@@ -170,15 +193,21 @@ class WindowActionsMixin:
 
         # ── 取消前一次未完成的操作（停止旧线程 + 递增操作 ID）──
         self._cancel_current_load()
+        if hasattr(self, "_focus"):
+            self._focus.clear()
 
         self._src_path = src_path
         self._tgt_path = tgt_path
+        from dualign.services.cli_pipeline import default_report_path
 
-        # 推导 repaired_dir（优先使用 entry 的 repaired_dir，否则使用报告缓存目录）
-        if not self._repaired_dir:
-            from dualign.config import get_report_cache_dir
-
-            self._repaired_dir = get_report_cache_dir()
+        self._report_path = report_path or str(default_report_path(src_path))
+        self._report_file_hash = file_bytes_sha256(self._report_path)
+        self._report_file_present = os.path.isfile(self._report_path)
+        self._pair_base_state = None
+        self._document_a_id = document_a_id
+        self._document_b_id = document_b_id
+        self._language_a = language_a
+        self._language_b = language_b
 
         # 同步路径到工作区面板
         if hasattr(self, "_workspace"):
@@ -196,83 +225,89 @@ class WindowActionsMixin:
             _entry_id = Path(src_path).stem.split(".")[0]
         self._current_entry_id = _entry_id
 
-        # ── 初始化 SimilarityScorer（行级嵌入缓存 + 评分器）──
-        # 在编码/对齐之前创建，确保任何需要评分的地方都能正常工作
+        # ── 初始化 SimilarityScorer（实际模型仍按需延迟加载）──
         from dualign.services.similarity import SimilarityScorer
 
         self._scorer = SimilarityScorer(entry_id=self._current_entry_id)
 
-        # ── 尝试从 report.json 恢复对齐缓存 ──
-        self.src_lines = load_text_lines(src_path)
-        self.tgt_lines = load_text_lines(tgt_path)
-        _result = None
-        _report_path = self._session_path()
-        if os.path.isfile(_report_path):
-            try:
-                with open(_report_path, encoding="utf-8") as _f:
-                    _r = json.load(_f)
-
-                if _r.get("ops") and _r.get("src_hash"):
-                    if _r["src_hash"] == content_hash(self.src_lines) and _r[
-                        "tgt_hash"
-                    ] == content_hash(self.tgt_lines):
-                        _ops_raw = _r["ops"]
-                        _stats = _r.get("stats", {})
-                        _all_ops = [
-                            (
-                                tuple(o["s"]),
-                                tuple(o["t"]),
-                                float(o["sc"]),
-                            )
-                            for o in _ops_raw
-                        ]
-                        _result = AlignmentResult(
-                            all_ops=_all_ops,
-                            anchors=[],
-                            anchor_op_indices={},
-                            stats=_stats,
-                        )
-            except Exception:
-                import traceback as _tb
-
-                _tb.print_exc()
-                _result = None
-
-        if _result is not None:
-            result = _result
-            # 直接进入对齐完成阶段，跳过编码
-            self._ensure_table_in_stacked()
-            self._show_table()
-            self._on_align_done(result)
-            self._update_feature_gating()
-            return
-
-        # ── 缓存未命中 → 编码 + 对齐 ──
+        # 文本读取、哈希计算与 report 缓存探测均放到工作线程；GUI 先进入
+        # 锁定预览态，避免大章节/网络模型准备期间冻结主事件循环。
         from dualign.gui.workers import EncodeThread
+        from dualign.services.cli_pipeline import _provenance
 
-        # 欢迎页显示对齐进度
         if hasattr(self, "_welcome") and self._welcome is not None:
-            self._welcome.set_aligning("正在编码…")
+            self._welcome.set_aligning("正在读取并检查缓存…")
 
-        self._status("编码中...")
-        QApplication.processEvents()
+        self._preview_active = True
+        self._status_bar.set_view_mode(True)
+        self._status_bar.set_view_mode_enabled(False)
+        self._status_bar.set_preview_active(True, phase="正在读取…")
+        self._status("正在读取并检查缓存…")
 
-        self._enc_thread = EncodeThread(src_path, tgt_path, entry_id=_entry_id)
-        self._enc_thread.status_signal.connect(lambda msg: self._status(msg))
-        self._enc_thread.text_ready_signal.connect(self._on_text_ready)
-        self._enc_thread.finished_signal.connect(self._on_encoded)
-        self._enc_thread.error_signal.connect(self._on_worker_error)
+        self._enc_thread = EncodeThread(
+            src_path,
+            tgt_path,
+            entry_id=_entry_id,
+            report_path=self._report_path,
+            expected_provenance=_provenance(None, self._align_config),
+        )
+        self._connect_encode_thread(self._enc_thread, self._load_op_id)
         self._enc_thread.start()
 
+    def _connect_encode_thread(self, thread, generation: int):
+        """Connect one encode job with its immutable load generation."""
+        thread.status_signal.connect(
+            lambda message, g=generation: (
+                self._on_prepare_status(message) if g == self._load_op_id else None
+            )
+        )
+        thread.text_ready_signal.connect(
+            lambda src_hash, tgt_hash, src_lines, tgt_lines, g=generation: (
+                self._on_text_ready(g, src_hash, tgt_hash, src_lines, tgt_lines)
+            )
+        )
+        thread.cache_hit_signal.connect(
+            lambda payload, g=generation: self._on_alignment_cache_hit(g, payload)
+        )
+        thread.finished_signal.connect(
+            lambda se, te, sl, tl, sh, th, g=generation: self._on_encoded(
+                g, se, te, sl, tl, sh, th
+            )
+        )
+        thread.error_signal.connect(
+            lambda context, traceback, g=generation: (
+                self._on_worker_error(context, traceback)
+                if g == self._load_op_id
+                else None
+            )
+        )
+
+    def _on_prepare_status(self, message: str):
+        """同步后台准备阶段到日志和预览锁定提示。"""
+        self._status(message)
+        if not self._preview_active:
+            return
+        if "缓存命中" in message:
+            phase = "正在恢复缓存…"
+        elif "模型加载" in message:
+            phase = "正在加载模型…"
+        elif "编码完成" in message:
+            phase = "正在对齐…"
+        elif "编码" in message or "缓存" in message:
+            phase = "正在编码…"
+        else:
+            phase = "正在准备…"
+        self._status_bar.set_preview_active(True, phase=phase)
+
     def load_from_provider(self, entries: List[Any]):
-        """从 FileListProvider 加载章节列表。"""
+        """从外部条目序列加载章节列表。"""
         self._entries = entries
         # 构建文件队列
         items = []
         for e in entries:
             label = getattr(e, "label", str(e))
-            src = getattr(e, "source_path", "")
-            tgt = getattr(e, "target_path", "")
+            src = getattr(e, "document_a_path", "")
+            tgt = getattr(e, "document_b_path", "")
             items.append(
                 FileQueueItem(label=label, src_path=src, tgt_path=tgt, entry=e)
             )
@@ -283,79 +318,116 @@ class WindowActionsMixin:
     def _on_entry_selected(self, entry: Any):
         """章节选中（项目模式）。加载文件对并对齐。"""
         self._current_entry = entry
-        src_path = getattr(entry, "source_path", "")
-        tgt_path = getattr(entry, "target_path", "")
+        src_path = getattr(entry, "document_a_path", "")
+        tgt_path = getattr(entry, "document_b_path", "")
         label = getattr(entry, "label", "")
-        # 从 entry 获取 repaired_dir（项目模式优先使用配置的目录）
-        entry_repaired = getattr(entry, "repaired_dir", "")
-        if entry_repaired:
-            self._repaired_dir = entry_repaired
         if src_path and tgt_path:
             self._workspace.set_file_paths(src_path, tgt_path, label)
-            self.load_file_pair(src_path, tgt_path, label)
+            self.load_file_pair(
+                src_path,
+                tgt_path,
+                label,
+                report_path=getattr(entry, "report_path", ""),
+                document_a_id=getattr(entry, "document_a_id", ""),
+                document_b_id=getattr(entry, "document_b_id", ""),
+                language_a=getattr(entry, "language_a", ""),
+                language_b=getattr(entry, "language_b", ""),
+            )
         # 无需手动激活面板，原生 QTabBar 已处理
 
-    def _cancel_current_load(self):
+    def _release_retired_load_thread(self, thread):
+        """Drop ownership once a superseded worker has actually stopped."""
+
+        getattr(self, "_retired_load_threads", set()).discard(thread)
+
+    def _retire_load_thread(self, attribute: str, wait_ms: int) -> None:
+        """Stop one owned worker without destroying it while it is running."""
+
+        thread = getattr(self, attribute, None)
+        setattr(self, attribute, None)
+        if thread is None or not thread.isRunning():
+            return
+        thread.stop()
+        if wait_ms:
+            thread.wait(wait_ms)
+        if not thread.isRunning():
+            return
+
+        retired = getattr(self, "_retired_load_threads", None)
+        if retired is None:
+            retired = set()
+            self._retired_load_threads = retired
+        if thread not in retired:
+            retired.add(thread)
+            thread.finished.connect(
+                lambda retired_thread=thread: self._release_retired_load_thread(
+                    retired_thread
+                )
+            )
+
+    def _cancel_current_load(self, *, drain_retired: bool = False) -> bool:
         """取消当前正在进行的加载操作。
 
         停止所有后台线程，递增操作 ID，使后续到达的旧回调被 _on_encoded / _on_align_done 忽略。
-        编码线程通过 stop_event 通知 OllamaEncoder 在批次间中断；
-        wait(15000) 给足 15 秒让当前 HTTP 批次完成，避免 QThread 销毁时报错闪退。
+        超时后仍在运行的线程由窗口保留所有权，直到其 finished 信号到达。
         """
         self._load_op_id += 1
-        self._current_load_op_id = self._load_op_id
+        wait_ms = 0 if drain_retired else 15000
+        self._retire_load_thread("_enc_thread", wait_ms)
+        self._retire_load_thread("_worker", wait_ms)
 
-        if self._enc_thread is not None and self._enc_thread.isRunning():
-            self._enc_thread.stop()
-            # ── 尝试关闭底层 HTTP session 以加速中断阻塞的 POST 请求 ──
-            try:
-                from dualign.services.embedding import _MODEL_CACHE
+        retired = getattr(self, "_retired_load_threads", set())
+        if drain_retired and retired:
+            import time
 
-                for _model in _MODEL_CACHE.values():
-                    if hasattr(_model, "_session") and _model._session is not None:
-                        try:
-                            _model._session.close()
-                            _model._session = None
-                        except Exception:
-                            pass
-            except Exception:
-                import traceback as _tb
+            deadline = time.monotonic() + 15
+            for thread in tuple(retired):
+                thread.stop()
+                remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+                if remaining_ms:
+                    thread.wait(remaining_ms)
+                if not thread.isRunning():
+                    retired.discard(thread)
+        return not any(thread.isRunning() for thread in retired)
 
-                _tb.print_exc()
-            self._enc_thread.wait(15000)
-            self._enc_thread = None
-
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.stop()
-            self._worker.wait(15000)
-            self._worker = None
-
-    def _on_text_ready(self, _src_hash, _tgt_hash, src_lines, tgt_lines):
+    def _on_text_ready(self, generation, _src_hash, _tgt_hash, src_lines, tgt_lines):
         """文本就绪回调 — 立即进入预览模式展示原文/译文行。
 
         EncodeThread 读取文件后第一时间发射，此时编码尚未开始。
         用户可阅读文本，评分列暂显示灰色 "…"。
         """
-        op_id = getattr(self, "_current_load_op_id", 0)
-        if op_id != self._load_op_id:
+        if generation != self._load_op_id:
             return
         self.src_lines, self.tgt_lines = src_lines, tgt_lines
+        self._src_hash, self._tgt_hash = _src_hash, _tgt_hash
         self._preview_scores = None
         self._ensure_table_in_stacked()
         self._show_table()
         self._switch_table_mode(True)
         self._preview_active = True
-        self._status_bar.set_preview_active(True, phase="正在编码…")
+        self._status_bar.set_view_mode_enabled(False)
+        self._status_bar.set_preview_active(True, phase="正在检查缓存…")
         self._render_preview()
 
-    def _on_encoded(self, se, te, sl, tl, sh, th):
+    def _on_alignment_cache_hit(self, generation, payload):
+        """后台确认 report 缓存有效后，直接恢复校订态而不加载模型。"""
+        if generation != self._load_op_id:
+            return
+        result, src_lines, tgt_lines, src_hash, tgt_hash = payload
+        self.src_lines, self.tgt_lines = src_lines, tgt_lines
+        self._src_hash, self._tgt_hash = src_hash, tgt_hash
+        self._status_bar.set_preview_active(True, phase="正在恢复工作报告…")
+        self._status("已加载工作报告", "success")
+        self._ensure_table_in_stacked()
+        self._show_table()
+        self._on_align_done(generation, result)
+
+    def _on_encoded(self, generation, se, te, sl, tl, sh, th):
         """EncodeThread 完成后回调（接收 6 个参数）。存到实例变量，启动对齐。
 
         如果 _load_op_id 已变更（即新的 load_file_pair 已启动），则丢弃此结果。
         """
-        # ── 操作 ID 校验：丢弃前一次取消操作残留的延迟回调 ──
-        op_id = getattr(self, "_current_load_op_id", 0)
-        if op_id != self._load_op_id:
+        if generation != self._load_op_id:
             return
 
         try:
@@ -376,34 +448,12 @@ class WindowActionsMixin:
 
             self._status("对齐中...")
             QApplication.processEvents()
-            self._start_align()
+            self._start_align(generation)
         except Exception as e:
             self._show_error("编码完成回调", e)
 
-    def _align_cache_dir(self) -> str:
-        """返回对应当前章节的统一缓存目录。"""
-        from dualign.config import get_embedding_cache_dir
-
-        src_path = getattr(self, "_src_path", "")
-        entry_id = Path(src_path).stem.split(".")[0] if src_path else "_unknown"
-        d = get_embedding_cache_dir(entry_id)
-        os.makedirs(d, exist_ok=True)
-        return d
-
-    def _session_cache_path(self) -> str:
-        """修复会话路径，位于 repaired_dir 下，与编码缓存分离。"""
-        from dualign.config import repair_session_path
-
-        # 从 entry 中提取 entry_id，用作文件名前缀
-        entry_id = ""
-        if self._current_entry:
-            entry_id = getattr(self._current_entry, "entry_id", "") or ""
-        if not entry_id and hasattr(self, "_src_path") and self._src_path:
-            entry_id = Path(self._src_path).stem.split(".")[0]
-        return repair_session_path(entry_id, self._repaired_dir)
-
-    def _start_align(self):
-        """构造 AlignWorker 并启动对齐。先尝试对齐结果缓存复用。"""
+    def _start_align(self, generation):
+        """构造 AlignWorker 并启动对齐。"""
         from dualign.gui.workers import AlignWorker
         from dualign.services.embedding import _try_lazy_load_model
 
@@ -411,61 +461,11 @@ class WindowActionsMixin:
             return
 
         # ── 停止前一次未完成的对齐线程 ──
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.stop()
-            self._worker.wait(3000)
-            self._worker = None
+        self._retire_load_thread("_worker", 3000)
 
-        # ── 对齐缓存复用 ──
-        if hasattr(self, "_src_path") and hasattr(self, "_tgt_path"):
-            _rp = self._session_path()
-            if os.path.isfile(_rp):
-                try:
-                    with open(_rp, encoding="utf-8") as _f:
-                        _r = json.load(_f)
-                    _saved_src = _r.get("src_hash", "")
-                    _saved_tgt = _r.get("tgt_hash", "")
-                    if (
-                        _r.get("ops")
-                        and _saved_src == content_hash(self.src_lines)
-                        and _saved_tgt == content_hash(self.tgt_lines)
-                    ):
-                        _ops_raw = _r["ops"]
-                        _result = AlignmentResult(
-                            all_ops=[
-                                (
-                                    tuple(o["s"]),
-                                    tuple(o["t"]),
-                                    float(o["sc"]),
-                                )
-                                for o in _ops_raw
-                            ],
-                            anchors=[],
-                            anchor_op_indices={},
-                            stats=_r.get("stats", {}),
-                        )
-                        self._status("对齐缓存命中", "success")
-                        # ── 恢复相似度矩阵（预览模式使用）──
-                        try:
-                            npy_path = _rp.replace(".report.json", ".sim.npy")
-                            if os.path.isfile(npy_path):
-                                import numpy as _np
-
-                                self._sim_matrix = _np.load(npy_path)
-                        except Exception:
-                            import traceback as _tb
-
-                            _tb.print_exc()
-                            self._sim_matrix = None
-                        self._ensure_table_in_stacked()
-                        self._on_align_done(_result)
-                        return
-                except Exception:
-                    import traceback as _tb
-
-                    _tb.print_exc()
-
-        # ── 对齐缓存未命中 → 清除旧修复会话（基于旧对齐结果，已失效）──
+        # EncodeThread 已在模型加载和编码之前统一探测报告缓存。能到达这里
+        # 就必然是缓存未命中，无需再次读报告和重复计算内容哈希。
+        # ── 清除旧修复会话（基于旧对齐结果，已失效）──
         # 但注意：report.json 中可能包含外部 AI 校订的 repair_log/ai_proposals/ai_review，
         # 使对齐缓存失效：清空 ops 和 stats，保留 AI 相关字段供新对齐后复用。
         self._invalidate_align_cache()
@@ -485,29 +485,102 @@ class WindowActionsMixin:
             tgt_path=getattr(self, "_tgt_path", ""),
             entry_id=getattr(self, "_current_entry_id", ""),
         )
-        self._worker.finished_signal.connect(self._on_align_done)
-        self._worker.error_signal.connect(self._on_worker_error)
+        self._worker.finished_signal.connect(
+            lambda result, g=generation: self._on_align_done(g, result)
+        )
+        self._worker.error_signal.connect(
+            lambda context, traceback, g=generation: (
+                self._on_worker_error(context, traceback)
+                if g == self._load_op_id
+                else None
+            )
+        )
         self._worker.start()
 
-    def _on_align_done(self, result: AlignmentResult):
+    def _on_align_done(self, generation: int, result: AlignmentResult):
         """对齐完成后初始化修复状态。尝试加载已有的修复会话。
 
         如果 _load_op_id 已变更（即新的 load_file_pair 已启动），则丢弃此结果。
         全方法 try/except 保护，防止未捕获异常导致窗口闪退。
         """
         try:
-            # ── 操作 ID 校验：丢弃前一次取消操作残留的延迟回调 ──
-            op_id = getattr(self, "_current_load_op_id", 0)
-            if op_id != self._load_op_id:
+            if generation != self._load_op_id:
+                return
+
+            if result.status == "rejected":
+                self._repair_state = None
+                self._alignment_snapshot = None
+                self._align_stats = result.stats
+                self._alignment_gate = dict(result.gate or {})
+                report_path = self._session_path()
+                if result.stats.get("load_origin") != "report":
+                    from dualign.core import alignment_payload
+                    from dualign.core.calibration import (
+                        resolve_alignment_calibration,
+                    )
+                    from dualign.services.cli_pipeline import _provenance
+                    from dualign.services.embedding import _try_lazy_load_model
+                    from dualign.services.report_io import build_report, save_report
+
+                    model = _try_lazy_load_model()
+                    resolved = resolve_alignment_calibration(
+                        model,
+                        calibration_id=getattr(
+                            self._align_config, "calibration_id", ""
+                        ),
+                    )
+                    calibration_id = (
+                        resolved.calibration_id if resolved is not None else ""
+                    )
+                    report = build_report(
+                        chapter_id=self._current_entry_id,
+                        document_a_path=self._src_path,
+                        document_b_path=self._tgt_path,
+                        operations=[],
+                        stats=result.stats,
+                        quality={
+                            "level": "diagnostic_only",
+                            "rejections": [],
+                            "indicators": {"alignment_status": "rejected"},
+                        },
+                        alignment=alignment_payload(
+                            result, calibration_id=calibration_id
+                        ),
+                        provenance=_provenance(
+                            model, self._align_config, calibration_id
+                        ),
+                    )
+                    save_report(report, report_path)
+                self._report_file_hash = file_bytes_sha256(report_path)
+                self._report_file_present = os.path.isfile(report_path)
+                reason_labels = {
+                    "no_correspondence": "未检测到足够的双语对应关系",
+                    "order_incompatible": "对应内容的顺序与单调对齐不兼容",
+                    "order_unidentifiable": "无法识别稳定的对应顺序",
+                    "calibration_unavailable": "当前嵌入模型没有匹配的校准资料",
+                    "empty_document": "至少一侧文档为空",
+                }
+                self._status(
+                    "对齐已拒绝：" + reason_labels.get(result.reason, result.reason),
+                    "warning",
+                )
+                # A rejected result has no trustworthy relation projection,
+                # but the raw line-by-line preview remains useful.  Re-enter
+                # preview explicitly because cache hits do not emit text_ready.
+                self._preview_active = False
+                self._status_bar.set_view_mode(True)
+                self._on_view_mode_toggled(True)
+                self._status_bar.set_preview_only()
+                self._update_feature_gating()
                 return
 
             self._alignment_snapshot = AlignmentSnapshot.from_alignment(
                 result.all_ops, self.src_lines, self.tgt_lines
             )
             self._align_stats = result.stats
-            # 保持 _sim_matrix（.npy 恢复优先），仅新鲜对齐时覆盖
-            if getattr(result, "sim_matrix", None) is not None:
-                self._sim_matrix = result.sim_matrix
+            self._alignment_gate = dict(result.gate or {})
+            if hasattr(self, "_score_cache"):
+                self._score_cache.clear()
 
             # ── 尝试加载已有的修复会话 ──
             loaded = self._load_session()
@@ -519,89 +592,85 @@ class WindowActionsMixin:
                     result.all_ops, self.src_lines, self.tgt_lines
                 )
 
+            # Loading an existing report must respect flags the user has
+            # already edited or removed.  A freshly recomputed alignment gets
+            # flags for its current disagreement islands; existing user flags
+            # on the same operation take precedence over the generated note.
+            if (
+                result.status == "needs_review"
+                and result.stats.get("load_origin") != "report"
+            ):
+                from dualign.services.repair import (
+                    review_flags_for_uncertain_regions,
+                )
+
+                flagged_ops = {
+                    self._repair_state.action_ordinal(action)
+                    for action in self._repair_state.repair_log
+                    if action.kind == "flag"
+                }
+                for action in review_flags_for_uncertain_regions(
+                    result.all_ops,
+                    result.uncertain_regions,
+                    alternative_operations=result.alternative_ops,
+                    relation_ids=self._repair_state.snapshot.relation_ids,
+                ):
+                    if self._repair_state.action_ordinal(action) not in flagged_ops:
+                        self._repair_state = self._repair_state.apply(action)
+
+            self._initialize_pair_editing_state(result)
+
             self._undo_stack.clear()
             self._redo_stack.clear()
-            self._strategy = "src"
+            # The combo box is the user-visible source of truth.  Loading a new
+            # pair must not silently reset the cached strategy while leaving the
+            # displayed selection unchanged.
+            self._on_strategy_changed(self._review.get_strategy_index())
 
-            # ── 质量评估（必须先于持久化，定义 quality/rejections/indicators）──
             stats = result.stats
-            n_src = stats.get("n_source", 0) or len(self.src_lines or [])
-            n_tgt = stats.get("n_target", 0) or len(self.tgt_lines or [])
+            quality_payload = {
+                "level": "diagnostic_only",
+                "rejections": [],
+                "indicators": {"alignment_status": result.status},
+            }
 
-            from dualign.services.quality_gate import (
-                QUALITY_OK,
-                QUALITY_UNRELIABLE,
-                assess_alignment_quality,
-                _gap_row_ratio,
-            )
-
-            gap_ratio = _gap_row_ratio(result.all_ops, n_src, n_tgt)
-            n_overflow = stats.get("n_overflow_rows", 0)
-
-            assessment = assess_alignment_quality(
-                stats,
-                n_src,
-                n_tgt,
-                gap_row_ratio=gap_ratio,
-                n_overflow_rows=n_overflow,
-                config=getattr(self, "_quality_config", None),
-            )
-            quality = assessment["quality"]
-            rejections = assessment.get("rejections", [])
-            indicators = assessment["indicators"]
-
-            if quality == QUALITY_UNRELIABLE:
+            if result.status == "needs_review":
                 self._status(
-                    f"⚠ 真锚点覆盖不足 (密度={indicators['anchor_density']:.0%})",
+                    f"对齐完成，{len(result.uncertain_regions)} 个分歧区域已用 [F] 标记",
                     "warning",
                 )
-            elif "gap_dominated" in rejections:
-                self._status(
-                    f"⚠ 间隙行占比 {indicators['gap_row_ratio']:.0%}",
-                    "warning",
-                )
-            elif quality == QUALITY_OK:
+            else:
                 self._status("对齐完成", "success")
 
-            self._last_quality_assessment = assessment
+            _report_path = self._session_path()
+            if stats.get("load_origin") != "report":
+                from dualign.services.cli_pipeline import _provenance
+                from dualign.services.embedding import _try_lazy_load_model
+                from dualign.services.report_io import build_report, save_report
+                from dualign.core import alignment_payload
+                from dualign.core.calibration import resolve_alignment_calibration
 
-            # ── 保存对齐结果缓存（单个保存块，写入 ops/stats/quality/hash）──
-            if hasattr(self, "_src_path") and self._src_path:
-                _report_path = self._session_path()
-                os.makedirs(os.path.dirname(_report_path), exist_ok=True)
-                _report = {}
-                if os.path.isfile(_report_path):
-                    try:
-                        with open(_report_path, encoding="utf-8") as _f:
-                            _report = json.load(_f)
-                    except Exception:
-                        import traceback as _tb
+                model = _try_lazy_load_model()
+                resolved = resolve_alignment_calibration(
+                    model,
+                    calibration_id=getattr(self._align_config, "calibration_id", ""),
+                )
+                calibration_id = resolved.calibration_id if resolved is not None else ""
 
-                        _tb.print_exc()
-                        _report = {}
-
-                _new_src_hash = content_hash(list(self.src_lines))
-                _new_tgt_hash = content_hash(list(self.tgt_lines))
-                _old_src_hash = _report.get("src_hash", "")
-                _old_tgt_hash = _report.get("tgt_hash", "")
-                if _old_src_hash != _new_src_hash or _old_tgt_hash != _new_tgt_hash:
-                    _report.pop("repair_log", None)
-                    _report.pop("ai_review", None)
-
-                _report["ops"] = [
-                    {"s": list(s), "t": list(t), "sc": round(float(sc), 4)}
-                    for s, t, sc in result.all_ops
-                ]
-                _report["stats"] = stats
-                _report["src_hash"] = _new_src_hash
-                _report["tgt_hash"] = _new_tgt_hash
-                _report["quality"] = {
-                    "level": quality,
-                    "rejections": rejections,
-                    "indicators": indicators,
-                }
-                with open(_report_path, "w", encoding="utf-8") as _f:
-                    json.dump(_report, _f, ensure_ascii=False, separators=(",", ":"))
+                _report = build_report(
+                    chapter_id=self._current_entry_id,
+                    document_a_path=self._src_path,
+                    document_b_path=self._tgt_path,
+                    operations=result.all_ops,
+                    stats=stats,
+                    quality=quality_payload,
+                    alignment=alignment_payload(result, calibration_id=calibration_id),
+                    provenance=_provenance(model, self._align_config, calibration_id),
+                    repair_log=self._repair_state.repair_log,
+                )
+                save_report(_report, _report_path)
+            self._report_file_hash = file_bytes_sha256(_report_path)
+            self._report_file_present = os.path.isfile(_report_path)
 
             # ── 将初始分数载入 ScoreManager 缓存 ──
             if hasattr(self, "_score_mgr"):
@@ -610,11 +679,6 @@ class WindowActionsMixin:
                 # 对齐完成后注入 scorer（已由 load_file_pair 创建）
                 if hasattr(self, "_scorer") and self._scorer is not None:
                     self._score_mgr.set_scorer(self._scorer)
-
-            # ── 为新对齐创建全新的 score_cache（加载 session 后清除旧值）──
-            # 放在 _load_initial_scores 之后，因为后者已从 _score_cache 读取完毕
-            if hasattr(self, "_score_cache"):
-                self._score_cache.clear()
 
             # ── 退出预览模式，恢复到标准 7 列表格 ──
             if self._preview_active:
@@ -625,22 +689,23 @@ class WindowActionsMixin:
                 # 恢复底部 AI 面板（预览模式入口折叠的）
                 saved = getattr(self, "_preview_saved_bottom", None)
                 if saved and self._bottom_collapsed:
-                    self._toggle_bottom_panel()
+                    self._toggle_bottom_panel(user_initiated=False)
                 self._preview_saved_bottom = None
                 # 同步视图模式开关
                 self._status_bar.set_view_mode(False)
 
+            self._status_bar.set_view_mode_enabled(True)
+
             self._ensure_table_in_stacked()
             self._show_table()
             self._refresh()
+            self._focus_initial_text_pair()
             self._update_feature_gating()
             # 加载会话后重建 AI 建议表格
             if hasattr(self, "_review"):
                 self._review._rebuild_ai_suggestions()
             # 同步底部面板展开/折叠状态
             self._sync_bottom_panel()
-            # ── 确保导出文件反映最新修复状态 ──
-            self._export_repaired_files()
         except Exception as e:
             import traceback as _tb
 
@@ -652,23 +717,25 @@ class WindowActionsMixin:
         """重新对齐 — 清除缓存后重新编码 + 对齐（异步，不阻塞 GUI）。"""
         if not self.src_lines or not self.tgt_lines:
             return
-        # ── 使用 _invalidate_align_cache 替代 _clear_session，保留外部 AI 校订数据 ──
+        self._cancel_current_load()
         self._invalidate_align_cache()
 
         from dualign.gui.workers import EncodeThread
+        from dualign.services.cli_pipeline import _provenance
 
-        self._status("重新编码中…")
+        self._status("正在重新计算对齐…")
         QApplication.processEvents()
 
         src_path = getattr(self, "_src_path", "")
         tgt_path = getattr(self, "_tgt_path", "")
         if src_path and tgt_path:
             self._enc_thread = EncodeThread(
-                src_path, tgt_path, entry_id=self._current_entry_id
+                src_path,
+                tgt_path,
+                entry_id=self._current_entry_id,
+                expected_provenance=_provenance(None, self._align_config),
             )
-            self._enc_thread.status_signal.connect(self._status)
-            self._enc_thread.finished_signal.connect(self._on_encoded)
-            self._enc_thread.error_signal.connect(self._on_worker_error)
+            self._connect_encode_thread(self._enc_thread, self._load_op_id)
             self._enc_thread.start()
         else:
             self._status("错误: 无法找到源文件路径", "error")
@@ -688,46 +755,44 @@ class WindowActionsMixin:
         # ── 统一合法性校验 ──
         from dualign.services.repair import RepairService
 
-        ops = RepairService.valid_operations(self._repair_state, action.op_index)
+        ordinal = self._repair_state.action_ordinal(action)
+        ops = RepairService.valid_operations(self._repair_state, ordinal)
         kind = action.kind
         if kind == "merge":
             if not ops.get("merge", False):
-                self._status(f"⚠ 跳过: snap[{action.op_index}] 当前不可合并", "warning")
+                self._status(f"⚠ 跳过: 关系[{ordinal}] 当前不可合并", "warning")
                 return
         elif kind in ("split",):
             if not ops.get("split_tgt", False) and not ops.get("split_src", False):
-                self._status(f"⚠ 跳过: snap[{action.op_index}] 当前不可拆分", "warning")
+                self._status(f"⚠ 跳过: 关系[{ordinal}] 当前不可拆分", "warning")
                 return
         elif kind in ("edit", "edit_tgt", "edit_src"):
             if not ops.get("edit", False):
-                self._status(f"⚠ 跳过: snap[{action.op_index}] 当前不可校订", "warning")
+                self._status(f"⚠ 跳过: 关系[{ordinal}] 当前不可校订", "warning")
                 return
         elif kind == "delete":
             if not ops.get("delete", False):
-                self._status(f"⚠ 跳过: snap[{action.op_index}] 当前不可删除", "warning")
+                self._status(f"⚠ 跳过: 关系[{ordinal}] 当前不可删除", "warning")
                 return
         elif kind in ("placeholder_src", "placeholder_tgt"):
             if not ops.get("placeholder", False):
-                self._status(
-                    f"⚠ 跳过: snap[{action.op_index}] 当前不可插占位符", "warning"
-                )
+                self._status(f"⚠ 跳过: 关系[{ordinal}] 当前不可插占位符", "warning")
                 return
         elif kind in ("ok", "flag"):
             if not ops.get(kind, False):
-                self._status(
-                    f"⚠ 跳过: snap[{action.op_index}] 操作 {kind} 不可用", "warning"
-                )
+                self._status(f"⚠ 跳过: 关系[{ordinal}] 操作 {kind} 不可用", "warning")
                 return
 
         action.data["approvals"] = {"auto"} if auto else {"manual"}
+        if not auto and action.source == "auto":
+            action.source = "user"
         self._undo_stack.append(self._repair_state)
         self._redo_stack.clear()
         self._repair_state = self._repair_state.apply(action)
-        # 标记受影响 snap 失效，等待 poll_now 捡起重算
-        _affected = action.data.get("orig_snaps", [action.op_index])
-        if hasattr(self, "_score_mgr"):
-            self._score_mgr.invalidate_snaps(_affected)
-        # 文本变更类操作 → 重置该 snap 已采纳的 AI 建议为 pending
+        # 标记受影响关系失效，等待 poll_now 捡起重算
+        _affected = self._repair_state.action_ordinals(action)
+        self._invalidate_relation_scores(_affected)
+        # 文本变更类操作 → 重置该关系已采纳的 AI 建议为 pending
         _text_changing_kinds = {
             "edit",
             "edit_tgt",
@@ -741,7 +806,7 @@ class WindowActionsMixin:
         if action.kind in _text_changing_kinds:
             _store = self._repair_state.ai_proposal_store
             for _si in _affected:
-                _store.reset(_si)
+                _store.reset(self._repair_state.snapshot.relation_id(_si))
             if hasattr(self, "_review"):
                 self._review._rebuild_ai_suggestions()
 
@@ -760,22 +825,24 @@ class WindowActionsMixin:
             "placeholder_tgt": "已插占位符",
         }
         lbl = _action_labels.get(kind, f"已{kind}")
-        self._set_temp_status(f"{lbl} snap[{action.op_index}]", "success")
+        self._set_temp_status(f"{lbl} 关系[{ordinal}]", "success")
 
         # 撤销栈溢出提醒
         if len(self._undo_stack) == self._undo_stack.maxlen:
             self._status("撤销栈已达上限 (50)，将覆盖最旧记录", "warning")
 
-    def do_merge(self, snap_i: int):
+    def do_merge(self, ordinal: int):
         """合并当前文本对。"""
         if self._repair_state is None:
             return
-        s_idx, t_idx, _sc = self._repair_state.snapshot.original_ops[snap_i]
+        s_idx, t_idx, _sc = self._repair_state.snapshot.original_ops[ordinal]
         self._apply_action(
-            RepairAction.make_merge(snap_i, sub_count=max(len(s_idx), len(t_idx)))
+            self._repair_state.make_action(
+                "merge", ordinal, sub_count=max(len(s_idx), len(t_idx))
+            )
         )
 
-    def do_split(self, snap_i: int):
+    def do_split(self, ordinal: int):
         """拆分文本对 — 自动拆分少行的一侧（按硬分割）。
 
         注意：拆分涉及模型编码，可能耗时。通过状态栏提示用户。
@@ -785,46 +852,59 @@ class WindowActionsMixin:
         if not self._ensure_model():
             self._status("拆分需要编码模型，请先完成一次对齐", "warning")
             return
-        snap = self._repair_state.snapshot
-        s_idx, t_idx, _sc = snap.original_ops[snap_i]
+        snapshot = self._repair_state.snapshot
+        s_idx, t_idx, _sc = snapshot.original_ops[ordinal]
         ls, lt = len(s_idx), len(t_idx)
 
         side = "src" if ls <= lt else "tgt"
-        self._status(f"拆分 snap[{snap_i}] {side} 侧…")
+        self._status(f"拆分关系[{ordinal}] {side} 侧…")
         QApplication.processEvents()
 
         # 创建嵌入缓存，使 split 产生的新文本被缓存
-        from dualign.config import get_embedding_cache_dir
+        from dualign.config import get_embedding_cache_path
         from dualign.services.embedding_cache import EmbeddingCache
 
-        ec = EmbeddingCache(
-            os.path.join(get_embedding_cache_dir(self._current_entry_id), "vecs.db")
-        )
+        ec = EmbeddingCache(get_embedding_cache_path())
         try:
-            state = RepairService.apply_split(
-                self._repair_state, snap_i, side, self._model, cache=ec
+            attempt = RepairService.try_split(
+                self._repair_state, ordinal, side, self._model, cache=ec
             )
+        except Exception as exc:
+            self._set_flags([ordinal], f"拆分失败：{SPLIT_FAILURE_REALIGN}")
+            self._status(
+                f"拆分失败：{SPLIT_FAILURE_REALIGN}（{exc}），已标记 [F]",
+                "warning",
+            )
+            return
         finally:
             ec.close()
-        if state is self._repair_state:
-            self._status("拆分失败：文本无法进一步拆分或重对齐失败", "warning")
-            return  # 跳过 refresh，保留提示消息
+        if not attempt.succeeded:
+            prefix = "拆分需复核" if attempt.needs_review else "拆分失败"
+            note = f"{prefix}：{attempt.failure_reason}"
+            self._set_flags([ordinal], note)
+            self._status(f"{note}，已标记 [F]", "warning")
+            return
         self._undo_stack.append(self._repair_state)
-        self._repair_state = state
-        if hasattr(self, "_score_mgr"):
-            self._score_mgr.invalidate_snaps([snap_i])
-        self._reset_accepted_proposals([snap_i])
+        self._repair_state = attempt.state
+        action = None
+        if self._repair_state.repair_log:
+            action = self._repair_state.repair_log[-1]
+            action.source = "user"
+            action.data["approvals"] = {"manual"}
+        split_scores = action.data.get("split_scores", []) if action else []
+        self._set_known_relation_scores(ordinal, split_scores)
+        self._reset_accepted_proposals([ordinal])
         self._save_session()
         self._refresh()
         # 滚动到拆分后的文本对
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
-            if item is not None and item.data(Qt.ItemDataRole.UserRole) == snap_i:
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == ordinal:
                 self.table.scrollToItem(
                     item, QAbstractItemView.ScrollHint.PositionAtCenter
                 )
                 break
-        self._set_temp_status(f"已拆分 snap[{snap_i}] ({side}侧)", "success")
+        self._set_temp_status(f"已拆分关系[{ordinal}] ({side}侧)", "success")
 
     def _ensure_model(self):
         """确保 self._model 已加载。返回 True 表示就绪。"""
@@ -845,18 +925,18 @@ class WindowActionsMixin:
         self._model = m
         return True
 
-    def do_edit_single(self, snap_i: int):
+    def do_edit_single(self, ordinal: int):
         """校订单个文本对。优先使用当前修复状态。"""
         if self._repair_state is None:
             return
         ch = self._repair_state.current
-        g = ch.group(snap_i)
-        snap = self._repair_state.snapshot
+        g = ch.group(ordinal)
+        snapshot = self._repair_state.snapshot
 
         # 初始文本（原始对齐输出，始终不变）
-        s_idx, t_idx, _sc = snap.original_ops[snap_i]
-        initial_src = [snap.src_text(i) for i in s_idx]
-        initial_tgt = [snap.tgt_text(j) for j in t_idx]
+        s_idx, t_idx, _sc = snapshot.original_ops[ordinal]
+        initial_src = [snapshot.src_text(i) for i in s_idx]
+        initial_tgt = [snapshot.tgt_text(j) for j in t_idx]
 
         if g is not None and g.rows:
             from dualign.models.marker import is_merge
@@ -883,74 +963,141 @@ class WindowActionsMixin:
             new_src = dlg.result_src_lines
             new_tgt = dlg.result_tgt_lines
             # 不传 inherited_scores → _apply_info_full 用 osc 原始分 fallback
-            action = RepairAction.make_edit(
-                snap_i,
+            action = self._repair_state.make_action(
+                "edit",
+                ordinal,
                 new_src_lines=new_src,
                 new_tgt_lines=new_tgt,
             )
             self._apply_action(action)
 
-    def do_ok(self, snap_i: int):
+    def do_ok(self, ordinal: int):
         """审核通过 — 认可当前 1:1 状态，不做任何文本修改。"""
-        self._apply_action(RepairAction.make_ok(snap_i))
+        if self._repair_state is not None:
+            self._apply_action(self._repair_state.make_action("ok", ordinal))
 
-    def do_flag(self, snap_i: int):
-        """标记异常。"""
-        self._apply_action(RepairAction.make_flag(snap_i))
+    def do_flag(self, ordinal: int):
+        """打开单个文本对的标记编辑器。"""
+        self.do_flag_selected([ordinal])
 
-    def do_delete(self, snap_i: int):
-        """删除文本对。"""
-        self._apply_action(RepairAction.make_delete(snap_i))
+    def do_flag_selected(self, ordinals: List[int]):
+        """为一个或多个文本对编辑标记注释。"""
+        if self._repair_state is None:
+            return
+        selected = sorted(set(ordinals))
+        flags = [
+            self._repair_state.flag_for_relation(
+                self._repair_state.snapshot.relation_id(si)
+            )
+            for si in selected
+        ]
+        notes = [flag.data.get("note", "") for flag in flags if flag is not None]
+        initial_note = (
+            notes[0]
+            if len(notes) == len(selected) and notes and len(set(notes)) == 1
+            else ""
+        )
+        dialog = FlagEditDialog(
+            initial_note,
+            self,
+            can_delete=bool(notes),
+            selection_count=len(selected),
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if dialog.delete_requested:
+            self._remove_flags(selected)
+        else:
+            self._set_flags(selected, dialog.note)
 
-    def _delete_selected_snaps(self, snaps: List[int]):
-        """批量删除选中 snap。逐个 apply delete action。"""
-        if self._repair_state is None or len(snaps) < 1:
+    def _set_flags(self, ordinals: List[int], note: str):
+        """一次历史操作中设置一组标记。"""
+        if self._repair_state is None:
+            return
+        selected = sorted(set(ordinals))
+        if not selected:
             return
         self._undo_stack.append(self._repair_state)
         self._redo_stack.clear()
         state = self._repair_state
-        for si in sorted(snaps, reverse=True):
-            state = state.apply(RepairAction.make_delete(si))
+        for ordinal in selected:
+            action = state.make_action("flag", ordinal, note=note, source="user")
+            action.data["approvals"] = {"manual"}
+            state = state.apply(action)
         self._repair_state = state
-        if hasattr(self, "_score_mgr"):
-            self._score_mgr.invalidate_snaps(snaps)
-        self._reset_accepted_proposals(snaps)
         self._save_session()
         self._refresh()
-        self._set_temp_status(f"已删除 {len(snaps)} 个文本对", "success")
+        self._set_temp_status(f"已标记 {len(selected)} 个文本对", "success")
 
-    def do_placeholder(self, snap_i: int):
+    def _remove_flags(self, ordinals: List[int]):
+        """删除一组标记，保留同文本对的其他修复。"""
+        if self._repair_state is None:
+            return
+        selected = sorted(set(ordinals))
+        state = self._repair_state
+        for ordinal in selected:
+            relation_id = state.snapshot.relation_id(ordinal)
+            state = state.without_relation_flag(relation_id)
+        if state.repair_log == self._repair_state.repair_log:
+            return
+        self._undo_stack.append(self._repair_state)
+        self._redo_stack.clear()
+        self._repair_state = state
+        self._save_session()
+        self._refresh()
+        self._set_temp_status(f"已删除 {len(selected)} 个文本对的标记", "info")
+
+    def do_delete(self, ordinal: int):
+        """删除文本对。"""
+        if self._repair_state is not None:
+            self._apply_action(self._repair_state.make_action("delete", ordinal))
+
+    def _delete_selected_relations(self, ordinals: List[int]):
+        """逐个删除选中的关系。"""
+        if self._repair_state is None or len(ordinals) < 1:
+            return
+        self._undo_stack.append(self._repair_state)
+        self._redo_stack.clear()
+        state = self._repair_state
+        for si in sorted(ordinals, reverse=True):
+            action = state.make_action("delete", si, source="user")
+            action.data["approvals"] = {"manual"}
+            state = state.apply(action)
+        self._repair_state = state
+        self._invalidate_relation_scores(ordinals)
+        self._reset_accepted_proposals(ordinals)
+        self._save_session()
+        self._refresh()
+        self._set_temp_status(f"已删除 {len(ordinals)} 个文本对", "success")
+
+    def do_placeholder(self, ordinal: int):
         """占位符 — 自动判断方向（1:0 → tgt, 0:1 → src）。"""
         if self._repair_state is None:
             return
-        s_idx, t_idx, _sc = self._repair_state.snapshot.original_ops[snap_i]
+        s_idx, t_idx, _sc = self._repair_state.snapshot.original_ops[ordinal]
         ls, lt = len(s_idx), len(t_idx)
         if ls > 0 and lt == 0:
-            self._apply_action(RepairAction.make_placeholder_tgt(snap_i))
+            self._apply_action(
+                self._repair_state.make_action("placeholder_tgt", ordinal)
+            )
         elif ls == 0 and lt > 0:
-            self._apply_action(RepairAction.make_placeholder_src(snap_i))
+            self._apply_action(
+                self._repair_state.make_action("placeholder_src", ordinal)
+            )
 
-    def do_auto_repair_single(self, snap_i: int):
-        """自动修复当前文本对。"""
-        if self._repair_state is None:
+    def do_edit_selected(self, ordinals: List[int]):
+        """跨关系手动校订。所有选中文本对合并编辑。"""
+        if self._repair_state is None or len(ordinals) < 1:
             return
-        s_idx, t_idx, _sc = self._repair_state.snapshot.original_ops[snap_i]
-        ls, lt = len(s_idx), len(t_idx)
-        if ls > 1 and lt == 1:
-            self.do_split(snap_i)  # N:1 → 拆 tgt
-        elif ls == 1 and lt > 1:
-            self.do_merge(snap_i)  # 1:M → 合 tgt
-        elif ls > 0 and lt == 0:
-            self.do_placeholder(snap_i)
-        elif ls == 0 and lt > 0:
-            self.do_placeholder(snap_i)
-
-    def do_edit_selected(self, snaps: List[int]):
-        """跨 snap 手动校订。所有选中文本对合并编辑。"""
-        if self._repair_state is None or len(snaps) < 1:
+        selected = sorted(set(ordinals))
+        capabilities = RepairService.valid_selection_operations(
+            self._repair_state, selected
+        )
+        if not capabilities["edit"]:
+            self._status("跨关系校订要求选择连续文本对", "warning")
             return
         ch = self._repair_state.current
-        snap = self._repair_state.snapshot
+        snapshot = self._repair_state.snapshot
         from dualign.models.marker import is_merge
 
         # 收集所有原文/译文行（优先从当前状态读取）
@@ -959,9 +1106,9 @@ class WindowActionsMixin:
         # 初始文本（原始对齐输出，始终不变）
         init_src: List[str] = []
         init_tgt: List[str] = []
-        for si in sorted(snaps):
+        for si in selected:
             g = ch.group(si)
-            s_idx, t_idx, _sc = snap.original_ops[si]
+            s_idx, t_idx, _sc = snapshot.original_ops[si]
 
             if g is not None and g.rows:
                 if is_merge(g.rows[0].marker):
@@ -975,21 +1122,21 @@ class WindowActionsMixin:
                             all_tgt.append(r.tgt_text)
             else:
                 for i in s_idx:
-                    t = snap.src_text(i)
+                    t = snapshot.src_text(i)
                     if t:
                         all_src.append(t)
                 for j in t_idx:
-                    t = snap.tgt_text(j)
+                    t = snapshot.tgt_text(j)
                     if t:
                         all_tgt.append(t)
 
-            # 收集该 snap 的初始文本（始终从 snapshot 原始数据）
+            # 收集该关系的初始文本（始终从不可变基线读取）
             for i in s_idx:
-                t = snap.src_text(i)
+                t = snapshot.src_text(i)
                 if t:
                     init_src.append(t)
             for j in t_idx:
-                t = snap.tgt_text(j)
+                t = snapshot.tgt_text(j)
                 if t:
                     init_tgt.append(t)
 
@@ -1003,75 +1150,82 @@ class WindowActionsMixin:
         if dlg.exec() == BlockEditDialog.DialogCode.Accepted:
             new_src = dlg.result_src_lines
             new_tgt = dlg.result_tgt_lines
-            if len(snaps) == 1:
+            if len(selected) == 1:
                 # 不传入 inherited_scores → _apply_info_full 用 osc 原始分 fallback
                 # 轮询自动触发异步评分
-                action = RepairAction.make_edit(
-                    snaps[0],
+                action = self._repair_state.make_action(
+                    "edit",
+                    selected[0],
                     new_src_lines=new_src,
                     new_tgt_lines=new_tgt,
                 )
                 self._apply_action(action)
             else:
-                # 多 snap 校订：不传 scores，轮询自动评分
+                # 多关系校订：不传 scores，轮询自动评分
                 self._undo_stack.append(self._repair_state)
                 self._redo_stack.clear()
                 self._repair_state = RepairService.repair_multi_edit(
                     self._repair_state,
-                    snaps,
+                    selected,
                     new_src,
                     new_tgt,
                 )
-                if hasattr(self, "_score_mgr"):
-                    self._score_mgr.invalidate_snaps(snaps)
-                self._reset_accepted_proposals(snaps)
+                self._invalidate_relation_scores(selected)
+                self._reset_accepted_proposals(selected)
                 self._save_session()
                 self._refresh()
 
-    def _reset_accepted_proposals(self, snap_indices: list[int]):
-        """重置指定 snap 中已采纳的 AI 建议为 pending。"""
-        if self._repair_state is None or not snap_indices:
+    def _reset_accepted_proposals(self, ordinals: list[int]):
+        """重置指定关系中已采纳的 AI 建议为 pending。"""
+        if self._repair_state is None or not ordinals:
             return
         store = self._repair_state.ai_proposal_store
         changed = False
-        for si in snap_indices:
-            for p in store.get(si):
+        for si in ordinals:
+            relation_id = self._repair_state.snapshot.relation_id(si)
+            for p in store.get(relation_id):
                 if p.status == "accepted":
                     p.reset()
                     changed = True
         if changed and hasattr(self, "_review"):
             self._review._rebuild_ai_suggestions()
 
-    def do_bundle_snaps(self, snaps: List[int]):
-        """跨 snap 合并：将多个 snap 捆绑为一个文本对。原文和译文均合并。"""
-        if self._repair_state is None or len(snaps) < 2:
+    def do_bundle_relations(self, ordinals: List[int]):
+        """跨关系合并：将多个关系捆绑为一个文本对。两侧文本均合并。"""
+        if self._repair_state is None or len(ordinals) < 2:
+            return
+        selected = sorted(set(ordinals))
+        capabilities = RepairService.valid_selection_operations(
+            self._repair_state, selected
+        )
+        if not capabilities["merge"]:
+            self._status("跨关系合并要求选择连续文本对", "warning")
             return
         self._undo_stack.append(self._repair_state)
         self._redo_stack.clear()
-        self._repair_state = RepairService.repair_bundle_snaps(
-            self._repair_state, sorted(snaps)
+        self._repair_state = RepairService.repair_bundle_relations(
+            self._repair_state, selected
         )
-        if hasattr(self, "_score_mgr"):
-            self._score_mgr.invalidate_snaps([snaps[0]])
-        self._reset_accepted_proposals([snaps[0]])
+        self._invalidate_relation_scores([selected[0]])
+        self._reset_accepted_proposals([selected[0]])
         self._save_session()
         self._refresh()
         self._set_temp_status(
-            f"已合并 {len(snaps)} 个文本对 → snap[{snaps[0]}]", "success"
+            f"已合并 {len(selected)} 个文本对 → 关系[{selected[0]}]", "success"
         )
 
-    def do_reset(self, snap_i: int):
+    def do_reset(self, ordinal: int):
         """重置当前文本对的修复。"""
         if self._repair_state is None:
             return
         self._undo_stack.append(self._repair_state)
         self._redo_stack.clear()
-        self._repair_state = self._repair_state.reset_op(snap_i)
-        if hasattr(self, "_score_mgr"):
-            self._score_mgr.invalidate_snaps([snap_i])
+        relation_id = self._repair_state.snapshot.relation_id(ordinal)
+        self._repair_state = self._repair_state.reset_relation(relation_id)
+        self._invalidate_relation_scores([ordinal])
         self._save_session()
         self._refresh()
-        self._set_temp_status(f"已重置 snap[{snap_i}]", "info")
+        self._set_temp_status(f"已重置关系[{ordinal}]", "info")
 
     def _apply_ai_action(self, action: RepairAction):
         """AI 操作的受控入口：用户已确认采纳，执行修复。
@@ -1079,9 +1233,12 @@ class WindowActionsMixin:
         统一方案：所有 AI 操作（含 delete）走统一 _apply_action 路径，
         不再为 delete 单独追加 [OK]——采纳操作本身已构成审批。
         """
+        if self._repair_state is None:
+            return
+        ordinal = self._repair_state.action_ordinal(action)
         self._apply_action(action, auto=False)
         self._set_temp_status(
-            f"AI 修复已应用: snap[{action.op_index}] {action.kind}", "success"
+            f"AI 修复已应用: 关系[{ordinal}] {action.kind}", "success"
         )
 
     def _on_ai_repair_chapter(self):
@@ -1097,11 +1254,33 @@ class WindowActionsMixin:
         except Exception as e:
             self._show_error("AI 校订本章", e)
 
-    def _on_ai_batch_finished(self):
-        """AI 校订完成 → 持久化 + 刷新 GUI。"""
-        self._set_ai_review("completed", "")
+    def _on_ai_batch_finished(self, result):
+        """Persist the Agent's explicit completion state and refresh the GUI."""
+        note = result.note
+        if result.pending_ids:
+            progress = (
+                f"已审 {len(result.reviewed_ids)}，"
+                f"剩余 {len(result.pending_ids)}: {list(result.pending_ids[:15])}"
+            )
+            note = f"{progress}；{note}" if note else progress
+        self._set_ai_review(
+            result.status,
+            note,
+            details={
+                "reviewed_count": len(result.reviewed_ids),
+                "pending_count": len(result.pending_ids),
+                "pending_ids": list(result.pending_ids),
+                "turns": result.turns,
+                "forced": result.forced,
+                "model": result.model_name,
+                "prompt_sha256": result.prompt_sha256,
+            },
+        )
         self._save_session()
-        self._status("AI 校订完成", "success")
+        if result.is_complete:
+            self._status("AI 校订完成", "success")
+        else:
+            self._status(f"AI 校订未完成：{note}", "warning")
         # 刷新主表格以反映修复后的最新状态
         self._refresh()
         self._sync_bottom_panel()
@@ -1113,29 +1292,16 @@ class WindowActionsMixin:
         else:
             self._set_ai_review("error", status_or_error)
 
-    def _set_ai_review(self, status: str, note: str = ""):
+    def _set_ai_review(self, status: str, note: str = "", details=None):
         """写入 AI 审校状态到 report.json 的 ai_review 字段。"""
-        import time as _time
-
-        path = self._session_path()
-        if not os.path.isfile(path):
-            return
         try:
-            with open(path, encoding="utf-8") as f:
-                report = json.load(f)
-        except Exception:
-            import traceback as _tb
+            from dualign.services.report_io import set_ai_review
 
-            _tb.print_exc()
-            return
-        report["ai_review"] = {
-            "status": status,
-            "note": note,
-            "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%S"),
-        }
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(report, f, ensure_ascii=False, separators=(",", ":"))
+            self._write_report(
+                lambda path: set_ai_review(
+                    path, status=status, note=note, details=details
+                )
+            )
         except Exception:
             import traceback as _tb
 
@@ -1199,7 +1365,6 @@ class WindowActionsMixin:
         # 刷新状态和功能阶梯
         self._refresh_status_dots()
         self._safe_status("Agent 配置已更新")
-        self._refresh_status_dots()
 
     def _on_reset_all(self):
         """重置所有修复。"""
@@ -1209,10 +1374,9 @@ class WindowActionsMixin:
         QApplication.processEvents()
         self._undo_stack.append(self._repair_state)
         self._repair_state = self._repair_state.reset()
-        if hasattr(self, "_score_mgr"):
-            _all_snaps = [g.snap_i for g in self._repair_state.current.groups]
-            self._score_mgr.invalidate_snaps(_all_snaps)
-        self._reset_accepted_proposals(_all_snaps)
+        all_ordinals = [g.ordinal for g in self._repair_state.current.groups]
+        self._invalidate_relation_scores(all_ordinals)
+        self._reset_accepted_proposals(all_ordinals)
         self._refresh()
         self._save_session()
         self._safe_status("已重置所有修复")
@@ -1225,66 +1389,36 @@ class WindowActionsMixin:
         """一键修复 — 通过后台线程执行，避免阻塞主线程。"""
         if self._repair_state is None:
             return
+
+        # Re-read the visible selection at the execution boundary.  This keeps
+        # the strategy matrix correct even if a report reload or settings
+        # restore occurred without emitting currentIndexChanged.
+        self._on_strategy_changed(self._review.get_strategy_index())
+
         if self._strategy == "src" and not self._ensure_model():
             self._safe_status("该策略需要编码模型，请先完成一次对齐")
             return
 
-        # ── 锚点门控：复用 _on_align_done 已计算的品质信息 ──
-        stats = getattr(self, "_align_stats", None) or {}
-        n_containers = stats.get("n_containers", 0)
-        qa = getattr(self, "_last_quality_assessment", None)
-        if qa:
-            is_unreliable = qa["quality"] == "unreliable"
-        else:
-            n_src = stats.get("n_source", 0) or len(self.src_lines or [])
-            n_tgt = stats.get("n_target", 0) or len(self.tgt_lines or [])
-            from dualign.services.quality_gate import (
-                assess_alignment_quality,
-                _gap_row_ratio,
-            )
-
-            # 从 self._repair_state 获取 all_ops 用于计算 gap_ratio
-            if self._repair_state:
-                _ops = [
-                    (
-                        (tuple(o["s"]), tuple(o["t"]), float(o["sc"]))
-                        if isinstance(o, dict)
-                        else (o[0], o[1], o[2])
-                    )
-                    for o in self._repair_state.snapshot.original_ops
-                ]
-                gap_ratio = _gap_row_ratio(_ops, n_src, n_tgt)
-            else:
-                gap_ratio = 0.0
-            fallback = assess_alignment_quality(
-                stats, n_src, n_tgt, gap_row_ratio=gap_ratio
-            )
-            is_unreliable = fallback["quality"] == "unreliable"
-
-        if is_unreliable:
-            ad = qa["indicators"]["anchor_density"] if qa else 0
-            self._safe_status(f"✗ 已拒绝修复 — 真锚点密度 {ad:.0%}")
-            return
-
-        # 容器操作提示
-        if n_containers > 0:
-            self._safe_status(f"一键修复中…（含 {n_containers} 个容器操作）")
-        else:
-            self._safe_status("一键修复中…")
+        # 文档适用性已由 mdl-v1 在生成路径前判断；自动修复不得再用
+        # legacy 锚点密度、gap 比例或合并上限推翻该决定。
+        self._safe_status("一键修复中…")
         QApplication.processEvents()
 
         from dualign.gui.workers import AutoRepairWorker
+
+        running_worker = getattr(self, "_auto_repair_worker", None)
+        if running_worker is not None and running_worker.isRunning():
+            self._safe_status("自动修复仍在进行中")
+            return
 
         # 预先保存当前状态用于撤销
         self._undo_stack.append(self._repair_state)
 
         # 创建嵌入缓存，使自动修复中的 split 产生的新文本被缓存
-        from dualign.config import get_embedding_cache_dir
+        from dualign.config import get_embedding_cache_path
         from dualign.services.embedding_cache import EmbeddingCache
 
-        ec = EmbeddingCache(
-            os.path.join(get_embedding_cache_dir(self._current_entry_id), "vecs.db")
-        )
+        ec = EmbeddingCache(get_embedding_cache_path())
 
         self._auto_repair_worker = AutoRepairWorker(
             self._repair_state, self._strategy, model=self._model, cache=ec
@@ -1292,199 +1426,367 @@ class WindowActionsMixin:
         self._auto_repair_worker.status_signal.connect(lambda msg: self._status(msg))
         self._auto_repair_worker.finished_signal.connect(self._on_auto_repair_done)
         self._auto_repair_worker.error_signal.connect(self._on_worker_error)
+        worker = self._auto_repair_worker
+        worker.finished.connect(
+            lambda finished_worker=worker: self._release_auto_repair_worker(
+                finished_worker
+            )
+        )
         self._auto_repair_worker.start()
+
+    def _release_auto_repair_worker(self, worker):
+        if getattr(self, "_auto_repair_worker", None) is worker:
+            self._auto_repair_worker = None
 
     def _on_auto_repair_done(self, result):
         """一键修复完成 → 更新状态并刷新 UI。"""
         self._repair_state = result
-        if hasattr(self, "_score_mgr"):
-            _all_snaps = [g.snap_i for g in self._repair_state.current.groups]
-            self._score_mgr.invalidate_snaps(_all_snaps)
+        all_ordinals = [g.ordinal for g in self._repair_state.current.groups]
+        self._invalidate_relation_scores(all_ordinals)
         self._save_session()
         self._refresh()
-        n_actions = len(result._repair_log) if result._repair_log else 0
+        n_actions = len(result.repair_log)
         self._status(f"一键修复完成 ({n_actions} 个操作)", "success")
 
-    def _on_export(self):
-        """导出修复结果。"""
+    def _recover_pair_save_transactions(self):
+        """Roll back any interrupted native save before files are opened."""
+        from dualign.services.pair_save import recover_pending_pair_saves
+
+        messages = recover_pending_pair_saves()
+        for message in messages:
+            self._status(message, "warning")
+
+    def _alignment_provenance(self) -> dict:
+        """Return reproducibility metadata, deliberately excluding secrets."""
+        from dualign import __version__
+        from dualign.core import ALIGN_CORE_VERSION
+        from dualign.providers import ProviderManager
+        from dualign.services.alignment_io import build_alignment_provenance
+
+        ProviderManager.load()
+        provider = ProviderManager.active()
+        return build_alignment_provenance(
+            tool_version=__version__,
+            algorithm_version=ALIGN_CORE_VERSION,
+            align_config=getattr(self, "_align_config", None),
+            embedding_provider=getattr(provider, "provider_id", ""),
+            embedding_model=getattr(provider, "model_name", ""),
+            embedding_instruction=getattr(provider, "instruction_text", ""),
+            alignment_origin=getattr(self, "_align_stats", {}).get(
+                "alignment_origin", "algorithm"
+            ),
+        )
+
+    def _snapshot_alignment_pair(self, result=None):
+        """Create the native baseline represented by the current GUI snapshot."""
         if self._repair_state is None:
-            return
-        from dualign.common import format_markdown_output
+            raise ValueError("请先加载并对齐两个文档")
+        from dualign import __version__
+        from dualign.services.alignment_io import create_alignment_pair
 
-        src_out, tgt_out = RepairService.render_rows(self._repair_state)
-
-        # 保存 src
-        src_path, _ = QFileDialog.getSaveFileName(
-            self, "保存原文", "repaired_source.md", "Markdown (*.md)"
+        stats = getattr(result, "stats", {}) if result is not None else {}
+        confirmed = set(stats.get("formal_confirmed_ops", ()))
+        pair_id = self._current_entry_id or Path(self._report_path).stem
+        return create_alignment_pair(
+            pair_id=pair_id,
+            document_a_path=self._src_path,
+            document_b_path=self._tgt_path,
+            report_path=self._report_path,
+            operations=self._repair_state.snapshot.original_ops,
+            relation_ids=self._repair_state.snapshot.relation_ids,
+            document_a_id=getattr(self, "_document_a_id", ""),
+            document_b_id=getattr(self, "_document_b_id", ""),
+            language_a=getattr(self, "_language_a", ""),
+            language_b=getattr(self, "_language_b", ""),
+            confirmed_operations=confirmed,
+            tool_version=__version__,
+            provenance=self._alignment_provenance(),
         )
-        if src_path:
-            with open(src_path, "w", encoding="utf-8") as f:
-                f.write(format_markdown_output(src_out))
 
-        # 保存 tgt
-        tgt_path, _ = QFileDialog.getSaveFileName(
-            self, "保存译文", "repaired_target.md", "Markdown (*.md)"
+    def _initialize_pair_editing_state(self, result):
+        """Bind the immutable report snapshot to the internal editing graph."""
+        from dualign.models.pair_editing import PairEditingState
+
+        pair = self._snapshot_alignment_pair(result)
+        text_a = Path(self._src_path).read_text(encoding="utf-8-sig")
+        text_b = Path(self._tgt_path).read_text(encoding="utf-8-sig")
+        self._pair_base_state = PairEditingState.from_alignment_pair(
+            pair, text_a, text_b
         )
-        if tgt_path:
-            with open(tgt_path, "w", encoding="utf-8") as f:
-                f.write(format_markdown_output(tgt_out))
 
-        self._safe_status(f"已导出: {len(src_out)} 行原文 / {len(tgt_out)} 行译文")
+    def _reload_current_pair(self):
+        label = getattr(getattr(self, "_current_entry", None), "label", "")
+        self.load_file_pair(
+            self._src_path,
+            self._tgt_path,
+            label,
+            report_path=self._report_path,
+            document_a_id=getattr(self, "_document_a_id", ""),
+            document_b_id=getattr(self, "_document_b_id", ""),
+            language_a=getattr(self, "_language_a", ""),
+            language_b=getattr(self, "_language_b", ""),
+        )
 
-    def _on_promote(self):
-        """固化修复：用 repaired 文件覆盖原始文件。
+    def _on_save_alignment(self):
+        """Save the replayable work state without touching either document."""
+        try:
+            if not self._save_session(raise_on_error=True):
+                raise ValueError("工作报告不存在，请先完成对齐")
+            saved = self._report_path
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "保存工作报告失败", str(exc))
+            return False
+        self._set_temp_status(f"已保存工作报告: {saved}", "success")
+        return True
 
-        将已确认的修复结果写回原始文档对，并清除过期缓存。
-        编码嵌入缓存通过 content_hash 自验证，保留不动。
-        会话缓存和 report.json 中的旧对齐元数据会被清除。
-        """
-        if not self._src_path or not self._tgt_path or not self._repaired_dir:
-            QMessageBox.information(self, "固化修复", "请先加载文件对后再操作。")
+    def _on_apply_confirmed_changes(self):
+        """Review and atomically solidify configured effects."""
+        if self._repair_state is None or self._pair_base_state is None:
+            QMessageBox.information(self, "固化修改", "请先加载并对齐两个文档。")
             return
-        if not self._current_entry_id:
+        if not self._on_save_alignment():
+            return
+        from dualign.services.solidify import build_solidification_plan
+
+        plan = build_solidification_plan(
+            self._pair_base_state,
+            self._repair_state.repair_log,
+            self._current_solidify_policy(),
+        )
+        if not plan.has_changes:
             QMessageBox.information(
-                self, "固化修复", "无法确定章节标识，请重新加载文件。"
+                self,
+                "没有待固化的修改",
+                "当前配置没有选中可写入正文的修复；未选中的操作仍保留在工作报告中。",
             )
             return
 
-        entry_id = self._current_entry_id
-        src_path = self._src_path
-        tgt_path = self._tgt_path
-        repaired_dir = self._repaired_dir
+        from dualign.gui.dialogs import SolidifyReviewDialog
 
-        # ── 用当前 strategy 做筛选 ──
-        from dualign.gui.settings import KEY_STRATEGY
-
-        strategy = (
-            self._config.get(KEY_STRATEGY, "src") if hasattr(self, "_config") else "src"
-        )
-        strategy_label = {"src": "仅原文未变", "tgt": "仅译文未变"}.get(
-            strategy, "无条件"
-        )
-        strategy_desc = {
-            "src": "仅当原文（.source.md）在校订中未发生变化时允许固化",
-            "tgt": "仅当译文（.target.md）在校订中未发生变化时允许固化",
-        }.get(strategy, "无条件固化（不做内容校验）")
-
-        # dry-run 预览
-        from dualign.common import promote_repaired
-
-        preview = promote_repaired(
-            entry_id,
-            src_path,
-            tgt_path,
-            repaired_dir,
-            dry_run=True,
-            strategy=strategy,
-        )
-        if not preview["success"]:
-            if "策略拒绝" in preview.get("message", ""):
-                QMessageBox.information(
-                    self,
-                    "固化策略拒绝",
-                    f"固化策略 ({strategy_label}): {preview['message']}\n\n"
-                    f"{strategy_desc}\n\n"
-                    f"如需无条件固化，请先切换 strategy 或使用 CLI 的 `--strategy=` 参数。",
-                )
-            else:
-                QMessageBox.warning(
-                    self, "固化修复", f"操作不可行: {preview['message']}"
-                )
+        dialog = SolidifyReviewDialog(plan, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        msg_lines = [
-            f"固化策略: {strategy_label}",
-            strategy_desc,
-            "",
-            "将用修复后的文件覆盖原始文档对：",
-            f"  原始: {src_path}",
-            f"  原始: {tgt_path}",
-            "",
-            "原始文件将备份为 .bak。",
-        ]
-        cache_items = preview.get("cache_paths_cleared", [])
-        if cache_items:
-            msg_lines.append("以下缓存将被清除：")
-            for cp in cache_items:
-                msg_lines.append(f"  • {cp}")
-        msg_lines.append("")
-        msg_lines.append("编码缓存保持不动（自验证命中，自动失效）。")
-        msg_lines.append("report.json 中的旧对齐元数据和 AI 审校记录将被清除。")
-        msg_lines.append("")
-        msg_lines.append("此操作不可逆（除非手动恢复 .bak 文件）。")
-        msg_lines.append("确认固化？")
+        from dualign.services.pair_save import (
+            PairSaveError,
+            save_pair_transaction,
+        )
+        from dualign.services.realignment import rebuild_alignment
+        from dualign.services.report_io import load_report
 
+        try:
+            result = save_pair_transaction(
+                plan.solidified,
+                document_a_path=self._src_path,
+                document_b_path=self._tgt_path,
+                report_path=self._report_path,
+                report=load_report(self._report_path),
+                expected_report_sha256=self._report_file_hash,
+                expected_report_exists=self._report_file_present,
+                remaining_repair_log=plan.remaining_actions,
+                solidification_policy=plan.policy.to_dict(),
+                applied_repairs=plan.applied,
+                changed_relation_ids=plan.changed_relation_ids,
+                alignment_runner=lambda document_a, document_b: rebuild_alignment(
+                    document_a,
+                    document_b,
+                    config=self._align_config,
+                ),
+            )
+        except (PairSaveError, ValueError) as exc:
+            QMessageBox.critical(self, "固化修改失败", str(exc))
+            return
+
+        self._report_file_hash = result.report_sha256
+        self._report_file_present = True
+        # ── 固化成功后立即同步内存修复状态与磁盘事务结果 ──
+        # _reload_current_pair() 是异步加载，窗口期内任何 _save_session()
+        # 都会用旧的 repair_log / ai_proposals 覆盖已清空的报告，导致
+        # 已删除/已合并的行重新出现在 AI 建议列表中。
+        # The report now belongs to a rebuilt baseline.  Do not leave the old
+        # snapshot live during the asynchronous reload: an autosave in that
+        # window could otherwise write old anchors back into the new report.
+        self._repair_state = None
+        self._score_cache.clear()
+        QMessageBox.information(
+            self,
+            "已固化修改",
+            "正文与重建后的工作报告已作为一个可恢复事务写入。\n"
+            f"已固化 {len(plan.applied)} 条，工作报告保留 "
+            f"{len(plan.remaining_actions)} 条，正在重新加载。",
+        )
+        self._reload_current_pair()
+
+    def _current_solidify_policy(self):
+        from dualign.gui.settings import KEY_SOLIDIFY_TYPES
+        from dualign.services.solidify import DEFAULT_SOLIDIFY_TYPES, SolidifyPolicy
+
+        enabled = DualignConfig.instance().get(
+            KEY_SOLIDIFY_TYPES, list(DEFAULT_SOLIDIFY_TYPES)
+        )
+        return SolidifyPolicy(frozenset(enabled))
+
+    def _on_solidify_settings(self):
+        from dualign.gui.dialogs import SolidifyPolicyDialog
+        from dualign.gui.settings import KEY_SOLIDIFY_TYPES
+
+        dialog = SolidifyPolicyDialog(self._current_solidify_policy(), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        cfg = DualignConfig.instance()
+        cfg.set(KEY_SOLIDIFY_TYPES, dialog.policy.to_dict()["include"])
+        cfg.save()
+        self._set_temp_status("固化修改设置已保存", "info")
+
+    def _batch_solidify_targets(self):
+        from dualign.services.cli_pipeline import default_report_path
+        from dualign.services.solidify import SolidifyTarget
+
+        entries = getattr(self, "_entries", None)
+        if isinstance(entries, list) and entries:
+            candidates = [
+                (
+                    getattr(entry, "label", ""),
+                    getattr(entry, "document_a_path", ""),
+                    getattr(entry, "document_b_path", ""),
+                    getattr(entry, "report_path", ""),
+                )
+                for entry in entries
+            ]
+        else:
+            candidates = [
+                (item.label, item.src_path, item.tgt_path, "")
+                for item in self._workspace.queue_items()
+            ]
+
+        targets = []
+        for label, path_a, path_b, report in candidates:
+            if not path_a or not path_b:
+                continue
+            targets.append(
+                SolidifyTarget(
+                    label or Path(path_a).name,
+                    path_a,
+                    path_b,
+                    report or str(default_report_path(path_a)),
+                )
+            )
+        return targets
+
+    def _on_batch_solidify(self):
+        """Preview and solidify every file pair currently loaded in Dualign."""
+
+        from dualign.services.solidify import (
+            SOLIDIFY_TYPE_LABELS,
+            apply_batch_solidification,
+            plan_batch_solidification,
+        )
+
+        targets = self._batch_solidify_targets()
+        if not targets:
+            QMessageBox.information(self, "批量固化修改", "当前没有可处理的文件对。")
+            return
+        try:
+            if self._repair_state is not None:
+                self._save_session(raise_on_error=True)
+            batch = plan_batch_solidification(targets, self._current_solidify_policy())
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "批量固化计划失败", str(exc))
+            return
+
+        if not batch.ready:
+            errors = [issue for issue in batch.skipped if issue.error]
+            detail = ""
+            if errors:
+                detail = "\n\n" + "\n".join(
+                    f"{issue.target.label}: {issue.reason}" for issue in errors[:10]
+                )
+            QMessageBox.information(
+                self,
+                "没有可固化文件对",
+                f"检查 {len(targets)} 对，均无匹配修改或报告无效。{detail}",
+            )
+            return
+
+        labels = [
+            SOLIDIFY_TYPE_LABELS[key]
+            for key in SOLIDIFY_TYPE_LABELS
+            if key in batch.policy.enabled
+        ]
+        effects = "\n".join(
+            f"  · {SOLIDIFY_TYPE_LABELS[key]}：{count} 处"
+            for key, count in batch.effect_counts.items()
+            if count
+        )
         reply = QMessageBox.question(
             self,
-            "固化修复 — 确认",
-            "\n".join(msg_lines),
+            "确认批量固化",
+            "即将修改初始文档并重建工作报告。每个文件对使用独立的可恢复事务。\n\n"
+            f"固化范围：{'、'.join(labels) or '无'}\n"
+            f"可固化：{len(batch.ready)} 对\n"
+            f"跳过：{len(batch.skipped)} 对\n"
+            f"修复动作：{batch.action_count} 条\n"
+            f"影响文档 A：{batch.document_a_count} 对\n"
+            f"影响文档 B：{batch.document_b_count} 对\n\n"
+            f"操作分布：\n{effects}\n\n是否继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        # 先持久化当前内存中的修复状态到 report.json
-        self._save_session()
+        result = apply_batch_solidification(batch)
+        succeeded_reports = {
+            os.path.normcase(str(Path(target.report_path).resolve()))
+            for target in result.succeeded
+        }
+        current_report = os.path.normcase(str(Path(self._report_path).resolve()))
+        if current_report in succeeded_reports:
+            self._repair_state = None
+            self._score_cache.clear()
+            self._reload_current_pair()
 
-        # 实际执行
-        result = promote_repaired(
-            entry_id,
-            src_path,
-            tgt_path,
-            repaired_dir,
-            strategy=strategy,
-        )
-        if not result["success"]:
-            QMessageBox.critical(self, "固化修复失败", result["message"])
-            return
-
-        # 成功提示
-        n_cache = len(result.get("cache_paths_cleared", []))
+        detail = ""
+        if result.failed:
+            detail = "\n\n失败：\n" + "\n".join(
+                f"{issue.target.label}: {issue.reason}" for issue in result.failed[:10]
+            )
         QMessageBox.information(
             self,
-            "固化修复成功",
-            f"已替换:\n"
-            f"  原文: {result['src_count']} 行\n"
-            f"  译文: {result['tgt_count']} 行\n\n"
-            f"已清除 {n_cache} 项会话缓存\n"
-            f"{'report.json 元数据已清理' if result.get('report_updated') else ''}\n"
-            f"编码缓存保留（自动失效）\n"
-            f"原始文件已备份为 .bak",
-        )
-        self._set_temp_status(
-            f"固化完成: {result['src_count']} 行原文 / {result['tgt_count']} 行译文",
-            "success",
+            "批量固化完成",
+            f"成功 {len(result.succeeded)} 对；失败 {len(result.failed)} 对；"
+            f"跳过 {len(result.skipped)} 对。{detail}",
         )
 
     def _on_undo(self):
         """撤销 — 恢复位置 + 同步 AiProposalStore。
 
-        撤销一个操作时，对应 snap 的 AI 建议应从 accepted 回退到 pending，
+        撤销一个操作时，对应关系的 AI 建议应从 accepted 回退到 pending，
         避免建议显示"已采纳"但修复已被回退的不一致状态。
         """
         if self._undo_stack:
-            self._undo_snap_save = self._review._cur_snap_i()
-            # 找出将被撤销的操作涉及的 snap
+            self._undo_ordinal_save = self._review._current_ordinal()
+            # 找出将被撤销的操作涉及的关系
             old_state = self._repair_state
             self._redo_stack.append(old_state)
             self._repair_state = self._undo_stack.pop()
             # 同步 AiProposalStore：被撤销的操作回退为 pending
-            undone_snaps = self._sync_proposals_on_undo(old_state, self._repair_state)
-            # 标记受影响的 snap 失效
-            if hasattr(self, "_score_mgr") and undone_snaps:
-                self._score_mgr.invalidate_snaps(list(undone_snaps))
+            undone_ordinals = self._sync_proposals_on_undo(
+                old_state, self._repair_state
+            )
+            # 标记受影响的关系失效
+            if undone_ordinals:
+                self._invalidate_relation_scores(undone_ordinals)
             self._refresh()
             # 恢复撤销前的位置
-            saved = self._undo_snap_save
-            self._undo_snap_save = None
+            saved = self._undo_ordinal_save
+            self._undo_ordinal_save = None
             if saved is not None:
-                for i, a in enumerate(self._anomalies):
-                    snaps = a.get("snap_indices", [a.get("snap_index")])
-                    if saved in snaps:
+                for i, anomaly in enumerate(self._anomalies):
+                    if saved in anomaly.ordinals:
                         self._review.go(i, scroll_to=True)
                         break
-            if undone_snaps:
+            if undone_ordinals:
                 self._review._rebuild_ai_suggestions()
             self._set_temp_status(
                 f"已撤销 (共 {len(self._repair_state.repair_log)} 个操作)", "info"
@@ -1494,18 +1796,18 @@ class WindowActionsMixin:
     def _sync_proposals_on_undo(
         self, old_state: RepairState, new_state: RepairState
     ) -> List[int]:
-        """撤销后同步 AiProposalStore：找出被撤销的操作对应的 snap，回退为 pending。
+        """撤销后同步 AiProposalStore：找出被撤销操作对应的关系，回退为 pending。
 
-        Returns: 被回退的 snap 列表。
+        Returns: 被回退的关系序号列表。
         """
-        undone_snaps: Set[int] = set()
-        old_log = old_state._repair_log
-        new_log = new_state._repair_log
+        undone_ordinals: Set[int] = set()
+        old_log = old_state.repair_log
+        new_log = new_state.repair_log
         # 找出 old 中有但 new 中没有的 action
-        old_set = {(a.op_index, a.kind, a.timestamp) for a in old_log}
-        new_set = {(a.op_index, a.kind, a.timestamp) for a in new_log}
+        old_set = {(a.relation_ids, a.kind, a.timestamp) for a in old_log}
+        new_set = {(a.relation_ids, a.kind, a.timestamp) for a in new_log}
         undone = old_set - new_set
-        for op_i, kind, _ts in undone:
+        for relation_ids, kind, _ts in undone:
             if kind in (
                 "edit",
                 "edit_tgt",
@@ -1521,18 +1823,18 @@ class WindowActionsMixin:
                 "placeholder_tgt",
             ):
                 store = new_state.ai_proposal_store
-                store.reset(op_i)
-                undone_snaps.add(op_i)
-        return list(undone_snaps)
+                for relation_id in relation_ids:
+                    store.reset(relation_id)
+                    undone_ordinals.add(new_state.snapshot.operation_index(relation_id))
+        return list(undone_ordinals)
 
     def _on_redo(self):
         """恢复 — 重做被撤销的操作。"""
         if self._redo_stack:
             self._undo_stack.append(self._repair_state)
             self._repair_state = self._redo_stack.pop()
-            if hasattr(self, "_score_mgr"):
-                _all_snaps = [g.snap_i for g in self._repair_state.current.groups]
-                self._score_mgr.invalidate_snaps(_all_snaps)
+            all_ordinals = [g.ordinal for g in self._repair_state.current.groups]
+            self._invalidate_relation_scores(all_ordinals)
             self._refresh()
             self._set_temp_status(
                 f"已恢复 (共 {len(self._repair_state.repair_log)} 个操作)", "info"
@@ -1545,13 +1847,13 @@ class WindowActionsMixin:
         last_dir = cfg.get(KEY_LAST_OPEN_DIR, "")
 
         src_path, _ = QFileDialog.getOpenFileName(
-            self, "选择原文", last_dir, "Markdown (*.md);;Text (*.txt);;All (*)"
+            self, "选择文档 A", last_dir, "Markdown (*.md);;Text (*.txt);;All (*)"
         )
         if not src_path:
             return
         last_dir = str(Path(src_path).parent)
         tgt_path, _ = QFileDialog.getOpenFileName(
-            self, "选择译文", last_dir, "Markdown (*.md);;Text (*.txt);;All (*)"
+            self, "选择文档 B", last_dir, "Markdown (*.md);;Text (*.txt);;All (*)"
         )
         if tgt_path:
             self._save_last_open_dir(str(Path(tgt_path).parent))
@@ -1570,216 +1872,115 @@ class WindowActionsMixin:
             _tb.print_exc()
 
     def _on_placeholder(self):
-        snap_i = self._review._cur_snap_i()
-        if snap_i is not None:
-            self.do_placeholder(snap_i)
+        ordinal = self._review._current_ordinal()
+        if ordinal is not None:
+            self.do_placeholder(ordinal)
 
     def _session_path(self) -> str:
-        return self._session_cache_path()
+        """Return the sole JSON work-report path."""
+        return getattr(self, "_report_path", "")
 
     def _invalidate_align_cache(self):
-        """使对齐缓存失效：清除 ops/stats/hash，也清除孤立的 repair_log。
-
-        重新对齐后旧修复操作与新对齐结果不兼容，必须一并清除 repair_log。
-        ai_proposals（未采纳的建议记录）也清除，避免用户看到过时的 AI 建议。
-        ai_review 状态保留（它记录的是"已完成 AI 审校"这一事实）。
-        """
+        """Remove the complete stale report before an explicit realignment."""
         path = self._session_path()
         if os.path.isfile(path):
             try:
-                import json as _json
-
-                with open(path, encoding="utf-8") as _f:
-                    report = _json.load(_f)
-                report.pop("ops", None)
-                report.pop("src_hash", None)
-                report.pop("tgt_hash", None)
-                report.pop("stats", None)
-                # 清除与旧对齐绑定的修复记录
-                report.pop("repair_log", None)
-                report.pop("ai_proposals", None)
-                with open(path, "w", encoding="utf-8") as _f:
-                    _json.dump(report, _f, ensure_ascii=False, separators=(",", ":"))
-            except Exception:
+                os.remove(path)
+            except OSError:
                 import traceback as _tb
 
                 _tb.print_exc()
-        # 清除关联的 sim.npy
-        if os.path.isfile(path):
-            npy_path = path.replace(".report.json", ".sim.npy")
-            if os.path.isfile(npy_path):
-                try:
-                    os.remove(npy_path)
-                except Exception:
-                    import traceback as _tb
+        self._report_file_hash = ""
+        self._report_file_present = False
+        npy_path = path.replace(".report.json", ".sim.npy")
+        if os.path.isfile(npy_path):
+            try:
+                os.remove(npy_path)
+            except OSError:
+                pass
 
-                    _tb.print_exc()
-        self._sim_matrix = None
+    def _write_report(self, writer) -> bool:
+        """Apply one guarded report update and refresh its observed identity."""
 
-    def _save_session(self):
-        if self._repair_state is None:
-            return
         path = self._session_path()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if not path:
+            return False
+        present = os.path.isfile(path)
+        expected_present = getattr(self, "_report_file_present", False)
+        expected_hash = getattr(self, "_report_file_hash", "")
+        if file_identity_changed(
+            path,
+            expected_exists=expected_present,
+            expected_sha256=expected_hash,
+        ):
+            raise ValueError("工作报告在打开后被外部修改，已拒绝覆盖")
+        if not present:
+            return False
+        writer(path)
+        self._report_file_hash = file_bytes_sha256(path)
+        self._report_file_present = True
+        return True
 
-        # ── 持久化相似度矩阵（预览模式使用）──
-        sim = getattr(self, "_sim_matrix", None)
-        if sim is not None:
-            try:
-                npy_path = path.replace(".report.json", ".sim.npy")
-                import numpy as _np
-
-                _np.save(npy_path, sim)
-            except Exception:
-                import traceback as _tb
-
-                _tb.print_exc()
-
-        # ── 读取已有报告，保留 quality/stats/ai_review ──
-        report = {}
-        if os.path.isfile(path):
-            try:
-                with open(path, encoding="utf-8") as f:
-                    report = json.load(f)
-            except Exception:
-                import traceback as _tb
-
-                _tb.print_exc()
-                report = {}
-
-        # ── 更新核心字段 ──
-        report["ops"] = [
-            {"s": list(s), "t": list(t), "sc": round(float(sc), 4)}
-            for s, t, sc in self._repair_state.snapshot.original_ops
-        ]
-        report["repair_log"] = [a.to_dict() for a in self._repair_state.repair_log]
-        store = self._repair_state.ai_proposal_store
-        report["ai_proposals"] = store.to_dict()
-        # 持久化评分缓存（_on_score_updated 异步写入的分数）
-        report["scores"] = dict(getattr(self, "_score_cache", {}))
-        report["src_hash"] = (
-            content_hash(list(self.src_lines)) if self.src_lines else ""
-        )
-        report["tgt_hash"] = (
-            content_hash(list(self.tgt_lines)) if self.tgt_lines else ""
-        )
-
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, separators=(",", ":"))
-        # ── 同步重导出 repaired 文件（AI 校订后必须反映最新状态）──
-        self._export_repaired_files()
-
-    def _export_repaired_files(self):
-        """从当前 RepairState 重新导出 *.source.md 和 *.target.md。"""
+    def _save_session(self, *, raise_on_error: bool = False) -> bool:
+        """Autosave repair, AI and score state into the work report."""
         if self._repair_state is None:
-            return
-        from dualign.services.repair import RepairService
+            return False
+        from dualign.services.report_io import update_report
 
-        session = self._session_path()
-        if not session:
-            return
-        base = os.path.splitext(session)[0]
-        spath = base + ".source.md"
-        tpath = base + ".target.md"
+        def mutate(report):
+            report["repair_log"] = [
+                action.to_dict() for action in self._repair_state.repair_log
+            ]
+            report["ai_proposals"] = self._repair_state.ai_proposal_store.to_dict()
+            report["scores"] = self._score_cache.to_dict()
+
         try:
-            RepairService.render_to_files(self._repair_state, spath, tpath)
-        except Exception:
-            import traceback as _tb
-
-            _tb.print_exc()
+            return self._write_report(lambda path: update_report(path, mutate))
+        except (OSError, ValueError) as exc:
+            if raise_on_error:
+                raise
+            self._safe_status(f"工作报告未保存: {exc}")
+            return False
 
     def _load_session(self) -> Optional[RepairState]:
-        """从统一报告文件中加载修复会话。
-
-        _session_path() 指向 {repaired_dir}/{entry_id}.report.json，
-        只要存在 ops 字段即可加载，repair_log/ai_proposals 为可选字段。
-        """
+        """Restore repair actions and AI state from the current report."""
         path = self._session_path()
-        if not os.path.isfile(path):
+        if not path or not os.path.isfile(path) or self._alignment_snapshot is None:
             return None
-
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            import traceback as _tb
-
-            _tb.print_exc()
-            return None
-
-        if "ops" not in data or not data["ops"]:
-            # 文件存在但无 ops（可能是重新对齐后缓存已失效）
-            # 检查是否有孤立的 repair_log → 记录日志后丢弃（旧修复与新对齐不兼容）
-            if data.get("repair_log"):
-                print(
-                    f"[_load_session] 丢弃孤立 repair_log（无 ops，共 {len(data['repair_log'])} 条）",
-                    file=sys.stderr,
-                )
-            return None
-
-        from dualign.models.state import AlignmentSnapshot
-        from dualign.models.action import RepairAction
-        from dualign.models.action import AiProposalStore
-
-        ops_raw = data.get("ops", [])
-        ops = [
-            (
-                tuple(o["s"]),
-                tuple(o["t"]),
-                float(o["sc"]),
-            )
-            for o in ops_raw
-        ]
-        snap = AlignmentSnapshot.from_alignment(
-            ops,
-            list(self.src_lines) if self.src_lines else [],
-            list(self.tgt_lines) if self.tgt_lines else [],
+        from dualign.models.action import AiProposalStore, RepairAction
+        from dualign.services.report_io import (
+            ReportError,
+            load_report,
+            relation_ids_from_report,
+            report_matches_documents,
         )
 
-        # 快照一致性校验
-        if self._alignment_snapshot is not None and len(snap.original_ops) != len(
-            self._alignment_snapshot.original_ops
-        ):
+        try:
+            data = load_report(path)
+        except ReportError:
             return None
-
-        log = [RepairAction.from_dict(a) for a in data.get("repair_log", [])]
+        if not report_matches_documents(data, self._src_path, self._tgt_path):
+            return None
+        try:
+            self._alignment_snapshot = AlignmentSnapshot.from_alignment(
+                self._alignment_snapshot.ops_list,
+                self._alignment_snapshot.src_list,
+                self._alignment_snapshot.tgt_list,
+                relation_ids_from_report(data),
+            )
+        except (ReportError, ValueError):
+            return None
+        log = [RepairAction.from_dict(item) for item in data.get("repair_log", [])]
         store = AiProposalStore.from_dict(data.get("ai_proposals", {}))
 
-        # 内容哈希校验
-        saved_src_hash = data.get("src_hash", "")
-        saved_tgt_hash = data.get("tgt_hash", "")
-        cur_src_hash = content_hash(list(self.src_lines)) if self.src_lines else ""
-        cur_tgt_hash = content_hash(list(self.tgt_lines)) if self.tgt_lines else ""
-        if saved_src_hash and saved_src_hash != cur_src_hash:
-            return None
-        if saved_tgt_hash and saved_tgt_hash != cur_tgt_hash:
-            return None
-
-        # ── 恢复相似度矩阵（预览模式使用）──
-        try:
-            npy_path = path.replace(".report.json", ".sim.npy")
-            if os.path.isfile(npy_path):
-                import numpy as _np
-
-                self._sim_matrix = _np.load(npy_path)
-        except Exception:
-            import traceback as _tb
-
-            _tb.print_exc()
-            self._sim_matrix = None
-
-        # 恢复持久化评分缓存
         if hasattr(self, "_score_cache"):
-            raw = data.get("scores")
-            if isinstance(raw, dict):
-                self._score_cache.clear()
-                for k, v in raw.items():
-                    try:
-                        self._score_cache[str(k)] = float(v)
-                    except (ValueError, TypeError):
-                        pass
+            from dualign.models.score_cache import RelationScoreCache
 
-        return RepairState(snap, log, store)
+            self._score_cache = RelationScoreCache.from_dict(
+                data.get("scores"), self._alignment_snapshot.relation_ids
+            )
+
+        return RepairState(self._alignment_snapshot, log, store)
 
     def _show_error(self, context: str, error: Exception):
         """统一的异常报告：终端 traceback + 弹窗 + 状态栏。
@@ -1787,8 +1988,10 @@ class WindowActionsMixin:
         所有未捕获异常都通过此方法输出，方便用户反馈和开发者定位。
         """
         import traceback as _tb
+        from dualign.diagnostics import write_crash_report
 
         tb = _tb.format_exc()
+        crash_path = write_crash_report(context, tb)
         # 1) 终端输出完整 traceback
         print(f"\n{'='*60}", file=sys.stderr)
         print(f"[{context}] 未捕获异常:", file=sys.stderr)
@@ -1796,7 +1999,12 @@ class WindowActionsMixin:
         print(f"{'='*60}\n", file=sys.stderr)
 
         # 2) 弹窗显示摘要
-        msg = f"{context}\n\n{error}\n\n完整 traceback 已输出到终端。"
+        destination = (
+            f"完整 traceback 已写入：\n{crash_path}"
+            if crash_path
+            else "完整 traceback 已输出到标准错误。"
+        )
+        msg = f"{context}\n\n{error}\n\n{destination}"
         QMessageBox.critical(self, f"异常 — {context}", msg)
 
         # 3) 状态栏
@@ -1820,6 +2028,9 @@ class WindowActionsMixin:
 
     def _on_worker_error(self, context: str, tb_str: str):
         """后台工作线程异常回调。已在终端输出完整 traceback，此处弹窗通知。"""
+        from dualign.diagnostics import write_crash_report
+
+        crash_path = write_crash_report(context, tb_str or context)
         print(f"\n{'='*60}", file=sys.stderr)
         print(f"[后台线程异常] {context}", file=sys.stderr)
         if tb_str:
@@ -1828,11 +2039,19 @@ class WindowActionsMixin:
         QMessageBox.critical(
             self,
             f"后台任务异常 — {context}",
-            f"{context}\n\n完整 traceback 已输出到终端。",
+            f"{context}\n\n"
+            + (
+                f"完整 traceback 已写入：\n{crash_path}"
+                if crash_path
+                else "完整 traceback 已输出到标准错误。"
+            ),
         )
         self._safe_status(f"✗ 后台异常: {context}")
+        if hasattr(self, "_status_bar") and self._status_bar is not None:
+            self._status_bar.set_view_mode_enabled(True)
+            self._status_bar.set_preview_active(True, phase="准备失败")
 
-    def _on_show_all_snaps(self):
+    def _on_show_all_relations(self):
         """空状态页的「查看全部文本对」按钮回调。
 
         取消勾选筛选面板的「仅显示异常文本对」复选框并触发刷新，
@@ -1870,58 +2089,15 @@ class WindowActionsMixin:
             )
 
     def _on_view_source(self):
-        """打开源文件（原文）。"""
+        """打开文档 A。"""
         path = getattr(self, "_src_path", "")
-        self._view_file_safe(path, "源文件（原文）")
+        self._view_file_safe(path, "文档 A")
 
     def _on_view_target(self):
-        """打开源文件（译文）。"""
+        """打开文档 B。"""
         path = getattr(self, "_tgt_path", "")
-        self._view_file_safe(path, "源文件（译文）")
+        self._view_file_safe(path, "文档 B")
 
-    def _on_view_report(self):
-        """打开修复报告（report.json）。"""
-        entry_id = getattr(self, "_current_entry_id", "")
-        repaired_dir = getattr(self, "_repaired_dir", "")
-        if not entry_id or not repaired_dir:
-            # 回退：从 _session_path 推断
-            sp = self._session_path() if hasattr(self, "_session_path") else ""
-            if sp and os.path.isfile(sp):
-                self._view_file_safe(sp, "修复报告")
-                return
-            QMessageBox.information(
-                self,
-                "文件未找到",
-                "请先加载文件对并完成对齐导出。",
-            )
-            return
-        path = os.path.join(repaired_dir, f"{entry_id}.report.json")
-        self._view_file_safe(path, "修复报告")
-
-    def _on_view_repaired_source(self):
-        """打开修复后原文。"""
-        sp = self._session_path() if hasattr(self, "_session_path") else ""
-        if not sp:
-            QMessageBox.information(
-                self,
-                "文件未找到",
-                "请先加载文件对并完成对齐导出。",
-            )
-            return
-        base = os.path.splitext(sp)[0]
-        path = base + ".source.md"
-        self._view_file_safe(path, "修复后原文")
-
-    def _on_view_repaired_target(self):
-        """打开修复后译文。"""
-        sp = self._session_path() if hasattr(self, "_session_path") else ""
-        if not sp:
-            QMessageBox.information(
-                self,
-                "文件未找到",
-                "请先加载文件对并完成对齐导出。",
-            )
-            return
-        base = os.path.splitext(sp)[0]
-        path = base + ".target.md"
-        self._view_file_safe(path, "修复后译文")
+    def _on_view_alignment(self):
+        """打开当前工作报告。"""
+        self._view_file_safe(getattr(self, "_report_path", ""), "工作报告")

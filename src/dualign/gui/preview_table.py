@@ -14,7 +14,6 @@ from PySide6.QtWidgets import QHeaderView, QSizePolicy
 
 from dualign.models.action import RepairAction
 from dualign.models.marker import from_kind as _marker_from_kind
-from dualign.models.marker import is_divider as _is_divider
 from dualign.models.marker import AI_PREFIX
 from dualign.gui.base_table import (
     BaseTextTable,
@@ -34,12 +33,12 @@ class AiSuggestionItem:
     """AI 建议的表格行数据，支持子行跨行合并。
 
     每个 RepairAction 可能包含多行原文/译文（如合并[M]、拆分[S]），
-    此时生成多个子行，子行的 snap_index/index 相同，sub 递增。
+    此时生成多个子行，子行的 ordinal 相同，sub 递增。
     """
 
     def __init__(
         self,
-        snap_index: int,
+        ordinal: int,
         action: RepairAction,
         status: str = "pending",
         sub: int = 0,
@@ -54,8 +53,10 @@ class AiSuggestionItem:
         init_src_text: str = "",
         init_tgt_text: str = "",
     ):
-        self.snap_index = snap_index
+        self.ordinal = ordinal
         self.action = action
+        # 同一关系可以同时存在多条 AI 建议；每条建议必须拥有独立的单元格组。
+        self.display_group_id = (ordinal, id(action))
         self.status = status
         self.sub = sub
         self.kind = action.kind
@@ -86,13 +87,13 @@ class SuggestionPreviewTable(BaseTextTable):
     """
 
     COL_HEADERS = [
-        "Snap",
+        "关系",
         "初始类型",
         "初始评分",
         "预览状态",
         "预览评分",
-        "原文预览",
-        "译文预览",
+        "文档 A 预览",
+        "文档 B 预览",
     ]
 
     def __init__(self, parent=None):
@@ -103,11 +104,11 @@ class SuggestionPreviewTable(BaseTextTable):
     def _configure_table(self):
         super()._configure_table()
         hdr = self.table.horizontalHeader()
-        from dualign.gui.base_table import calc_snap_width as _csw
+        from dualign.gui.base_table import calc_relation_width
 
         for ci in range(5):
             hdr.setSectionResizeMode(ci, QHeaderView.ResizeMode.Fixed)
-        hdr.resizeSection(0, _csw(0))
+        hdr.resizeSection(0, calc_relation_width(0))
         hdr.resizeSection(1, 64)
         hdr.resizeSection(2, 60)
         hdr.resizeSection(3, 64)
@@ -128,31 +129,19 @@ class SuggestionPreviewTable(BaseTextTable):
             self.table.horizontalHeaderItem(col).setText(_HEADERS[col] if show else "")
 
     def _get_span_col_offset(self) -> int:
-        """第 0 列是 Snap，span 从第 1 列开始。"""
+        """第 0 列是关系编号，span 从第 1 列开始。"""
         return 1
 
-    def _get_snap_col(self) -> int | None:
-        """预览表也有 Snap 列 (col 0)。"""
+    def _get_relation_col(self) -> int | None:
+        """预览表也有关系列 (col 0)。"""
         return 0
 
     def _apply_table_spans(self, spans: dict):
-        """应用标准 span（Snap 列已由基类 _compute_table_spans 处理）。"""
+        """应用归属投影产生的标准 span。"""
         table = self.table
         for (sr, col), (rs, cs) in spans.items():
             if sr < len(self._items) and rs > 1 and col < table.columnCount():
                 table.setSpan(sr, col, rs, cs)
-
-    def _get_hidden_cur_rows(self, spans: dict) -> Set[int]:
-        """col_offset=1 时，预览状态列在 table col 3（即 span col 3）。"""
-        hidden = set()
-        for (sr, c_), (_, cnt) in spans.items():
-            if c_ == 3 and cnt > 1:
-                for ri in range(sr + 1, sr + cnt):
-                    hidden.add(ri)
-        return hidden
-
-    def _get_divider_rows(self) -> Set[int]:
-        return {i for i, it in enumerate(self._items) if _is_divider(it.marker, it.sub)}
 
     def _extra_row_kwargs(self, row: int, item, hidden_cur_rows: Set[int]) -> dict:
         return {"hide_cur": row in hidden_cur_rows}
@@ -165,7 +154,7 @@ class SuggestionPreviewTable(BaseTextTable):
             供 HighlightDelegate 绘制 5px 竖条色带
           - 明细模式 (_show_scores): 评分列显示，文本本身用 score_to_color 着色
 
-        星标：与主对齐表统一使用 has_snap_text_changed 语义，
+        星标：与主对齐表统一使用 relation_text_changes 语义，
         比较 init_src_text/init_tgt_text 与当前预览文本。
         """
         marker = item.marker
@@ -177,8 +166,8 @@ class SuggestionPreviewTable(BaseTextTable):
         # 统一方案下 [AI] 前缀仅与操作标记结合出现（如 [AI][OK]），
         # 剥离前缀后自然显示为 [OK]，无需独立转译。
 
-        snap_text = str(item.snap_index) if is_first else ""
-        self._set_cell(row, 0, snap_text, align=Qt.AlignCenter)
+        relation_text = str(item.ordinal) if is_first else ""
+        self._set_cell(row, 0, relation_text, align=Qt.AlignCenter)
 
         # Col 1: 初始类型
         init_text = item.init_type

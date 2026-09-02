@@ -1,77 +1,37 @@
 # 更新日志
 
-> 版本格式：Semantic Versioning（主版本.次版本.修订）
+> v0.8.0 之前处于快速开发阶段。这里按产品能力里程碑记录，不再把每次内部架构调整单独作为产品版本。
+
+---
+
+## 0.8.0-beta.1 (2026-08-26)
+
+### 核心架构
+
+- 将 `report.json` 确立为唯一对齐与校订工作状态，统一正文哈希、生成来源、审核结果和修订操作。
+- 建立稳定关系身份和可重放修订状态；重新对齐、局部重建和固化正文后可迁移仍然有效的审核资产。
+- 默认算法迁移为稀疏 MDL，旧锚点算法冻结为显式 benchmark，不再在新算法拒绝后静默回退。
+- 支持 `1:1 / N:1 / 1:N / 1:0 / 0:1` 完整覆盖，并把组合证据分歧作为可审阅状态保存。
+
+### 工作流与可靠性
+
+- 新增正文固化预览、应用、批处理和可恢复事务；普通保存只更新报告。
+- 全局化 SQLite embedding 缓存，增加忙等待、批量查询分片和安全迁移工具。
+- 报告格式显式版本化，缓存身份与算法语义绑定；改善 Windows 原子替换遇到短暂占用时的恢复能力。
 
 ---
 
 ## 0.8.0-alpha.1 (2026-08-18)
 
-### ✨ 新功能
-
-- **AI 审校提供方增强**：支持 OpenAI Responses API 工具格式与 Ollama 兼容后端
-- **推理强度配置**：DeepSeek 默认使用 `low`，并允许透传 `reasoning_effort`
-- **uv 开发环境**：新增 Python 版本声明、依赖锁文件和 Windows 一键启动脚本
-
-### 🔧 变更
-
-- **AI Agent 可靠性**：统一工具目标参数，完善拒绝后的循环恢复和工具调用校验
-- **嵌入服务韧性**：串行化 Ollama 请求，按层级缩减批次，并扩展 tokenizer 错误重试
-- **全栈稳定性整理**：收紧 DP 边界，清理缓存连接，并统一模型、服务层与 GUI 的生命周期和异常报告
-- **版本元数据规范化**：以 `pyproject.toml` 为唯一版本源，运行时从安装包元数据读取版本
-- **统一代码格式**：将 Black 纳入开发依赖并格式化全仓库 Python 代码
-
-### 🐛 修复
-
-- 修复锚点统计解包错误和多处 `EmbeddingCache` 连接泄漏
-- 修复 API Key 持久化、调试导出路径与 GUI 定时器泄漏
-- 修复 Responses API 扁平工具格式缺少 `name` 时的兼容问题
-- 修复发布脚本误用系统 Python、旧代码页输出失败和无效隐藏导入
-- 增加 AI Agent 工具契约测试并强化 CLI 测试隔离
+- 增强 OpenAI Responses API、Ollama 兼容后端和推理强度配置。
+- 串行化 Ollama 请求，缩减失败批次并改善 tokenizer 错误恢复。
+- 引入 uv、依赖锁、Windows 启动器、统一版本元数据和 Black。
+- 修复缓存连接、API Key、GUI 定时器、DP 边界和发布脚本等可靠性问题。
 
 ---
 
-## 0.7.0 (2026-06-xx)
+## 0.7.0 (2026-06-21)
 
-### ✨ 新功能
-
-- **跨 snap 校订**：AI Agent 支持 `edit` 连续 snap 范围（如 `snap_range="10-13"`）
-- **嵌入指令（Instruction）机制**：编码时自动添加双语平行对齐任务描述，显著提升语义区分度
-- **质量门控 G1/G2/G3**：真锚点密度、孤行占比、合并触顶三级质量评估
-- **ProviderManager**：模型提供方管理，支持 Ollama / LM Studio / 自定义 API 切换
-
-### 🔧 变更
-
-- **重构对齐引擎**：Phase 1→5 流水线，从递归锚点 + 赝锚点 + 全局枚举合并 + 单次 DP 最终决选
-    - 真锚点搜索改为递归迭代（分段后对手减少 → 被遮挡锚点浮现）
-    - 移除 restricted/full DP 双轨，合并为单一 DP
-    - 移除 pure/mixed/adjacent 间隙类型划分
-- **AI Agent 重构为 v2**：移除 auto*note/would*\* 暴露给 AI，改为两层文本模型
-- **嵌入缓存从 NPZ 迁移到 SQLite**：支持行级缓存，跨文档共享
-- **Ollama AI 审校后端移除**：仅嵌入服务使用 Ollama，AI 审校统一使用 DeepSeek API
-- **CollapsibleSection 回退为 QGroupBox**：消除 Windows DWM 启动闪烁
-- **SnapState 三层模型**：原始事实 / 当前状态 / 处理历史
-
-### 🐛 修复
-
-- GUI 启动闪烁（root cause: CollapsibleSection HWND）
-- 多个索引漂移问题（不可变快照 + append-only log 根治）
-- ScoreManager worker invokeMethod 崩溃
-
-### 💥 破坏性变更
-
-- `RepairAction.data` 中 `source` 字段移入顶层（`action.source`）
-- `ChapterContext` 移除 `op_statuses`、`src_out`、`tgt_out`
-- 移除 `OllamaSimulatedBackend`（AI 审校不再支持 Ollama 后端）
-- `report.json` 中 `ops` 字段使用 `{"s": [...], "t": [...], "sc": ...}` 格式
-- 缓存目录结构调整（迁移到 SQLite `vecs.db`）
-
----
-
-## (2026-05-xx)
-
-- 首次公开发布
-- 对齐引擎 Phase 1→4（不含 Phase 5 批量编码）
-- GUI 工作台（PySide6）
-- AI 审校代理 v1（含 auto*note/would*\* 机制）
-- CLI 对齐流水线
-- NPZ 格式嵌入缓存
+- 建立递归锚点与单次 DP 对齐流水线、SQLite 行级 embedding 缓存和 ProviderManager。
+- AI Agent 支持跨关系校订；采用不可变快照与追加日志解决索引漂移。
+- 建立 PySide6 审校工作台、CLI 对齐和早期质量门控。

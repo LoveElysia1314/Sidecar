@@ -2,7 +2,7 @@
 Dualign — GUI 配置持久化管理
 
 集中管理所有用户配置项的读写、序列化/反序列化。
-替代原本散布在 DualignWindow 中的 _load_history/_save_history 逻辑。
+替代原本散布在 DualignWindow 中的设置文件读写逻辑。
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 
 # 窗口与布局
 KEY_STRATEGY = "strategy"
+KEY_AUTO_NEXT_CHAPTER = "auto_next_chapter"
 
 # 筛选
 KEY_SHOW_ALL = "show_all"
@@ -44,8 +45,9 @@ ALL_APPROVAL_STATES = [
     "user",
 ]
 
-# 质量门控
-KEY_QUALITY_GATE = "quality_gate"
+# 对齐后的异常诊断
+KEY_ANOMALY_DETECTION = "anomaly_detection"
+KEY_SOLIDIFY_TYPES = "solidify_types"
 
 # ═══════════════════════════════════════════════════════════════
 # DualignConfig — 配置管理单例
@@ -99,8 +101,8 @@ class DualignConfig:
                     self._data = json.load(f)
         except Exception:
             self._data = {}
-        self._dirty = False
-        return self._data
+        self._dirty = self._data.pop("quality_gate", None) is not None
+        return self.snapshot()
 
     def save(self) -> None:
         """保存到磁盘。"""
@@ -124,6 +126,11 @@ class DualignConfig:
         self._data[key] = value
         self._dirty = True
 
+    def snapshot(self) -> Dict[str, Any]:
+        """返回当前配置的浅拷贝，避免调用方依赖内部存储。"""
+
+        return dict(self._data)
+
     # ── 恢复默认 ──
 
     @staticmethod
@@ -141,10 +148,12 @@ class DualignConfig:
             KEY_APPROVAL_STATES: list(ALL_APPROVAL_STATES),
             # 修复策略
             KEY_STRATEGY: 1,
-            # 质量门控
-            KEY_QUALITY_GATE: {
-                "anchor_density_min": 0.60,
-                "gap_row_ratio_max": 0.10,
+            KEY_AUTO_NEXT_CHAPTER: False,
+            # 固化修改：出厂默认仅校订（双侧）+ 译文拆分；
+            # 原文合并/拆分/删除等破坏性效果需用户显式启用
+            KEY_SOLIDIFY_TYPES: ["edit_a", "edit_b", "split_b"],
+            # 对齐后异常诊断；不参与文档接受/拒绝
+            KEY_ANOMALY_DETECTION: {
                 "zscore_k": 3.0,
                 "zscore_min_score": 0.6,
             },

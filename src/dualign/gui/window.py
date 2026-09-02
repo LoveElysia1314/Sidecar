@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 
 from dualign.core import AlignConfig
 from dualign.models.state import AlignmentSnapshot
+from dualign.models.relation_status import RelationAnomaly
 from dualign.services.repair import (
     RepairState,
 )
@@ -51,7 +52,7 @@ from dualign.gui.base_table import (
     HighlightDelegate,
 )
 from dualign.gui.focus import FocusManager
-from dualign.gui.review import ReviewController
+from dualign.gui.review import REVIEW_SHORTCUTS, ReviewController
 from dualign.gui.workspace import WorkspacePanel
 from dualign.gui.panels import DockPanelHelper
 from dualign.gui.welcome import WelcomePage
@@ -61,6 +62,7 @@ from dualign.gui.window_table import WindowTableMixin
 from dualign.gui.settings import (
     DualignConfig,
     KEY_STRATEGY,
+    KEY_AUTO_NEXT_CHAPTER,
     KEY_SHOW_ALL,
     KEY_CONTEXT_LINES,
     KEY_COMPACT_GRID,
@@ -69,7 +71,7 @@ from dualign.gui.settings import (
     KEY_LAST_OPEN_DIR,
     KEY_SHOW_HANDLED,
     KEY_CROSS_GROUP_OP,
-    KEY_QUALITY_GATE,
+    KEY_ANOMALY_DETECTION,
 )
 
 # 底部面板：展开最小总高度（含标题栏 24px），低于此值自动折叠
@@ -85,19 +87,17 @@ def _vline() -> QFrame:
     return s
 
 
-def _load_quality_config():
-    """从配置中加载 QualityGateConfig。"""
-    from dualign.services.quality_gate import QualityGateConfig
+def _load_anomaly_detection_config():
+    """加载只影响对齐后标记的异常检测参数。"""
+    from dualign.services.anomaly_detection import AnomalyDetectionConfig
 
-    cfg_data = DualignConfig.instance().get(KEY_QUALITY_GATE, None)
+    cfg_data = DualignConfig.instance().get(KEY_ANOMALY_DETECTION, None)
     if cfg_data and isinstance(cfg_data, dict):
-        return QualityGateConfig(
-            anchor_density_min=cfg_data.get("anchor_density_min", 0.60),
-            gap_row_ratio_max=cfg_data.get("gap_row_ratio_max", 0.10),
+        return AnomalyDetectionConfig(
             zscore_k=cfg_data.get("zscore_k", 3.0),
             zscore_min_score=cfg_data.get("zscore_min_score", 0.6),
         )
-    return QualityGateConfig()
+    return AnomalyDetectionConfig()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -105,13 +105,13 @@ def _load_quality_config():
 # ═══════════════════════════════════════════════════════════════
 
 COLUMN_HEADERS = [
-    "Snap",
+    "关系",
     "初始类型",
     "初始评分",
     "当前状态",
     "当前评分",
-    "原文",
-    "译文",
+    "文档 A",
+    "文档 B",
 ]
 
 # 底部面板吸附比例（折叠后展开到 25%，拖拽可到 25%/30%/35%/40%/45%/50%，5% 粒度）
@@ -129,8 +129,8 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
     数据:
       _repair_state: RepairState          — 唯一数据源
       _alignment_snapshot: AlignmentSnapshot
-      _anomalies: list[dict]              — 当前异常列表
-      _row_op_map: dict[int, int]         — table_row → snap_index
+      _anomalies: list[RelationAnomaly]   — 当前异常投影
+      _row_op_map: dict[int, int]         — table_row → relation ordinal
       _undo_stack: list[RepairState]      — 撤销栈
       _redo_stack: list[RepairState]      — 恢复栈
     """
@@ -158,30 +158,36 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         # ── 数据成员 ──
         self._repair_state: Optional[RepairState] = None
         self._alignment_snapshot: Optional[AlignmentSnapshot] = None
-        self._anomalies: List[dict] = []
+        self._anomalies: List[RelationAnomaly] = []
         self._row_op_map: Dict[int, int] = {}
         self._undo_stack: deque = deque(maxlen=50)
         self._redo_stack: deque = deque(maxlen=50)
-        self._undo_snap_save: Optional[int] = None
+        self._undo_ordinal_save: Optional[int] = None
         self._current_entry: Any = None
         self._current_entry_id: str = ""
         self._entries: Optional[List[Any]] = file_entries
-        self._repaired_dir: str = ""
+        self._report_path: str = ""
+        self._report_file_hash: str = ""
+        self._report_file_present: bool = False
+        self._pair_base_state = None
+        self._document_a_id: str = ""
+        self._document_b_id: str = ""
+        self._language_a: str = ""
+        self._language_b: str = ""
         self._align_config = AlignConfig()
         self._strategy: str = "src"
         self._last_open_dir: str = ""
-        self._sel_updating: bool = False
-        self._rubber_origin_snap: Optional[int] = None
+        self._rubber_origin_ordinal: Optional[int] = None
         self._rubber_active: bool = False
-        self._ai_focus_lost: bool = False
         self._auto_select_on_render: Optional[int] = None
         self._preview_active: bool = False
-        self._quality_config = _load_quality_config()
-        self._last_quality_assessment: Optional[dict] = None
+        self._anomaly_detection_config = _load_anomaly_detection_config()
         self._dock_state_restored: bool = False
 
-        # ── 持久化评分缓存 {f"{snap_index}_{sub}": score} ──
-        self._score_cache: dict[str, float] = {}
+        # ── 持久化评分缓存：relation_id → sub → score ──
+        from dualign.models.score_cache import RelationScoreCache
+
+        self._score_cache = RelationScoreCache()
 
         # ── 统一评分管理器 ──
         from dualign.services.score_manager import ScoreManager
@@ -192,7 +198,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._score_mgr.status_changed.connect(self._on_score_status_changed)
 
         self._focus = FocusManager()
-        self._focus.snap_focused.connect(self._on_snap_focused)
+        self._focus.relation_focused.connect(self._on_relation_focused)
         self._focus.selection_changed.connect(self._on_selection_changed)
 
         self._review = ReviewController()
@@ -206,11 +212,10 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._hover_timer.timeout.connect(self._on_hover_show)
         self._hovered_row: int = -1
         self._hovered_col: int = -1
-        self._hovered_snap: int = -1
-        self._hover_is_ai = False
-        self._hovered_pos: Optional[QPoint] = None
+        self._hovered_ordinal: int = -1
 
         self._bottom_collapsed: bool = False  # 底部面板折叠状态
+        self._bottom_user_collapsed: bool = False  # 用户折叠后禁止程序自动展开
         self._bottom_locked: bool = False  # 欢迎页时锁定
         self._bottom_snap_idx: int = (
             3  # 当前吸附档位索引 (25%/30%/35%/40%/45%/50%，默认 40%)
@@ -222,15 +227,15 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._stacked: Optional[QStackedWidget] = None
         self._status_bar: Optional[StatusBar] = None
         self._header_dots: dict[str, StatusDot] = {}
-        self._status_bar: Optional[StatusBar] = None
         self._has_data: bool = False
         self._single_column_active: bool = False
         self._single_column_container = None
         self._model = None
         self._enc_thread = None
         self._worker = None
+        self._retired_load_threads: Set[Any] = set()
+        self._auto_repair_worker = None
         self._load_op_id: int = 0
-        self._current_load_op_id: int = 0
         self.src_lines: List[str] = []
         self.tgt_lines: List[str] = []
         self.src_emb = None
@@ -242,10 +247,14 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
 
         self._build_ui()
         self._setup_menu()
+        self._recover_pair_save_transactions()
 
-        # 若提供了 file_entries，在 UI 构建完成后再加载
+        # 若提供了 file_entries，先让窗口完成首帧绘制，再开始加载首章。
+        # 集成方因此不会在 DualignWindow 构造期间同步承担章节 I/O。
         if file_entries is not None:
-            self.load_from_provider(file_entries)
+            QTimer.singleShot(
+                50, lambda e=list(file_entries): self.load_from_provider(e)
+            )
 
     # ═══════════════════════════════════════════════════════════
     # ═══════════════════════════════════════════════════════════
@@ -393,12 +402,12 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         hdr.setMinimumSectionSize(0)
         hdr.setStretchLastSection(False)
         # col 0-4: Fixed（不支持用户拖拽）
-        from dualign.gui.base_table import calc_snap_width
+        from dualign.gui.base_table import calc_relation_width
 
-        _snap_w = calc_snap_width(0)
+        relation_width = calc_relation_width(0)
         for ci in range(5):
             hdr.setSectionResizeMode(ci, QHeaderView.ResizeMode.Fixed)
-        hdr.resizeSection(0, _snap_w)
+        hdr.resizeSection(0, relation_width)
         hdr.resizeSection(1, 64)
         hdr.resizeSection(2, 60)
         hdr.resizeSection(3, 64)
@@ -419,7 +428,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         # 启用鼠标跟踪以支持悬停弹出
         self.table.viewport().setMouseTracking(True)
-        self.table.verticalHeader().setVisible(False)  # 隐藏原生行号（Snap 列替代）
+        self.table.verticalHeader().setVisible(False)  # 隐藏原生行号（关系列替代）
         from dualign.gui.base_table import THIN_SCROLLBAR_CSS
 
         self.table.setStyleSheet(
@@ -464,11 +473,10 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
 
         # ── 左侧 Dock 区：审校面板（前台）+ 文件管理（后台）──
         self._workspace = WorkspacePanel()
-        self._workspace.file_pair_requested.connect(self._on_workspace_load)
+        self._workspace.pair_selected.connect(self._on_workspace_pair_selected)
         self._workspace.add_queue_requested.connect(self._on_workspace_add_queue)
         self._workspace.doc_remove_requested.connect(self._on_workspace_remove_checked)
         self._workspace.chapter_nav_requested.connect(self._on_workspace_nav)
-        self._workspace.entry_selected.connect(self._on_entry_selected)
 
         # 审校面板
         self._review.doc_align_requested.connect(self._on_workspace_align_checked)
@@ -478,6 +486,9 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._review.doc_ai_chapter_requested.connect(self._on_ai_repair_chapter)
         self._review.doc_remove_requested.connect(self._on_workspace_remove_checked)
         self._review.strategy_changed.connect(self._on_strategy_changed)
+        self._review.auto_next_chapter_changed.connect(
+            lambda _checked: self._schedule_settings_save()
+        )
         self._review.go_to_row.connect(self._on_go_to_row)
         self._review.next_chapter_requested.connect(
             lambda: self._workspace.chapter_nav_requested.emit(1)
@@ -485,7 +496,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._review.prev_chapter_requested.connect(
             lambda: self._workspace.chapter_nav_requested.emit(-1)
         )
-        self._review.doc_promote_requested.connect(self._on_promote)
+        self._review.doc_overwrite_requested.connect(self._on_apply_confirmed_changes)
 
         self._create_dock("review", self._review, "🔧 审校面板", Qt.LeftDockWidgetArea)
         self._create_dock(
@@ -498,7 +509,9 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         # 筛选面板内嵌于 ReviewController
         self._filter_panel = self._review.filter_panel
         self._filter_panel.filter_changed.connect(self._apply_filter)
-        self._filter_panel.filter_changed.connect(lambda: self._debounce_save_history())
+        self._filter_panel.filter_changed.connect(
+            lambda: self._schedule_settings_save()
+        )
 
         # ══════════════════════════════════════════════════════
         # 底部面板：左 AI 建议表格 + 右运行日志（水平并排）
@@ -619,13 +632,19 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._stacked.setCurrentIndex(0)
         self._show_welcome()
 
-        # 加载历史
-        h = self._load_history()
+        # 加载设置
+        h = self._settings_data()
         idx = h.get("strategy", 1)
         strategies = ["minimal", "src", "tgt"]
         self._strategy = strategies[idx] if 0 <= idx < 3 else "src"
         self._restore_filter_state(h)
         self._review.set_strategy_index(idx)
+        self._review.set_auto_next_chapter(
+            h.get(
+                KEY_AUTO_NEXT_CHAPTER,
+                DualignConfig.default_values()[KEY_AUTO_NEXT_CHAPTER],
+            )
+        )
         if not h:
             # 首次启动时不触发布局恢复
             self._dock_state_restored = False
@@ -714,7 +733,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         审校与文件面板统一宽度 360px。
         resizeDocks 是 Qt 停靠状态下唯一正确设置尺寸的 API。
         """
-        h = self._load_history() if not self._has_data else {}
+        h = self._settings_data() if not self._has_data else {}
         lw = h.get("dock_review_width", 360)
         l_dock = self._dock_map.get("review")
         f_dock = self._dock_map.get("files")
@@ -730,14 +749,23 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         has_redo = len(getattr(self, "_redo_stack", [])) > 0
         has_data = self._repair_state is not None
         if hasattr(self, "_review") and self._review is not None:
-            for key, ok in [
-                ("undo", has_undo and has_data),
-                ("redo", has_redo and has_data),
-            ]:
-                for d in (self._review._doc_btns, self._review._btn_refs):
-                    btn = d.get(key)
-                    if btn:
-                        btn.setEnabled(ok)
+            self._review.set_history_enabled(
+                has_undo and has_data, has_redo and has_data
+            )
+        sync_review_menu = getattr(self, "_sync_review_menu_actions", None)
+        if sync_review_menu is not None:
+            sync_review_menu()
+
+    def _sync_review_menu_actions(self):
+        """让校订菜单项与审校面板中的对应按钮保持一致。"""
+        actions = getattr(self, "_review_menu_actions", {})
+        review = getattr(self, "_review", None)
+        if review is None:
+            return
+        for key, action in actions.items():
+            button = review._btn_refs.get(key)
+            if button is not None:
+                action.setEnabled(button.isEnabled())
 
     def _sync_bottom_panel(self):
         """根据当前数据状态自动展开或折叠底部建议面板。
@@ -763,15 +791,21 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         has_data = self._repair_state is not None
         should_expand = has_data and (has_pending or ai_ok)
 
-        if should_expand and self._bottom_collapsed:
-            self._toggle_bottom_panel()
+        if (
+            should_expand
+            and self._bottom_collapsed
+            and not getattr(self, "_bottom_user_collapsed", False)
+        ):
+            self._toggle_bottom_panel(user_initiated=False)
         elif not should_expand and not self._bottom_collapsed:
-            self._toggle_bottom_panel()
+            self._toggle_bottom_panel(user_initiated=False)
 
-    def _toggle_bottom_panel(self):
+    def _toggle_bottom_panel(self, *, user_initiated: bool = True):
         """折叠/展开 AI 建议内容区（欢迎页时锁定）。
 
         展开到当前吸附档位 (_bottom_snap_idx)，折叠为 0。
+        用户主动折叠后，自动同步不得在切章时重新展开；用户主动
+        展开后解除该限制。程序性折叠/展开不改变用户偏好。
         """
         if getattr(self, "_bottom_locked", False):
             return
@@ -801,7 +835,9 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             self._bottom_title.setText("AI 建议列表")
             self._main_splitter.setSizes([total, 0])
 
-        self._debounce_save_history()
+        if user_initiated:
+            self._bottom_user_collapsed = self._bottom_collapsed
+        self._schedule_settings_save()
 
     def _on_splitter_moved(self, pos: int, index: int):
         """拖拽手柄 → 四态吸附（折叠/30%/40%/50%），带滞回区防止抖动。
@@ -831,6 +867,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             # 折叠态：拖过 EXPAND_RATIO 则展开至 30%
             if ratio >= _EXPAND_RATIO:
                 self._bottom_collapsed = False
+                self._bottom_user_collapsed = False
                 self._bottom_content.show()
                 self._bottom_toggle_btn.setText("▼")
                 self._bottom_toggle_btn.setToolTip("折叠底部面板")
@@ -843,7 +880,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
                 top_h2 = total - bot_h2
                 self._main_splitter.setSizes([top_h2, bot_h2])
                 self._update_bottom_title()
-                self._debounce_save_history()
+                self._schedule_settings_save()
             else:
                 # 死区内 → 压回 0
                 if bot_h > 0:
@@ -852,6 +889,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             # 展开态：底栏 < COLLAPSE_RATIO → 折叠
             if ratio < _COLLAPSE_RATIO:
                 self._bottom_collapsed = True
+                self._bottom_user_collapsed = True
                 self._bottom_content.hide()
                 self._bottom_toggle_btn.setText("▲")
                 self._bottom_toggle_btn.setToolTip("展开底部面板")
@@ -860,7 +898,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
                 )
                 self._bottom_title.setText("AI 建议列表")
                 self._main_splitter.setSizes([total, 0])
-                self._debounce_save_history()
+                self._schedule_settings_save()
             else:
                 # 展开态下任何拖拽 → 吸附到最近的档位
                 new_idx = self._nearest_bottom_ratio(ratio)
@@ -870,7 +908,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
                 top_h2 = total - bot_h2
                 self._main_splitter.setSizes([top_h2, bot_h2])
                 self._update_bottom_title()
-                self._debounce_save_history()
+                self._schedule_settings_save()
 
     # ── 底部面板档位辅助 ──
 
@@ -929,30 +967,29 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             return
         self._preview_active = preview
         self._switch_table_mode(preview)
-        # 预览模式无 snap 概念，禁用所有 snap 依赖控件
+        # 预览模式无关系投影，禁用所有关系依赖控件
         if hasattr(self, "_review"):
             self._review.set_preview_mode(preview)
         # 更新 StatusBar 预览标签
         if hasattr(self, "_status_bar"):
-            _qa = getattr(self, "_last_quality_assessment", None)
-            rejected = bool(_qa and _qa.get("quality") == "unreliable")
+            rejected = self._repair_state is None
             self._status_bar.set_preview_active(preview, rejected)
         # 底部 AI 面板折叠/恢复
         if preview:
             self._preview_saved_bottom = not self._bottom_collapsed
             if not self._bottom_collapsed:
-                self._toggle_bottom_panel()
+                self._toggle_bottom_panel(user_initiated=False)
         else:
             saved = getattr(self, "_preview_saved_bottom", None)
             if saved is not None:
                 if saved and self._bottom_collapsed:
-                    self._toggle_bottom_panel()
+                    self._toggle_bottom_panel(user_initiated=False)
             self._preview_saved_bottom = None
         # 刷新视图
         self._apply_filter()
 
     def _on_preview_row_clicked(self, row: int, col: int):
-        """预览表点击行 — 预览模式无 snap 概念，仅选中行。"""
+        """预览表点击行——预览模式无关系投影，仅选中行。"""
         pass  # 只保留行选中高亮（由 SelectionBehavior.SelectRows 自动处理）
 
     def _on_preview_context_menu(self, pos):
@@ -983,8 +1020,8 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         QApplication.clipboard().setText("\n".join(lines))
         self._safe_status("📋 已复制预览行")
 
-    def _on_snap_focused(self, snap_i: int):
-        """FocusManager.snap_focused 信号处理。
+    def _on_relation_focused(self, ordinal: int):
+        """FocusManager.relation_focused 信号处理。
 
         不触发对齐表滚动（由 _on_go_to_row 的调用方按需触发），
         只更新 HighlightDelegate 选中状态 + AI 预览表高亮。
@@ -993,7 +1030,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         self._update_table_highlight()
         # AI 预览表高亮（含滚动到对应行）
         if hasattr(self, "_review"):
-            self._review.focus_snap_ai(snap_i)
+            self._review.focus_relation_ai(ordinal)
 
     def _on_selection_changed(self, snaps: Set[int]):
         """FocusManager.selection_changed 信号处理。
@@ -1026,19 +1063,9 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
                 {
                     row
                     for row, si in self._row_op_map.items()
-                    if si in self._focus.selected_snaps
+                    if si in self._focus.selected_ordinals
                 }
             )
-            if self._focus.focused_snap is not None:
-                focused_row = next(
-                    (
-                        row
-                        for row, si in self._row_op_map.items()
-                        if si == self._focus.focused_snap
-                    ),
-                    None,
-                )
-                self._divider_delegate.set_focused_row(focused_row)
             self.table.viewport().update()
 
     def _show_table(self):
@@ -1065,15 +1092,15 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             self._preview_table = QTableWidget()
             self._preview_table.setColumnCount(4)
             self._preview_table.setHorizontalHeaderLabels(
-                ["行", "当前评分", "原文", "译文"]
+                ["行", "当前评分", "文档 A", "文档 B"]
             )
             hdr = self._preview_table.horizontalHeader()
             hdr.setMinimumSectionSize(0)
             hdr.setStretchLastSection(False)
-            from dualign.gui.base_table import calc_snap_width as _csw
+            from dualign.gui.base_table import calc_relation_width
 
             hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-            hdr.resizeSection(0, _csw(0))
+            hdr.resizeSection(0, calc_relation_width(0))
             hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
             hdr.resizeSection(1, 60 if self._filter_panel.show_scores else 6)
             hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
@@ -1168,7 +1195,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
                 "  border-color: palette(highlight);"
                 "}"
             )
-            show_all_btn.clicked.connect(self._on_show_all_snaps)
+            show_all_btn.clicked.connect(self._on_show_all_relations)
             btn_container = QWidget()
             # btn_container 背景由 Fusion QPalette 管理
             btn_layout = QHBoxLayout(btn_container)
@@ -1190,8 +1217,8 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             self._table_page_layout.addWidget(self._table_stack, 1)
             self._stacked.addWidget(self._table_page)
 
-    def _on_quality_gate_config(self):
-        """打开质量门控参数配置对话框。"""
+    def _on_anomaly_detection_config(self):
+        """打开对齐后异常检测参数配置对话框。"""
         from PySide6.QtWidgets import (
             QDialog,
             QFormLayout,
@@ -1203,43 +1230,25 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             QHBoxLayout,
             QLabel,
         )
-        from dualign.services.quality_gate import QualityGateConfig
-        from dualign.gui.settings import KEY_QUALITY_GATE
+        from dualign.services.anomaly_detection import AnomalyDetectionConfig
+        from dualign.gui.settings import KEY_ANOMALY_DETECTION
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("质量门控参数")
+        dlg.setWindowTitle("异常检测参数")
         dlg.setMinimumWidth(320)
 
         layout = QVBoxLayout(dlg)
         layout.setSpacing(8)
 
-        cfg = self._quality_config
-        defaults = QualityGateConfig()
+        cfg = self._anomaly_detection_config
+        defaults = AnomalyDetectionConfig()
 
-        info = QLabel("调整对齐质量评估阈值。\n" "修改后仅在下次对齐时生效。")
+        info = QLabel(
+            "调整对齐完成后的低分异常标记。\n"
+            "这些参数不参与文档接受、拒绝或对齐路径选择。"
+        )
         info.setWordWrap(True)
         layout.addWidget(info)
-
-        # ── 文档级门控 ──
-        g0 = QGroupBox("文档级")
-        fl0 = QFormLayout(g0)
-        fl0.setSpacing(4)
-
-        sb_ad = QDoubleSpinBox()
-        sb_ad.setRange(0.05, 0.95)
-        sb_ad.setSingleStep(0.05)
-        sb_ad.setDecimals(2)
-        sb_ad.setValue(cfg.anchor_density_min)
-        fl0.addRow("锚点密度下限", sb_ad)
-
-        sb_gr = QDoubleSpinBox()
-        sb_gr.setRange(0.01, 0.50)
-        sb_gr.setSingleStep(0.01)
-        sb_gr.setDecimals(2)
-        sb_gr.setValue(cfg.gap_row_ratio_max)
-        fl0.addRow("间隙行比例上限", sb_gr)
-
-        layout.addWidget(g0)
 
         # ── 离群低分 ──
         g1 = QGroupBox("离群低分")
@@ -1269,8 +1278,6 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         restore_defaults_btn = QPushButton("恢复默认")
         restore_defaults_btn.clicked.connect(
             lambda: (
-                sb_ad.setValue(defaults.anchor_density_min),
-                sb_gr.setValue(defaults.gap_row_ratio_max),
                 sb_k.setValue(defaults.zscore_k),
                 sb_ms.setValue(defaults.zscore_min_score),
             )
@@ -1286,25 +1293,21 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         layout.addLayout(btn_row)
 
         if dlg.exec() == QDialog.Accepted:
-            self._quality_config = QualityGateConfig(
-                anchor_density_min=sb_ad.value(),
-                gap_row_ratio_max=sb_gr.value(),
+            self._anomaly_detection_config = AnomalyDetectionConfig(
                 zscore_k=sb_k.value(),
                 zscore_min_score=sb_ms.value(),
             )
             DualignConfig.instance().set(
-                KEY_QUALITY_GATE,
+                KEY_ANOMALY_DETECTION,
                 {
-                    "anchor_density_min": sb_ad.value(),
-                    "gap_row_ratio_max": sb_gr.value(),
                     "zscore_k": sb_k.value(),
                     "zscore_min_score": sb_ms.value(),
                 },
             )
             DualignConfig.instance().save()
             self._safe_status(
-                f"✅ 门控参数已更新：锚点≥{sb_ad.value():.0%} "
-                f"间隙≤{sb_gr.value():.0%} k={sb_k.value():.1f}"
+                f"✅ 异常检测参数已更新：k={sb_k.value():.1f} "
+                f"最低分={sb_ms.value():.2f}"
             )
 
     def _build_bottom_bar(self):
@@ -1577,7 +1580,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         DockPanelHelper.build_panel_context_menu(
             dock, panel_id, self, self._dock_map, dock.mapToGlobal(pos)
         )
-        self._debounce_save_history()
+        self._schedule_settings_save()
 
     def _setup_menu(self):
         """菜单栏 — 按功能域分类，遵循标准桌面应用惯例。"""
@@ -1595,18 +1598,23 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         )
         fm.addAction("打开 Demo", self._on_open_demo, QKeySequence("Ctrl+D"))
         fm.addSeparator()
-        fm.addAction("导出修复结果...", self._on_export, QKeySequence.StandardKey.Save)
-        fm.addAction("固化修复...", self._on_promote, QKeySequence("Ctrl+Shift+P"))
+        fm.addAction(
+            "保存工作报告", self._on_save_alignment, QKeySequence.StandardKey.Save
+        )
+        fm.addAction(
+            "固化修改...",
+            self._on_apply_confirmed_changes,
+            QKeySequence("Ctrl+Shift+S"),
+        )
+        fm.addAction("批量固化修改...", self._on_batch_solidify)
         fm.addSeparator()
 
         # ── 查看文件子菜单：快速打开源文件/修复文件/报告 ──
         vm = fm.addMenu("查看文件")
-        vm.addAction("源文件（原文）", self._on_view_source)
-        vm.addAction("源文件（译文）", self._on_view_target)
+        vm.addAction("文档 A", self._on_view_source)
+        vm.addAction("文档 B", self._on_view_target)
         vm.addSeparator()
-        vm.addAction("修复报告", self._on_view_report)
-        vm.addAction("修复后原文", self._on_view_repaired_source)
-        vm.addAction("修复后译文", self._on_view_repaired_target)
+        vm.addAction("工作报告", self._on_view_alignment)
 
         fm.addSeparator()
         fm.addAction("退出", self.close, QKeySequence.StandardKey.Quit)
@@ -1622,13 +1630,13 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             QKeySequence("Ctrl+Y"),
         )
         em.addSeparator()
-        em.addAction(
-            "重置当前修复",
-            self._on_reset_current_snap,
+        self._reset_current_action = em.addAction(
+            "重置当前校订",
+            self._on_reset_current_relation,
             QKeySequence("Ctrl+R"),
         )
         em.addAction(
-            "重置全部修复",
+            "重置全部校订",
             self._on_reset_all,
             QKeySequence("Ctrl+Shift+R"),
         )
@@ -1673,7 +1681,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             QKeySequence("Ctrl+Shift+A"),
         )
         am.addAction(
-            "一键修复异常",
+            "按当前策略自动校订",
             self._on_auto_repair,
             QKeySequence("Ctrl+Shift+F"),
         )
@@ -1685,12 +1693,39 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         )
 
         # ═══════════════════════════════════════════════════
+        # 校订(&R) — 当前文本对操作与快捷键
+        # ═══════════════════════════════════════════════════
+        rm = mb.addMenu("校订(&R)")
+        review_actions = [
+            ("merge", "合并文本对", self._review._on_merge),
+            ("split", "拆分文本对", self._review._on_split),
+            ("edit", "校订文本", self._review._on_edit),
+            ("ok", "审核通过", self._review._on_ok),
+            ("flag", "编辑标记…", self._review._on_flag),
+            ("delete", "删除文本对", self._review._on_delete),
+            ("placeholder", "插入占位符", self._review._on_placeholder),
+        ]
+        self._review_menu_actions = {}
+        for index, (key, label, handler) in enumerate(review_actions):
+            if index == 4:
+                rm.addSeparator()
+            action = rm.addAction(label, handler, QKeySequence(REVIEW_SHORTCUTS[key]))
+            action.setAutoRepeat(False)
+            self._review_menu_actions[key] = action
+        rm.addSeparator()
+        rm.addAction(self._reset_current_action)
+        self._review_menu_actions["reset"] = self._reset_current_action
+        rm.aboutToShow.connect(self._sync_review_menu_actions)
+        self._sync_review_menu_actions()
+
+        # ═══════════════════════════════════════════════════
         # 设置(&S) — 配置、环境
         # ═══════════════════════════════════════════════════
         sm = mb.addMenu("设置(&S)")
         sm.addAction("模型与 Agent 配置...", self._on_open_agent_config)
         sm.addSeparator()
-        sm.addAction("质量门控参数...", self._on_quality_gate_config)
+        sm.addAction("固化修改设置...", self._on_solidify_settings)
+        sm.addAction("异常检测参数...", self._on_anomaly_detection_config)
         sm.addAction(
             "刷新环境检测",
             self._refresh_status_dots,
@@ -1713,64 +1748,6 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         hm.addAction("关于 Dualign", self._on_about)
 
     # ── 文件菜单回调 ──
-
-    def _on_promote(self):
-        """固化修复当前章节（菜单项回调）。"""
-        from pathlib import Path
-
-        if not self._repaired_dir or not self._current_entry_id:
-            # 无当前章节信息 → 提示用户
-            QMessageBox.information(
-                self,
-                "固化修复",
-                "请先在 Reader GUI 中操作：\n\n"
-                "1. 在文件名树中勾选要固化的章节\n"
-                "2. 点击操作面板中的「⬆ 固化修复」按钮\n\n"
-                "固化会用 repaired/ 中的修复结果覆盖 raw/ 文件，"
-                "并备份原文件为 .bak。",
-            )
-            return
-
-        from dualign.common import promote_repaired
-
-        entry_id = self._current_entry_id
-        repaired_dir = self._repaired_dir
-
-        # 从 repaired_dir 推导 src/tgt 路径
-        src_path = str(Path(repaired_dir) / f"{entry_id}.source.md")
-        tgt_path = str(Path(repaired_dir) / f"{entry_id}.target.md")
-
-        reply = QMessageBox.question(
-            self,
-            "确认固化",
-            f"将用修复后的文件置换原始文件：\n"
-            f"  章节: {entry_id}\n"
-            f"  策略: {self._strategy}\n"
-            f"  原始文件将备份为 .bak\n\n"
-            f"⚠ 破坏性操作 — 固化后需重新对齐/校订。\n\n"
-            f"确认执行？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-
-        result = promote_repaired(
-            entry_id=entry_id,
-            src_path=src_path,
-            tgt_path=tgt_path,
-            repaired_dir=repaired_dir,
-            strategy=self._strategy,
-        )
-
-        if result["success"]:
-            QMessageBox.information(
-                self,
-                "固化完成",
-                "✓ 文件已替换\n" "✓ 原始文件已备份\n" "✓ 缓存已清除",
-            )
-        else:
-            QMessageBox.warning(self, "固化失败", result["message"])
 
     # ── 欢迎页帮助链接回调 ──
 
@@ -1900,6 +1877,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
 
         # 修复策略
         self._review.set_strategy_index(defaults[KEY_STRATEGY])
+        self._review.set_auto_next_chapter(defaults[KEY_AUTO_NEXT_CHAPTER])
 
         # 表格刷新
         fp.filter_changed.emit()
@@ -1920,7 +1898,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
                 dock.raise_()
         # 同步菜单勾选状态
         self._sync_panel_menu_checks()
-        self._debounce_save_history()
+        self._schedule_settings_save()
 
     def _toggle_left_dock_area(self):
         """切换左侧 Dock 区域显隐。
@@ -1954,7 +1932,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             saved = self._saved_dock_widths.get("review", 360)
             QTimer.singleShot(50, lambda: self._restore_dock_width("review", saved))
         self._sync_panel_menu_checks()
-        self._debounce_save_history()
+        self._schedule_settings_save()
 
     def _toggle_aux_dock(self):
         """切换右侧 Dock 区域显隐（Ctrl+Alt+B）。
@@ -1978,7 +1956,7 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
                 dock.setVisible(True)
                 dock.raise_()
         self._update_min_width()
-        self._debounce_save_history()
+        self._schedule_settings_save()
 
     def _restore_dock_width(self, panel_id: str, width: int):
         """恢复 dock 宽度（在 show + layout settle 后调用）。"""
@@ -2010,19 +1988,20 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         cfg.load()
         return cfg
 
-    def _debounce_save_history(self):
-        if not hasattr(self, "_history_timer"):
-            self._history_timer = QTimer(self)
-            self._history_timer.setSingleShot(True)
-            self._history_timer.timeout.connect(self._save_history)
-        self._history_timer.start(500)
+    def _schedule_settings_save(self):
+        if not hasattr(self, "_settings_timer"):
+            self._settings_timer = QTimer(self)
+            self._settings_timer.setSingleShot(True)
+            self._settings_timer.timeout.connect(self._save_settings)
+        self._settings_timer.start(500)
 
-    def _save_history(self):
+    def _save_settings(self):
         try:
             cfg = DualignConfig.instance()
             cfg.load()
             fp = self._filter_panel
             cfg.set(KEY_STRATEGY, self._review.get_strategy_index())
+            cfg.set(KEY_AUTO_NEXT_CHAPTER, self._review.auto_next_chapter())
             cfg.set(KEY_SHOW_ALL, fp.show_all)
             cfg.set(KEY_CONTEXT_LINES, fp.context_lines)
 
@@ -2058,9 +2037,9 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
 
             _tb.print_exc()
 
-    def _load_history(self) -> dict:
-        """兼容旧接口：返回 DualignConfig 的全部数据。"""
-        return self._cfg()._data
+    def _settings_data(self) -> dict:
+        """返回当前 GUI 配置快照。"""
+        return self._cfg().snapshot()
 
     def _restore_filter_state(self, history: dict):
         """从配置恢复筛选面板/显示选项状态。缺省键用出厂默认值。"""
@@ -2138,14 +2117,15 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             self.resizeDocks([l_dock], [300], Qt.Orientation.Horizontal)
 
         # ── 展开底部面板 ──
+        self._bottom_user_collapsed = False
         if self._bottom_content.isHidden():
-            self._toggle_bottom_panel()
+            self._toggle_bottom_panel(user_initiated=False)
 
         # ── 恢复表格列宽默认 ──
         hdr = self.table.horizontalHeader()
-        from dualign.gui.base_table import calc_snap_width as _csw3
+        from dualign.gui.base_table import calc_relation_width
 
-        hdr.resizeSection(0, _csw3(0))
+        hdr.resizeSection(0, calc_relation_width(0))
         for ci, w in enumerate([64, 60, 64, 60], 1):
             hdr.resizeSection(ci, w)
 
@@ -2160,8 +2140,9 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         cfg.set("ai_auto_approve", False)
         cfg.save()
         # 刷新筛选面板 UI 状态
-        self._restore_filter_state(cfg._data)
+        self._restore_filter_state(cfg.snapshot())
         self._review.set_strategy_index(defaults.get(KEY_STRATEGY, 1))
+        self._review.set_auto_next_chapter(defaults.get(KEY_AUTO_NEXT_CHAPTER, False))
         self._review.set_backend("deepseek")
         self._apply_filter()
 
@@ -2174,11 +2155,21 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
     def closeEvent(self, event):
         # 停止后台线程
         try:
-            self._cancel_current_load()
+            if not self._cancel_current_load(drain_retired=True):
+                self._safe_status("后台任务仍在结束中，请稍后再次关闭窗口")
+                event.ignore()
+                return
         except Exception:
             import traceback as _tb
 
             _tb.print_exc()
+        auto_repair_worker = getattr(self, "_auto_repair_worker", None)
+        if auto_repair_worker is not None and auto_repair_worker.isRunning():
+            auto_repair_worker.wait(15000)
+            if auto_repair_worker.isRunning():
+                self._safe_status("自动修复仍在结束中，请稍后再次关闭窗口")
+                event.ignore()
+                return
         # ScoreManager 清理（停止 worker 线程）
         try:
             if hasattr(self, "_score_mgr") and self._score_mgr is not None:
@@ -2194,29 +2185,29 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
             import traceback as _tb
 
             _tb.print_exc()
-        self._save_history()
+        self._save_settings()
         self._save_session()
         super().closeEvent(event)
 
     def _update_doc_summary(self):
         """更新文档摘要。
 
-        row0: 原文：完整文件名（超链接）
-        row1: 译文：完整文件名（超链接）
-        row2: 原文行数 | 译文行数 | Snap均分
-        row3: 真锚点率 | 间隙行率 | 合并触顶
+        row0: 文档 A：完整文件名（超链接）
+        row1: 文档 B：完整文件名（超链接）
+        row2: 文档 A 块数 | 文档 B 块数 | 关系均分
+        row3: 单调脚手架 | 单调损失 | 分歧区
         末尾：章节进度
         """
         if self._repair_state is None:
             self._review.set_summary_paths("", "")
-            self._review.set_summary_filename("—")
+            self._review.set_summary_chapter()
             self._review.set_summary_cells()
             return
 
         state = self._repair_state
-        snap = state.snapshot
-        n_src = len(snap.original_src_lines)
-        n_tgt = len(snap.original_tgt_lines)
+        snapshot = state.snapshot
+        n_src = len(snapshot.original_src_lines)
+        n_tgt = len(snapshot.original_tgt_lines)
 
         # ── 原文/译文路径 + 章节进度 ──
         src_path = getattr(self, "_src_path", "")
@@ -2231,38 +2222,33 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
                 chapter_text = f"{idx+1}/{len(entries)}章"
             except ValueError:
                 pass
-        self._review.set_summary_filename("", chapter_text)
+        self._review.set_summary_chapter(chapter_text)
 
         # 指标
         stats = getattr(self, "_align_stats", None) or {}
-        qa = getattr(self, "_last_quality_assessment", None)
-        indicators = qa.get("indicators", {}) if qa else {}
-        # Snap均分
+        # 初始关系平均相似度
         avg_sim = stats.get("avg_similarity", 0)
         avg_pct = f"{avg_sim:.1%}" if avg_sim else "—"
 
-        # 真锚点率 = 参与锚点的去重行数 / 总行数
-        n_true_anchors = stats.get("n_true_anchors", 0)
-        n_denom = n_src + n_tgt
-        anchor_ratio = n_true_anchors / n_denom if n_denom > 0 else 0
-        anchor_pct = f"{anchor_ratio:.1%}"
-
-        # 间隙行率
-        gap_ratio = indicators.get("gap_row_ratio", 0)
-        gap_pct = f"{gap_ratio:.1%}" if gap_ratio else "—"
-
-        # 合并触顶（0 显示 0，不隐藏）
-        n_overflow = indicators.get("n_overflow_rows", 0) or stats.get(
-            "n_overflow_rows", 0
-        )
+        gate = getattr(self, "_alignment_gate", None) or {}
+        monotone_loss = gate.get("monotone_evidence_loss")
+        if monotone_loss is not None:
+            order_text = f"单调损失：{float(monotone_loss):.1%}"
+        else:
+            mutual_pairs = int(gate.get("mutual_pairs", 0) or 0)
+            out_of_chain = int(gate.get("out_of_chain_pairs", 0) or 0)
+            legacy = f"{out_of_chain}/{mutual_pairs}" if mutual_pairs else "—"
+            order_text = f"旧顺序链外：{legacy}"
+        n_scaffold = int(stats.get("n_scaffold", 0) or 0)
+        uncertain = int(stats.get("uncertain_regions", 0) or 0)
 
         self._review.set_summary_cells(
-            f"原文行数：{n_src}",
-            f"译文行数：{n_tgt}",
-            f"Snap均分：{avg_pct}",
-            f"真锚点率：{anchor_pct}",
-            f"间隙行率：{gap_pct}",
-            f"合并触顶：{n_overflow}",
+            f"文档 A 块数：{n_src}",
+            f"文档 B 块数：{n_tgt}",
+            f"关系均分：{avg_pct}",
+            f"单调脚手架：{n_scaffold}",
+            order_text,
+            f"分歧区：{uncertain}",
         )
 
     def _update_status_bar(self):

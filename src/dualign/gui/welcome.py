@@ -40,7 +40,6 @@ from dualign.gui.theme import T as _themeT
 class EnvStatus:
     embed_ok: bool = False
     embed_detail: str = "未检测"
-    embed_provider: str = ""
     embed_model: str = ""
     models_available: List[str] = None
     ai_ok: bool = False
@@ -356,7 +355,6 @@ class WelcomePage(QWidget):
         status = EnvStatus(
             embed_ok=result.get("embed_ok", False),
             embed_detail=result.get("embed_detail", "未知"),
-            embed_provider=result.get("embed_provider", ""),
             embed_model=result.get("embed_model", ""),
             ai_ok=result.get("ai_ok", False),
             ai_detail=result.get("ai_detail", "未知"),

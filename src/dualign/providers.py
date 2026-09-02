@@ -121,7 +121,8 @@ class AiRepairAgentConfig:
     api_key: str = ""
     model_name: str = "deepseek-v4-flash"
     temperature: float = 0.0
-    max_tokens: int = 393216
+    max_tokens: int = 8192
+    request_timeout: float = 240.0
     is_enabled: bool = True
     is_active: bool = True
     note: str = ""
@@ -144,6 +145,7 @@ class AiRepairAgentConfig:
             "model_name": self.model_name,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
+            "request_timeout": self.request_timeout,
             "is_enabled": self.is_enabled,
             "is_active": self.is_active,
             "note": self.note,
@@ -158,7 +160,8 @@ class AiRepairAgentConfig:
             api_key=d.get("api_key", ""),
             model_name=d.get("model_name", ""),
             temperature=float(d.get("temperature", 0.0)),
-            max_tokens=int(d.get("max_tokens", 4096)),
+            max_tokens=int(d.get("max_tokens", 8192)),
+            request_timeout=float(d.get("request_timeout", 240.0)),
             is_enabled=d.get("is_enabled", True),
             is_active=d.get("is_active", True),
             note=d.get("note", ""),
@@ -229,7 +232,7 @@ DEFAULT_REPAIR_AGENTS = [
         base_url="https://api.deepseek.com",
         model_name="deepseek-v4-flash",
         temperature=0.0,
-        max_tokens=393216,
+        max_tokens=8192,
         is_active=True,
         note="推荐：支持工具调用、缓存命中，$0.14/1M tokens 输入。",
     ),
@@ -239,7 +242,7 @@ DEFAULT_REPAIR_AGENTS = [
         base_url="http://localhost:11434",
         model_name="qwen3.5:4b",
         temperature=0.0,
-        max_tokens=393216,
+        max_tokens=8192,
         is_active=False,
         note="⚠ 不建议用于自动修复：工具调用能力不足，JSON 输出不稳定。仅适合对话模式。",
     ),

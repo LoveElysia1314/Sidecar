@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dualign"
-version = "0.8.0a1"
+version = "0.8.0b1"
 description = "双语平行文档对齐与辅助校验工具"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -40,6 +40,9 @@ dualign = "dualign.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+dualign = ["resources/*.json"]
 
 # ═══════════════════════════════════════════════════════════════
 # 代码质量工具配置

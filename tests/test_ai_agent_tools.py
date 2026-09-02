@@ -2,7 +2,7 @@
 Dualign — AI 校订 Agent 工具可靠性测试
 
 覆盖本次修复:
-  1. 工具参数统一为 target（兼容旧参数名 snap_range/snap_id/pair_spec）
+  1. 工具参数统一为唯一的 target
   2. done 被拒绝时不再强制退出循环，模型可继续修复
   3. done(force=true) 跳过剩余项
   4. 范围 edit 行数校验
@@ -20,6 +20,7 @@ from dualign.services.ai_repair_agent import (
     LLMResponse,
     LLMBackend,
     AiRepairAgent,
+    agent_contract_fingerprint,
 )
 
 
@@ -60,23 +61,22 @@ def _call(name, args):
 
 
 class TestTargetParamUnification:
-    """核心回归：模型误用旧参数名 / int 类型也必须成功。"""
+    """核心回归：target 同时接受单个整数与范围字符串。"""
 
-    def test_edit_with_legacy_snap_id(self, reviewable_ctx):
+    def test_edit_with_target_int(self, reviewable_ctx):
         ex = _executor(reviewable_ctx)
-        # 本次事故现场：edit 传了 snap_id 而不是 snap_range
-        result = ex.execute(_call("edit", {"snap_id": 1, "new_tgt": ["新译文"]}))
+        result = ex.execute(_call("edit", {"target": 1, "new_tgt": ["新译文"]}))
         assert "✏️ 编辑" in result, result
         assert 1 in ex.reviewed_ids
 
-    def test_edit_with_target_int(self, reviewable_ctx):
+    def test_edit_with_target_range_member(self, reviewable_ctx):
         ex = _executor(reviewable_ctx)
         result = ex.execute(_call("edit", {"target": 5, "new_src": ["A", "B"]}))
         assert "✏️ 编辑" in result, result
 
-    def test_merge_with_legacy_snap_range(self, reviewable_ctx):
+    def test_merge_with_target(self, reviewable_ctx):
         ex = _executor(reviewable_ctx)
-        result = ex.execute(_call("merge", {"snap_range": "1"}))
+        result = ex.execute(_call("merge", {"target": "1"}))
         assert "🔗 合并" in result, result
 
     def test_delete_with_target(self, reviewable_ctx):
@@ -93,6 +93,17 @@ class TestTargetParamUnification:
         ex = _executor(reviewable_ctx)
         result = ex.execute(_call("ok", {"target": "1-2"}))
         assert "只接受单个" in result, result
+
+    def test_ok_rejects_a_relation_with_missing_text(self):
+        state = RepairState.from_ops([((0,), (), 0.4)], ["source"], [])
+        state = state.apply(RepairAction.make_placeholder_tgt("L000001"))
+        ctx = ChapterContext.from_repair_state(state, skip_auto_repair=True)
+        ex = ToolExecutor(ctx, initial_state=state)
+
+        result = ex.execute(ToolCall("missing", "ok", {"target": "0"}))
+
+        assert result.startswith("❌")
+        assert not ex.reviewed_actions
 
     def test_flag_with_target(self, reviewable_ctx):
         ex = _executor(reviewable_ctx)
@@ -119,10 +130,55 @@ class TestTargetParamUnification:
         result = ex.execute(_call("edit", {"target": "1-2", "new_tgt": ["只有一行"]}))
         assert "edit 拒绝" in result, result
 
+    def test_edit_rejects_missing_placeholder_in_new_tgt(self, reviewable_ctx):
+        """占位符防线：新译文含 ⟢MISSING⟣ → 拒绝，不产生 edit 操作。"""
+        ex = _executor(reviewable_ctx)
+        placeholder = "\u27e2MISSING\u27e3"
+        result = ex.execute(_call("edit", {"target": "1", "new_tgt": [placeholder]}))
+        assert "占位符" in result, result
+        assert "edit 拒绝" in result, result
+        assert 1 not in ex.reviewed_ids
+        assert not ex.reviewed_actions
+
+    def test_edit_rejects_missing_placeholder_in_new_src(self, reviewable_ctx):
+        ex = _executor(reviewable_ctx)
+        placeholder = "\u27e2MISSING\u27e3"
+        result = ex.execute(
+            _call("edit", {"target": "5", "new_src": [placeholder, "B"]})
+        )
+        assert "edit 拒绝" in result, result
+        assert 5 not in ex.reviewed_ids
+
+    def test_edit_allows_embedded_missing_in_prose(self, reviewable_ctx):
+        """内嵌符号（非独立占位符行）不拦截。"""
+        ex = _executor(reviewable_ctx)
+        placeholder = "\u27e2MISSING\u27e3"
+        result = ex.execute(
+            _call("edit", {"target": "1", "new_tgt": ["正文提及 " + placeholder]})
+        )
+        assert "✏️ 编辑" in result, result
+        assert 1 in ex.reviewed_ids
+
     def test_unknown_tool(self, reviewable_ctx):
         ex = _executor(reviewable_ctx)
         result = ex.execute(_call("force_done", {"note": "x"}))
         assert "未知工具" in result, result
+
+    def test_unknown_tool_argument_is_rejected(self, reviewable_ctx):
+        ex = _executor(reviewable_ctx)
+
+        result = ex.execute(_call("ok", {"target": "1", "snap": 1}))
+
+        assert "未知参数" in result
+        assert not ex.reviewed_actions
+
+    def test_range_action_is_replayed_and_returned_once(self, reviewable_ctx):
+        ex = _executor(reviewable_ctx)
+
+        result = ex.execute(_call("delete", {"target": "1-3"}))
+
+        assert "删除" in result
+        assert len(ex._unique_reviewed_actions()) == 1
 
 
 class _ScriptedBackend(LLMBackend):
@@ -138,10 +194,11 @@ class _ScriptedBackend(LLMBackend):
 
 
 def _run_agent(ctx, script):
-    agent = AiRepairAgent(backend="deepseek", verbose=False, strategy="src")
-    agent._llm = _ScriptedBackend(script)
-    actions = agent.run(ctx, initial_state=None)
-    return agent, actions
+    agent = AiRepairAgent(
+        llm_backend=_ScriptedBackend(script), verbose=False, strategy="src"
+    )
+    result = agent.run(ctx, initial_state=None)
+    return agent, result
 
 
 class TestDoneFlow:
@@ -149,8 +206,8 @@ class TestDoneFlow:
         """本次事故场景：先处理 2/3，调用 done 被拒绝 → 循环必须继续而非退出。"""
         t1 = LLMResponse(
             tool_calls=[
-                ToolCall("a", "edit", {"snap_id": 1, "new_tgt": ["新译文"]}),
-                ToolCall("b", "delete", {"snap_id": 3}),
+                ToolCall("a", "edit", {"target": 1, "new_tgt": ["新译文"]}),
+                ToolCall("b", "delete", {"target": 3}),
                 ToolCall("c", "done", {}),
             ]
         )
@@ -160,27 +217,35 @@ class TestDoneFlow:
                 ToolCall("e", "done", {}),
             ]
         )
-        agent, actions = _run_agent(reviewable_ctx, [t1, t2])
-        kinds = sorted((a.op_index, a.kind) for a in actions)
+        agent, result = _run_agent(reviewable_ctx, [t1, t2])
+        actions = result.actions
+        kinds = sorted(
+            (reviewable_ctx.snapshot.operation_index(a.relation_ids[0]), a.kind)
+            for a in actions
+        )
         assert (1, "edit") in kinds, kinds
         assert (3, "delete") in kinds, kinds
         assert (5, "ok") in kinds, kinds
         assert len(actions) == 3, actions
+        assert result.is_complete
 
     def test_done_force_skips_remaining(self, reviewable_ctx):
         t1 = LLMResponse(
             tool_calls=[ToolCall("a", "done", {"force": True, "note": "跳过"})]
         )
-        agent, actions = _run_agent(reviewable_ctx, [t1])
-        assert actions == []
+        agent, result = _run_agent(reviewable_ctx, [t1])
+        assert result.actions == []
+        assert result.status == "forced"
+        assert result.pending_ids == (1, 3, 5)
 
     def test_done_rejected_then_force(self, reviewable_ctx):
         t1 = LLMResponse(tool_calls=[ToolCall("a", "done", {})])
         t2 = LLMResponse(
             tool_calls=[ToolCall("b", "done", {"force": True, "note": "重复项"})]
         )
-        agent, actions = _run_agent(reviewable_ctx, [t1, t2])
-        assert actions == []
+        agent, result = _run_agent(reviewable_ctx, [t1, t2])
+        assert result.actions == []
+        assert result.status == "forced"
         assert agent._llm.calls == 2
 
     def test_all_processed_done_accepted_single_turn(self, reviewable_ctx):
@@ -192,5 +257,40 @@ class TestDoneFlow:
                 ToolCall("d", "done", {}),
             ]
         )
-        agent, actions = _run_agent(reviewable_ctx, [t1])
-        assert len(actions) == 3, actions
+        agent, result = _run_agent(reviewable_ctx, [t1])
+        assert len(result.actions) == 3, result.actions
+        assert result.is_complete
+
+    def test_turn_limit_returns_partial_result(self, reviewable_ctx):
+        agent = AiRepairAgent(
+            llm_backend=_ScriptedBackend([LLMResponse(content="暂无决定")]),
+            verbose=False,
+            strategy="src",
+            max_turns=1,
+        )
+
+        result = agent.run(reviewable_ctx, initial_state=None)
+
+        assert result.status == "partial"
+        assert result.pending_ids == (1, 3, 5)
+        assert not result.is_complete
+
+    def test_public_backend_and_contract_audit(self, reviewable_ctx):
+        responses = [
+            LLMResponse(tool_calls=[ToolCall("done", "done", {"force": True})])
+        ]
+        agent = AiRepairAgent(
+            llm_backend=_ScriptedBackend(responses),
+            model_name="injected-model",
+            verbose=False,
+            strategy="src",
+        )
+
+        result = agent.run(reviewable_ctx)
+
+        assert result.model_name == "injected-model"
+        assert result.prompt_sha256 == agent_contract_fingerprint("src")
+
+    def test_unknown_named_backend_is_rejected(self):
+        with pytest.raises(ValueError, match="不支持"):
+            AiRepairAgent(backend="ollama", verbose=False)

@@ -35,19 +35,26 @@ class CachedEncoder:
         """
         Args:
             encoder: OllamaEncoder | OpenAICompatibleEncoder 实例
-            cache: EmbeddingCache 实例（通常指向 {entry_id}/vecs.db）
+            cache: EmbeddingCache 实例（通常指向全局 emb/vecs.db）
             model_name: 存入缓存的模型标识。空时自动从 encoder._model 读取
         """
         self._encoder = encoder
         self._cache = cache
         self._model_name = model_name or getattr(encoder, "_model", "unknown")
-        # 使用编码器实际使用的 instruction 文本构建缓存键
-        # （而非全局 INSTRUCTION_TEXT），确保不同提供方的缓存自然隔离
+        # The endpoint and instruction are part of the embedding function.
+        # Hash the complete encoder identity so providers cannot share vectors
+        # merely because they expose the same model label.
         actual_instruction = getattr(encoder, "_instruction", None) or ""
-        self._instr_hash = (
-            _instruction_hash(actual_instruction) if actual_instruction else "noinstr"
+        encoder_identity = "\n".join(
+            (
+                type(encoder).__name__,
+                str(getattr(encoder, "_url", "")).rstrip("/"),
+                self._model_name,
+                actual_instruction,
+            )
         )
-        self._key_prefix = f"{self._model_name}_{self._instr_hash}"
+        self._identity_hash = _instruction_hash(encoder_identity)
+        self._key_prefix = f"{self._model_name}_{self._identity_hash}"
         self._hit_count = 0
         self._miss_count = 0
 
@@ -68,7 +75,7 @@ class CachedEncoder:
 
     # ── 核心 ──
 
-    def encode(self, texts: list[str]) -> np.ndarray:
+    def encode(self, texts: list[str], *, stop_event=None) -> np.ndarray:
         """缓存优先的批量编码。
 
         流程:
@@ -88,27 +95,28 @@ class CachedEncoder:
             _dim = getattr(self._encoder, "_dim", None) or 768
             return np.zeros((0, _dim), dtype=np.float32)
 
-        # 缓存键 = 内容哈希 + 模型名 + instruction 哈希
+        # 缓存键 = 内容哈希 + 编码器语义身份
         # 任一变化 → 键不同 → 自然穿透到重新编码
         hashes = [f"{_content_hash([t])}_{self._key_prefix}" for t in texts]
         cached = self._cache.get_batch(hashes)
 
         # ── 收集 miss ──
-        miss_texts: list[str] = []
-        miss_hashes: list[str] = []
+        unique_misses: dict[str, str] = {}
         for h, t in zip(hashes, texts):
             if h in cached:
                 self._hit_count += 1
             else:
                 self._miss_count += 1
-                miss_texts.append(t)
-                miss_hashes.append(h)
+                unique_misses.setdefault(h, t)
 
         # ── 编码 miss ──
-        if miss_texts:
-            miss_embs = np.array(
-                self._encoder.encode(miss_texts, normalize_embeddings=True)
-            )
+        if unique_misses:
+            miss_hashes = list(unique_misses)
+            miss_texts = list(unique_misses.values())
+            encode_kwargs = {"normalize_embeddings": True}
+            if stop_event is not None:
+                encode_kwargs["stop_event"] = stop_event
+            miss_embs = np.array(self._encoder.encode(miss_texts, **encode_kwargs))
             # 确保 L2 归一化（部分后端已归一化，冗余安全）
             norms = np.linalg.norm(miss_embs, axis=1, keepdims=True)
             miss_embs = miss_embs / np.maximum(norms, 1e-12)

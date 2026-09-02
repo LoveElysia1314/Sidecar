@@ -27,7 +27,7 @@ from typing import Optional
 
 import numpy as np
 
-from dualign.config import get_embedding_cache_dir
+from dualign.config import get_embedding_cache_path
 from dualign.services.cached_encoder import CachedEncoder
 from dualign.services.embedding_cache import EmbeddingCache
 
@@ -48,9 +48,9 @@ class SimilarityScorer:
     ):
         """
         Args:
-            entry_id: 章节标识（用于缓存隔离），如 "ch01"
+            entry_id: 章节标识，仅用于诊断信息，如 "ch01"
             encoder_model: 已初始化的编码器实例。None 时首次 encode() 延迟加载
-            cache_dir: 缓存目录。空时自动使用 get_cache_root() / emb / entry_id
+            cache_dir: 自定义缓存目录。空时使用全局 emb/vecs.db
         """
         self._entry_id = entry_id
         self._encoder = encoder_model
@@ -66,11 +66,11 @@ class SimilarityScorer:
     @property
     def cache(self) -> EmbeddingCache:
         if self._cache is None:
-            cache_dir = self._cache_dir
-            if not cache_dir:
-                cache_dir = get_embedding_cache_dir(self._entry_id)
-            os.makedirs(cache_dir, exist_ok=True)
-            db_path = os.path.join(cache_dir, "vecs.db")
+            if self._cache_dir:
+                os.makedirs(self._cache_dir, exist_ok=True)
+                db_path = os.path.join(self._cache_dir, "vecs.db")
+            else:
+                db_path = get_embedding_cache_path()
             self._cache = EmbeddingCache(db_path)
         return self._cache
 
@@ -125,8 +125,11 @@ class SimilarityScorer:
         src = list(src_texts) + [""] * (n - len(src_texts))
         tgt = list(tgt_texts) + [""] * (n - len(tgt_texts))
 
-        src_emb = self.encode(src)
-        tgt_emb = self.encode(tgt)
+        # 合并为一次缓存查询/模型批次；切片后的语义与两次 encode 完全相同，
+        # 同时让跨两侧重复文本也能在本批次内去重。
+        combined_emb = self.encode(src + tgt)
+        src_emb = combined_emb[:n]
+        tgt_emb = combined_emb[n:]
 
         # 堆叠法：逐行余弦 = sum(a*b) / (norm(a) * norm(b))
         # 向量已归一化，所以 dot = 余弦

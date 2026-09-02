@@ -1,144 +1,489 @@
-"""
-Dualign — CLI 对齐流水线
-
-将 common.py 中与具体业务逻辑相关的对齐流水线提取到此，
-common.py 回归纯工具函数库角色。
-
-职责：编码 → 对齐 → 自动修复 → 导出文件 + report.json
-"""
+"""Public report-only alignment pipeline."""
 
 from __future__ import annotations
 
-import os
-import json
 from pathlib import Path
 
-from dualign.config import (
-    get_report_cache_dir,
-    get_embedding_cache_dir,
-)
-from dualign.common import (
-    load_text_lines,
-    content_hash,
-)
+from dualign.common import load_text_lines
+from dualign.config import get_embedding_cache_path
 from dualign.core import (
-    align,
+    ALGORITHM_MDL_V1,
     AlignConfig,
     AlignmentResult,
+    align,
+    alignment_payload,
 )
-from dualign.services.embedding_cache import EmbeddingCache
+from dualign.core.calibration import resolve_alignment_calibration
 from dualign.services.cached_encoder import CachedEncoder
+from dualign.services.embedding_cache import EmbeddingCache
+from dualign.services.report_io import (
+    ReportError,
+    build_report,
+    load_report,
+    operations_from_report,
+    relation_ids_from_report,
+    report_matches_alignment,
+    save_report,
+)
+
+LEGACY_ALGORITHM = "legacy-anchor-v1"
 
 
-def align_chapter(
-    src_path: str,
-    tgt_path: str,
-    repaired_dir: str = "",
+def _algorithm_name(config) -> str:
+    return str(getattr(config, "algorithm", ALGORITHM_MDL_V1))
+
+
+def _run_alignment(
+    lines_a,
+    lines_b,
+    embeddings_a,
+    embeddings_b,
+    config,
+    encode_fn,
+    calibration,
+) -> AlignmentResult:
+    """Keep the archived solver behind the explicit CLI configuration boundary."""
+
+    if _algorithm_name(config) != LEGACY_ALGORITHM:
+        return align(
+            lines_a,
+            lines_b,
+            embeddings_a,
+            embeddings_b,
+            config,
+            encode_fn=encode_fn,
+            calibration=calibration,
+        )
+
+    from dualign.core.legacy_anchor_aligner import align as legacy_align
+
+    legacy = legacy_align(
+        lines_a,
+        lines_b,
+        embeddings_a,
+        embeddings_b,
+        config,
+        encode_fn=encode_fn,
+    )
+    return AlignmentResult(
+        all_ops=list(legacy.all_ops),
+        stats=dict(legacy.stats),
+        status="aligned",
+        algorithm=LEGACY_ALGORITHM,
+    )
+
+
+def default_report_path(document_a_path: str | Path) -> Path:
+    path = Path(document_a_path)
+    stem = path.stem.removesuffix(".source").removesuffix(".target")
+    return path.parent / f"{stem}.report.json"
+
+
+def _review_flags_from_alignment(operations: list, alignment: dict) -> list:
+    from dualign.services.repair import review_flags_for_uncertain_regions
+
+    regions = []
+    for item in alignment.get("uncertain_regions", []):
+        try:
+            regions.append(
+                (
+                    (
+                        int(item["start"]["source"]),
+                        int(item["start"]["target"]),
+                    ),
+                    (
+                        int(item["end"]["source"]),
+                        int(item["end"]["target"]),
+                    ),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    alternative_operations = []
+    for item in alignment.get("alternative_ops", []):
+        try:
+            alternative_operations.append(
+                (
+                    tuple(int(index) for index in item["s"]),
+                    tuple(int(index) for index in item["t"]),
+                    float(item.get("sc", 0.0)),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return review_flags_for_uncertain_regions(
+        operations,
+        regions,
+        alternative_operations=alternative_operations,
+    )
+
+
+def _provenance(model, config, calibration_id: str = "") -> dict:
+    import hashlib
+    import json
+
+    from dualign import __version__
+
+    algorithm_name = _algorithm_name(config)
+    if not calibration_id and algorithm_name == ALGORITHM_MDL_V1:
+        resolved = resolve_alignment_calibration(
+            model, calibration_id=config.calibration_id
+        )
+        calibration_id = resolved.calibration_id if resolved is not None else ""
+    if algorithm_name == LEGACY_ALGORITHM:
+        from dualign.core.legacy_anchor_aligner import (
+            ALIGN_CACHE_REVISION,
+            ALIGN_CORE_VERSION,
+        )
+
+    else:
+        from dualign.core import ALIGN_CACHE_REVISION, ALIGN_CORE_VERSION
+
+    provider = ""
+    endpoint = ""
+    model_name = getattr(model, "_model", "") if model is not None else ""
+    instruction = getattr(model, "_instruction", "") if model is not None else ""
+    try:
+        from dualign.providers import ProviderManager
+
+        ProviderManager.load()
+        active = ProviderManager.active()
+        if active is not None:
+            provider = active.provider_id
+            endpoint = str(active.base_url).rstrip("/")
+            model_name = model_name or active.model_name
+            instruction = instruction or active.instruction_text
+            if not instruction and active.provider_id == "ollama":
+                from dualign.config import INSTRUCTION_TEXT
+
+                instruction = INSTRUCTION_TEXT
+    except (OSError, ValueError):
+        pass
+    config_values = {**vars(config), "resolved_calibration_id": calibration_id}
+    config_payload = json.dumps(config_values, sort_keys=True, separators=(",", ":"))
+    result = {
+        "tool": "dualign",
+        "tool_version": __version__,
+        "algorithm": {
+            "name": algorithm_name,
+            "revision": ALIGN_CORE_VERSION,
+            "cache_revision": ALIGN_CACHE_REVISION,
+            "configuration_sha256": hashlib.sha256(
+                config_payload.encode("utf-8")
+            ).hexdigest(),
+        },
+        "embedding": {"provider": provider, "model": str(model_name)},
+    }
+    if endpoint:
+        result["embedding"]["endpoint"] = endpoint
+    if instruction:
+        result["embedding"]["instruction_sha256"] = hashlib.sha256(
+            instruction.encode("utf-8")
+        ).hexdigest()
+    if calibration_id:
+        result["algorithm"]["calibration_id"] = calibration_id
+    return result
+
+
+def _empty_result(source_count: int, target_count: int, config) -> AlignmentResult:
+    if _algorithm_name(config) != LEGACY_ALGORITHM:
+        return AlignmentResult(
+            all_ops=[],
+            stats={"n_source": source_count, "n_target": target_count, "n_ops": 0},
+            status="rejected",
+            reason="empty_document",
+            algorithm=ALGORITHM_MDL_V1,
+        )
+    operations = []
+    if source_count and not target_count:
+        operations = [((index,), (), 0.0) for index in range(source_count)]
+    elif target_count and not source_count:
+        operations = [((), (index,), 0.0) for index in range(target_count)]
+    return AlignmentResult(
+        all_ops=operations,
+        stats={
+            "n_source": source_count,
+            "n_target": target_count,
+            "n_ops": len(operations),
+            "n_true_anchors": 0,
+            "anchor_density": 0.0,
+            "avg_similarity": 0.0,
+        },
+        algorithm=LEGACY_ALGORITHM,
+    )
+
+
+def _quality_diagnostics(result, source_count: int, target_count: int) -> dict:
+    """Keep anomaly diagnostics separate from the mdl applicability decision."""
+
+    if result.algorithm != LEGACY_ALGORITHM:
+        return {
+            "level": "diagnostic_only",
+            "rejections": [],
+            "indicators": {"alignment_status": result.status},
+        }
+    from dualign.core.legacy_anchor_quality import (
+        _gap_row_ratio,
+        assess_alignment_quality,
+    )
+
+    assessment = assess_alignment_quality(
+        result.stats or {},
+        source_count,
+        target_count,
+        _gap_row_ratio(result.all_ops, source_count, target_count),
+        (result.stats or {}).get("n_overflow_rows", 0),
+    )
+    return {
+        "level": assessment["quality"],
+        "rejections": assessment.get("rejections", []),
+        "indicators": assessment["indicators"],
+    }
+
+
+def _repair_mode(strategy: str, model, quality: dict) -> tuple[str, object]:
+    """Apply frozen structural blockers only to explicit legacy results."""
+
+    if quality.get("level") != "diagnostic_only":
+        from dualign.core.legacy_anchor_quality import automatic_repair_blockers
+
+        if automatic_repair_blockers(quality):
+            return "minimal", None
+    return strategy, model
+
+
+def _auto_repair_state(
+    state,
+    strategy: str,
+    model,
+    quality: dict,
+    *,
+    unresolved_only: bool = False,
+):
+    """Apply the selected policy and cache embeddings required by split repair."""
+
+    from dualign.services.repair import RepairService
+    from dualign.services.repair_policy import choose_auto_repair
+
+    repair_strategy, repair_model = _repair_mode(strategy, model, quality)
+    kwargs = {
+        "strategy": repair_strategy,
+        "model": repair_model,
+        "unresolved_only": unresolved_only,
+    }
+    needs_embeddings = repair_model is not None and any(
+        (plan := choose_auto_repair(len(source), len(target), repair_strategy))
+        is not None
+        and plan.requires_model
+        for source, target, _score in state.snapshot.original_ops
+    )
+    if not needs_embeddings:
+        return RepairService.auto_repair(state, **kwargs)
+
+    with EmbeddingCache(get_embedding_cache_path()) as cache:
+        return RepairService.auto_repair(state, cache=cache, **kwargs)
+
+
+def align_documents(
+    document_a_path: str,
+    document_b_path: str,
+    report_path: str = "",
+    *,
     model=None,
     config=None,
-    strategy: str = "src",
-    output_dir: str = "",
+    strategy: str = "minimal",
+    reset_work_state: bool = False,
+    reuse_alignment: bool = True,
+    preserve_work_state: bool = False,
 ) -> dict:
-    """对齐单个章节。编码 → 对齐 → 自动修复 → 导出 repaired 文件 + report.json。
+    """Align two documents and persist only their replayable work report.
 
-    repaired_dir 为空时使用默认报告缓存目录（get_report_cache_dir()）。
-    output_dir 控制修复后 .md 的输出位置：
-      - 非空时 .md 写到 output_dir
-      - 空时写到 repaired_dir（兼容旧行为）
-
-    Args:
-        strategy: 自动修复策略 ("src" / "tgt" / "minimal")
+    ``reuse_alignment`` controls whether a matching report may supply its
+    expensive alignment relations. ``reset_work_state`` rebuilds the report;
+    with ``preserve_work_state`` it retains existing review decisions and only
+    auto-repairs unresolved relations, otherwise it starts from clean state.
     """
-    if not repaired_dir:
-        repaired_dir = get_report_cache_dir()
-    if not output_dir:
-        output_dir = repaired_dir
 
-    sl = load_text_lines(src_path)
-    tl = load_text_lines(tgt_path)
-
-    entry_id = Path(src_path).stem.split(".")[0]
+    path_a = Path(document_a_path)
+    path_b = Path(document_b_path)
+    if not path_a.is_file():
+        return {"success": False, "error": f"文档 A 不存在: {path_a}"}
+    if not path_b.is_file():
+        return {"success": False, "error": f"文档 B 不存在: {path_b}"}
+    target = Path(report_path) if report_path else default_report_path(path_a)
     cfg = config or AlignConfig()
-    cache_dir = get_embedding_cache_dir(entry_id)
+    lines_a = load_text_lines(str(path_a))
+    lines_b = load_text_lines(str(path_b))
 
-    # ── 空文本 ──
-    if not sl or not tl:
-        return _handle_empty(sl, tl, entry_id, repaired_dir)
-
-    # ── 尝试嵌入缓存（SQLite 行级）──
-    db_path = os.path.join(cache_dir, "vecs.db")
-    ec = EmbeddingCache(db_path)
-    try:
-        return _align_with_cache(
-            ec,
-            sl,
-            tl,
-            cfg,
-            src_path,
-            repaired_dir,
-            output_dir,
-            model,
-            strategy,
+    encoder = model
+    if lines_a and lines_b:
+        encoder = _ensure_model(model)
+        if encoder is None:
+            return {"success": False, "error": "模型未加载"}
+    resolved = None
+    if _algorithm_name(cfg) == ALGORITHM_MDL_V1:
+        resolved = resolve_alignment_calibration(
+            encoder, calibration_id=cfg.calibration_id
         )
-    finally:
-        # 释放 SQLite 连接（Windows 上不关闭会锁定 vecs.db，句柄泄漏）
-        ec.close()
+    calibration_id = resolved.calibration_id if resolved is not None else ""
+    provenance = _provenance(encoder, cfg, calibration_id)
 
+    if reuse_alignment and target.is_file():
+        try:
+            cached = load_report(target)
+            if report_matches_alignment(cached, path_a, path_b, provenance):
+                cached_operations = operations_from_report(cached)
+                cached_relation_ids = relation_ids_from_report(cached)
+                cached_alignment = dict(cached.get("alignment") or {})
+                if reset_work_state:
+                    from dualign.models.action import RepairAction
+                    from dualign.models.state import AlignmentSnapshot
+                    from dualign.services.repair import RepairState
 
-def _align_with_cache(
-    ec, sl, tl, cfg, src_path, repaired_dir, output_dir, model, strategy
-):
-    """align_chapter 主体（嵌入缓存 ec 由调用方负责关闭）。"""
-    model = _ensure_model(model)
-    if model is None:
-        return {"success": False, "error": "模型未加载"}
+                    existing_actions = (
+                        [
+                            RepairAction.from_dict(item)
+                            for item in cached.get("repair_log", [])
+                        ]
+                        if preserve_work_state
+                        else []
+                    )
+                    quality = dict(cached.get("quality") or {})
+                    repair_log = []
+                    if cached_alignment.get("status", "aligned") == "aligned":
+                        state = RepairState(
+                            AlignmentSnapshot.from_alignment(
+                                cached_operations,
+                                lines_a,
+                                lines_b,
+                                cached_relation_ids,
+                            ),
+                            existing_actions,
+                        )
+                        repair_log = _auto_repair_state(
+                            state,
+                            strategy,
+                            encoder,
+                            quality,
+                            unresolved_only=preserve_work_state,
+                        ).repair_log
+                    elif cached_alignment.get("status") == "needs_review":
+                        repair_log = (
+                            existing_actions
+                            if preserve_work_state
+                            else _review_flags_from_alignment(
+                                cached_operations, cached_alignment
+                            )
+                        )
+                    report = build_report(
+                        chapter_id=path_a.stem.split(".")[0],
+                        document_a_path=path_a,
+                        document_b_path=path_b,
+                        operations=cached_operations,
+                        relation_ids=cached_relation_ids,
+                        stats=dict(cached.get("stats") or {}),
+                        quality=quality,
+                        provenance=provenance,
+                        alignment=cached_alignment,
+                        repair_log=repair_log,
+                        previous=cached if preserve_work_state else None,
+                    )
+                    save_report(report, target)
+                    return {
+                        "success": True,
+                        "ops": cached_operations,
+                        "report_path": str(target),
+                        "quality": quality.get("level", ""),
+                        "rejections": quality.get("rejections", []),
+                        "status": cached_alignment.get("status", "aligned"),
+                        "reason": cached_alignment.get("reason"),
+                        "cache_hit": True,
+                        "work_state_reset": True,
+                        "work_state_preserved": preserve_work_state,
+                    }
+                return {
+                    "success": True,
+                    "ops": cached_operations,
+                    "report_path": str(target),
+                    "quality": (cached.get("quality") or {}).get("level", ""),
+                    "rejections": (cached.get("quality") or {}).get("rejections", []),
+                    "status": cached_alignment.get("status", "aligned"),
+                    "reason": cached_alignment.get("reason"),
+                    "cache_hit": True,
+                }
+        except ReportError:
+            pass
 
-    # ── CachedEncoder: 统一缓存代理 ──
-    cenc = CachedEncoder(model, ec)
-    src_emb = cenc.encode(sl)
-    tgt_emb = cenc.encode(tl)
+    if lines_a and lines_b:
+        with EmbeddingCache(get_embedding_cache_path()) as cache:
+            cached_encoder = CachedEncoder(encoder, cache)
+            result = _run_alignment(
+                lines_a,
+                lines_b,
+                cached_encoder.encode(lines_a),
+                cached_encoder.encode(lines_b),
+                cfg,
+                cached_encoder.encode,
+                resolved.calibration if resolved is not None else None,
+            )
+    else:
+        result = _empty_result(len(lines_a), len(lines_b), cfg)
 
-    src_hash = content_hash(sl)
-    tgt_hash = content_hash(tl)
+    quality = _quality_diagnostics(result, len(lines_a), len(lines_b))
+    alignment = alignment_payload(result, calibration_id=calibration_id)
+    repair_log = []
+    if result.status == "aligned" and result.all_ops:
+        from dualign.models.state import AlignmentSnapshot
+        from dualign.services.repair import RepairState
 
-    # ── 尝试从 report.json 恢复对齐结果 ──
-    result = _try_load_cached_result(
-        Path(src_path).stem.split(".")[0], repaired_dir, src_hash, tgt_hash
-    )
+        state = RepairState(
+            AlignmentSnapshot.from_alignment(result.all_ops, lines_a, lines_b)
+        )
+        repair_log = _auto_repair_state(state, strategy, encoder, quality).repair_log
+    elif result.status == "needs_review" and result.all_ops:
+        from dualign.services.repair import review_flags_for_uncertain_regions
 
-    if result is None:
-        result = align(
-            sl,
-            tl,
-            src_emb,
-            tgt_emb,
-            cfg,
-            encode_fn=cenc.encode,
+        repair_log = review_flags_for_uncertain_regions(
+            result.all_ops,
+            result.uncertain_regions,
+            alternative_operations=result.alternative_ops,
         )
 
-    # ── 质量评估 + 自动修复 + 报告导出 ──
-    return _build_report(
-        result,
-        sl,
-        tl,
-        src_hash,
-        tgt_hash,
-        Path(src_path).stem.split(".")[0],
-        repaired_dir,
-        model,
-        strategy,
-        cfg,
-        output_dir=output_dir,
+    previous = None
+    if reuse_alignment and target.is_file() and not reset_work_state:
+        try:
+            candidate = load_report(target)
+            if report_matches_alignment(candidate, path_a, path_b, provenance):
+                previous = candidate
+        except ReportError:
+            pass
+    report = build_report(
+        chapter_id=path_a.stem.split(".")[0],
+        document_a_path=path_a,
+        document_b_path=path_b,
+        operations=result.all_ops,
+        stats=result.stats or {},
+        quality=quality,
+        provenance=provenance,
+        alignment=alignment,
+        repair_log=repair_log,
+        previous=previous,
     )
-
-
-# ═══════════════════════════════════════════════════════════════
-# 内部辅助
-# ═══════════════════════════════════════════════════════════════
+    save_report(report, target)
+    return {
+        "success": True,
+        "ops": result.all_ops,
+        "report_path": str(target),
+        "quality": quality["level"],
+        "rejections": quality["rejections"],
+        "status": result.status,
+        "reason": result.reason or None,
+        "cache_hit": False,
+        "work_state_reset": reset_work_state,
+    }
 
 
 def _ensure_model(model):
-    """确保模型已加载。"""
     if model is not None:
         return model
     from dualign.services.embedding import _try_lazy_load_model, load_model_for_provider
@@ -150,218 +495,3 @@ def _ensure_model(model):
         except Exception:
             return None
     return model
-
-
-def _handle_empty(sl, tl, entry_id: str, repaired_dir: str):
-    """处理空文本对。"""
-    from dualign.services.quality_gate import (
-        QUALITY_UNRELIABLE,
-        REJECTION_LOW_ANCHOR_DENSITY,
-    )
-
-    indicators = {
-        "anchor_density": 0.0,
-        "gap_row_ratio": 0.0,
-        "n_overflow_rows": 0,
-        "n_src": len(sl),
-        "n_tgt": len(tl),
-    }
-    empty_report = {
-        "chapter_id": entry_id,
-        "created_at": "",
-        "src_hash": content_hash(sl),
-        "tgt_hash": content_hash(tl),
-        "quality": {
-            "level": QUALITY_UNRELIABLE,
-            "rejections": [REJECTION_LOW_ANCHOR_DENSITY],
-            "indicators": indicators,
-        },
-        "ops": [],
-        "stats": {"n_true_anchors": 0, "avg_similarity": 0.0},
-        "repair_log": [],
-    }
-    os.makedirs(repaired_dir, exist_ok=True)
-    from dualign.common import save_report
-
-    save_report(empty_report, str(Path(repaired_dir) / f"{entry_id}.report.json"))
-    return {
-        "success": True,
-        "ops": [],
-        "report_path": str(Path(repaired_dir) / f"{entry_id}.report.json"),
-        "quality": QUALITY_UNRELIABLE,
-        "rejections": [REJECTION_LOW_ANCHOR_DENSITY],
-    }
-
-
-def _try_load_cached_result(entry_id, repaired_dir, src_hash, tgt_hash):
-    """尝试从 report.json 恢复对齐结果。stats 为空时视为缓存未命中。"""
-    report_path = Path(repaired_dir) / f"{entry_id}.report.json"
-    if not report_path.is_file():
-        return None
-    try:
-        with open(report_path, encoding="utf-8") as f:
-            r = json.load(f)
-        saved_src = r.get("src_hash", "")
-        saved_tgt = r.get("tgt_hash", "")
-        if saved_src != src_hash or saved_tgt != tgt_hash:
-            return None
-        ops_raw = r.get("ops", [])
-        if not ops_raw:
-            return None
-        stats = r.get("stats", {})
-        if not stats:
-            return None  # 旧格式无 stats，强制重新对齐
-        return AlignmentResult(
-            all_ops=[
-                (
-                    tuple(o["s"]),
-                    tuple(o["t"]),
-                    float(o["sc"]),
-                )
-                for o in ops_raw
-            ],
-            anchors=[],
-            anchor_op_indices={},
-            stats=stats,
-        )
-    except Exception:
-        return None
-
-
-def _build_report(
-    result,
-    sl,
-    tl,
-    src_hash,
-    tgt_hash,
-    entry_id,
-    repaired_dir,
-    model,
-    strategy,
-    config,
-    output_dir: str = "",
-):
-    """质量评估 → 自动修复 → 报告导出。"""
-    if not output_dir:
-        output_dir = repaired_dir
-
-    from dualign.services.quality_gate import (
-        QUALITY_UNRELIABLE,
-        assess_alignment_quality,
-        _gap_row_ratio,
-    )
-    from dualign.common import save_report
-    from dualign.services.repair import RepairState, RepairService
-    from dualign.models.state import AlignmentSnapshot
-    from dualign.common import format_markdown_output
-
-    n_src = len(sl)
-    n_tgt = len(tl)
-    report_path = Path(repaired_dir) / f"{entry_id}.report.json"
-
-    # ── stats: 优先 result.stats，为空或缺失 n_true_anchors 时从 ops 推导 ──
-    stats = result.stats if result.stats else {}
-    if not stats.get("n_true_anchors"):
-        # 从 ops 重新计算统计（缓存命中时 stats 可能为空或为旧格式）
-        # 统计参与锚点的去重行数
-        anchors_raw = getattr(result, "anchors", []) or []
-        # anchors 元素形如 ((s_tuple), (t_tuple), score)，直接解包 s/t 即可
-        src_anchor_lines = {s for s, t, _ in anchors_raw if len(s) == 1 and len(t) == 1}
-        tgt_anchor_lines = {t for s, t, _ in anchors_raw if len(s) == 1 and len(t) == 1}
-        n_anchor_lines = len(src_anchor_lines) + len(tgt_anchor_lines)
-        from dualign.core.aligner import _build_stats
-
-        stats = _build_stats(
-            n_src,
-            n_tgt,
-            result.all_ops,
-            n_restricted_ops=len(result.all_ops),
-            n_anchors=n_anchor_lines,
-            elapsed=0,
-            t_sim=0,
-            t_info=0,
-            t_anchor=0,
-            t_dp=0,
-        )
-
-    gap_ratio = _gap_row_ratio(result.all_ops, n_src, n_tgt)
-    n_overflow = result.stats.get("n_overflow_rows", 0) if result.stats else 0
-
-    assessment = assess_alignment_quality(
-        stats,
-        n_src,
-        n_tgt,
-        gap_row_ratio=gap_ratio,
-        n_overflow_rows=n_overflow,
-    )
-    quality = assessment["quality"]
-    rejections = assessment.get("rejections", [])
-    indicators = assessment["indicators"]
-
-    # ── 公共 report 结构 ──
-    import time as _time
-
-    def _make_report(repair_log_actions=None):
-        return {
-            "chapter_id": entry_id,
-            "created_at": _time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "src_hash": src_hash,
-            "tgt_hash": tgt_hash,
-            "quality": {
-                "quality": quality,
-                "rejections": rejections,
-                "indicators": indicators,
-            },
-            "ops": [
-                {"s": list(s), "t": list(t), "sc": round(float(sc), 4)}
-                for s, t, sc in result.all_ops
-            ],
-            "stats": stats,
-            "repair_log": (
-                [a.to_dict() for a in repair_log_actions]
-                if repair_log_actions is not None
-                else []
-            ),
-        }
-
-    if quality == QUALITY_UNRELIABLE:
-        report_data = _make_report(repair_log_actions=[])
-        save_report(report_data, str(report_path))
-        return {
-            "success": True,
-            "ops": result.all_ops,
-            "report_path": str(report_path),
-            "src_path": "",
-            "tgt_path": "",
-            "quality": quality,
-            "rejections": rejections,
-        }
-
-    # ── 自动修复 ──
-    snapshot = AlignmentSnapshot.from_alignment(result.all_ops, sl, tl)
-    state = RepairState(snapshot)
-    repaired = RepairService.auto_repair(state, strategy=strategy, model=model)
-
-    src_out, tgt_out = RepairService.render_rows(repaired)
-    os.makedirs(output_dir, exist_ok=True)
-
-    spath = Path(output_dir) / f"{entry_id}.source.md"
-    tpath = Path(output_dir) / f"{entry_id}.target.md"
-
-    with open(spath, "w", encoding="utf-8") as f:
-        f.write(format_markdown_output(src_out))
-    with open(tpath, "w", encoding="utf-8") as f:
-        f.write(format_markdown_output(tgt_out))
-
-    report_data = _make_report(repair_log_actions=repaired.repair_log)
-    save_report(report_data, str(report_path))
-
-    return {
-        "success": True,
-        "ops": result.all_ops,
-        "report_path": str(report_path),
-        "src_path": str(spath),
-        "tgt_path": str(tpath),
-        "quality": quality,
-        "rejections": rejections,
-    }

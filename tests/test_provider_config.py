@@ -142,6 +142,7 @@ class TestAiRepairAgentConfig:
         restored = AiRepairAgentConfig.from_dict(cfg.to_dict())
         assert restored.agent_id == cfg.agent_id
         assert restored.temperature == 0.5
+        assert restored.request_timeout == 240.0
         assert restored.is_active is False
 
     def test_from_dict_missing_fields(self):

@@ -1,12 +1,8 @@
-"""
-Dualign — 对话框组件
-
-ConfigDialog, BlockEditDialog, FileListPanel, ChapterTree (deprecated alias)
-"""
+"""Dualign editing, configuration, and solidification dialogs."""
 
 from __future__ import annotations
 
-from typing import List, Optional, Any
+from typing import List, Optional
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QEvent, QRect, QSize, Signal
@@ -24,56 +20,16 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QWidget,
     QDoubleSpinBox,
-    QTreeWidget,
-    QTreeWidgetItem,
     QListWidget,
-    QListWidgetItem,
     QFormLayout,
     QLineEdit,
     QComboBox,
+    QTabWidget,
 )
 
 _DEFAULT_EMBEDDING_INSTRUCTION = (
     "Instruct: Identify parallel sentences across languages\nQuery: "
 )
-
-# ═══════════════════════════════════════════════════════════════
-# ConfigDialog — 对齐参数设置
-# ═══════════════════════════════════════════════════════════════
-
-
-class ConfigDialog(QDialog):
-    """对齐参数设置对话框。"""
-
-    config_applied = Signal(object)  # 发出新的 AlignConfig
-
-    def __init__(self, current_config=None, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("对齐参数设置")
-        self.setMinimumWidth(300)
-        self._build_ui(current_config)
-
-    def _build_ui(self, config):
-        layout = QVBoxLayout(self)
-
-        form = QFormLayout()
-
-        layout.addLayout(form)
-
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        btns.accepted.connect(self._on_accept)
-        btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
-
-    def _on_accept(self):
-        from dualign.core import AlignConfig
-
-        cfg = AlignConfig()
-        self.config_applied.emit(cfg)
-        self.accept()
-
 
 # ═══════════════════════════════════════════════════════════════
 # AgentConfigDialog — 嵌入模型 + AI 修复 Agent 配置
@@ -502,9 +458,7 @@ class AgentConfigDialog(QDialog):
             self._ai_note_edit.setText(a.note)
 
     def _on_test_ai_agent(self):
-        """测试 AI Agent 连接。"""
-        import requests as _requests
-
+        """Test the same Responses tool-calling contract used by Agent runs."""
         url = self._ai_url_edit.text().strip().rstrip("/")
         model = self._ai_model_edit.text().strip()
         key = self._ai_key_edit.text().strip()
@@ -517,32 +471,44 @@ class AgentConfigDialog(QDialog):
             return
 
         try:
-            headers = {"Authorization": f"Bearer {key}"} if key else {}
-            # 使用简单的 chat completion 测试（所有 LLM API 都支持）
-            resp = _requests.post(
-                f"{url}/v1/chat/completions",
-                headers=headers,
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": "ping"}],
-                    "max_tokens": 5,
-                },
-                timeout=15,
+            from dualign.services.ai_repair_agent import DeepSeekNativeBackend
+
+            backend = DeepSeekNativeBackend(
+                temperature=0.0,
+                max_tokens=32,
+                model=model,
+                base_url=url,
+                api_key=key,
+                reasoning_effort="none",
+                request_timeout=15,
             )
-            if resp.status_code == 200:
-                data = resp.json()
-                model_used = data.get("model", model)
-                self._ai_status.setText(
-                    f"✅ 连接成功！模型: {model_used}<br>"
-                    f"💡 自动修复建议使用 <b>DeepSeek V4 Flash</b> 或同等能力模型"
-                )
+            response = backend.chat(
+                [
+                    {
+                        "role": "user",
+                        "content": "Call the ping tool exactly once; do not answer in text.",
+                    }
+                ],
+                thinking=False,
+                tools=[
+                    {
+                        "type": "function",
+                        "name": "ping",
+                        "description": "Connection test.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                    }
+                ],
+            )
+            if any(call.name == "ping" for call in response.tool_calls):
+                self._ai_status.setText(f"✅ Responses 工具调用可用！模型: {model}")
             else:
-                detail = resp.text[:200]
-                self._ai_status.setText(f"❌ API 返回 {resp.status_code}: {detail}")
-        except _requests.ConnectionError:
-            self._ai_status.setText(f"❌ 无法连接到 {url}")
-        except _requests.Timeout:
-            self._ai_status.setText(f"❌ 连接超时: {url}")
+                self._ai_status.setText(
+                    "⚠ 接口可响应，但未按要求产生工具调用；不宜用于 AI 审校"
+                )
         except Exception as e:
             self._ai_status.setText(f"❌ 检测失败: {e}")
 
@@ -745,8 +711,72 @@ class CodeEditor(QPlainTextEdit):
 
 
 # ═══════════════════════════════════════════════════════════════
-# BlockEditDialog — 手动校订
+# FlagEditDialog — 标记注释
 # ═══════════════════════════════════════════════════════════════
+
+
+class FlagEditDialog(QDialog):
+    """创建、编辑或删除人工标记。"""
+
+    def __init__(
+        self,
+        note: str = "",
+        parent=None,
+        *,
+        can_delete: bool = False,
+        selection_count: int = 1,
+    ):
+        super().__init__(parent)
+        self._delete_requested = False
+        self.setWindowTitle("编辑标记" if can_delete else "添加标记")
+        self.setMinimumWidth(460)
+
+        layout = QVBoxLayout(self)
+        target = (
+            f"将对 {selection_count} 个文本对设置同一条标记注释。"
+            if selection_count > 1
+            else "请记录该文本对需要后续处理的原因。"
+        )
+        layout.addWidget(QLabel(target))
+
+        self._note_edit = QPlainTextEdit(note)
+        self._note_edit.setPlaceholderText(
+            "例如：拆分需复核：拆分后的局部对齐无法唯一确定"
+        )
+        self._note_edit.setMinimumHeight(100)
+        layout.addWidget(self._note_edit)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存标记")
+        self._delete_button = QPushButton("删除标记")
+        self._delete_button.setEnabled(can_delete)
+        buttons.addButton(
+            self._delete_button, QDialogButtonBox.ButtonRole.DestructiveRole
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        self._delete_button.clicked.connect(self._delete_flag)
+        layout.addWidget(buttons)
+
+    @property
+    def note(self) -> str:
+        return self._note_edit.toPlainText().strip()
+
+    @property
+    def delete_requested(self) -> bool:
+        return self._delete_requested
+
+    def _delete_flag(self):
+        self._delete_requested = True
+        self.accept()
+
+
+# ═══════════════════════════════
+# BlockEditDialog — 手动校订
+# ═══════════════════════════════
 
 
 class BlockEditDialog(QDialog):
@@ -809,7 +839,7 @@ class BlockEditDialog(QDialog):
         edit_row = QHBoxLayout()
         edit_row.setSpacing(8)
 
-        src_group = QGroupBox("原文校订")
+        src_group = QGroupBox("文档 A 校订")
         src_layout = QVBoxLayout(src_group)
         src_layout.setContentsMargins(4, 4, 4, 4)
         self._src_edit = CodeEditor("\n".join(self._src_lines))
@@ -818,7 +848,7 @@ class BlockEditDialog(QDialog):
         src_layout.addWidget(self._src_edit)
         edit_row.addWidget(src_group)
 
-        tgt_group = QGroupBox("译文校订")
+        tgt_group = QGroupBox("文档 B 校订")
         tgt_layout = QVBoxLayout(tgt_group)
         tgt_layout.setContentsMargins(4, 4, 4, 4)
         self._tgt_edit = CodeEditor("\n".join(self._tgt_lines), partner=self._src_edit)
@@ -836,8 +866,8 @@ class BlockEditDialog(QDialog):
             init_row = QHBoxLayout()
             init_row.setSpacing(8)
             for title, lines in [
-                ("初始原文（只读）", self._init_src),
-                ("初始译文（只读）", self._init_tgt),
+                ("文档 A 初始内容（只读）", self._init_src),
+                ("文档 B 初始内容（只读）", self._init_tgt),
             ]:
                 g = QGroupBox(title)
                 gl = QVBoxLayout(g)
@@ -894,22 +924,18 @@ class BlockEditDialog(QDialog):
         ls, lt = len(sl), len(tl)
 
         row_match = ls == lt
-        if row_match:
-            status = "✓ 行数一致"
-            color = "#4CAF50"
-        else:
-            status = f"⚠ 行数不一致 (差 {abs(ls - lt)} 行)"
-            color = "#FF9800"
+        status = "✓ 1:1" if row_match else f"✓ {ls}:{lt} 多块关系"
+        color = "#4CAF50"
 
         self._stats_lbl.setText(
             f"<span style='color:{color};'>"
-            f"原文 {ls} 行 / 译文 {lt} 行 → {status}"
+            f"文档 A {ls} 行 / 文档 B {lt} 行 → {status}"
             f"</span>"
             f"  ({len(src_text)} 字符 / {len(tgt_text)} 字符)"
         )
 
-        # OK 按钮仅在行数一致且各侧均有内容时可用
-        ok_enabled = row_match and ls > 0 and lt > 0
+        # 双文档关系允许 N:M 以及一侧为空；仅禁止两侧同时为空。
+        ok_enabled = ls > 0 or lt > 0
         if self._ok_btn:
             self._ok_btn.setEnabled(ok_enabled)
 
@@ -924,146 +950,142 @@ class BlockEditDialog(QDialog):
         self.accept()
 
 
-# ═══════════════════════════════════════════════════════════════
-# FileListPanel — 文件列表（树状/平铺，无文件时显示提示）
-# ═══════════════════════════════════════════════════════════════
+class SolidifyPolicyDialog(QDialog):
+    """Shared solidification policy editor for Dualign and integrating apps."""
 
-
-class FileListPanel(QWidget):
-    """文件列表面板：包裹在"文件列表"组中，支持树状/平铺切换。"""
-
-    entry_selected = Signal(object)  # 发出 ChapterEntry
-
-    def __init__(self, parent=None):
+    def __init__(self, policy=None, parent=None):
         super().__init__(parent)
-        self._entries: List[Any] = []
-        self._mode: str = "single"  # "single" | "tree" | "list"
-        self._build_ui()
+        from dualign.services.solidify import (
+            DEFAULT_SOLIDIFY_TYPES,
+            SOLIDIFY_PRESETS,
+            SOLIDIFY_TYPE_LABELS,
+            SolidifyPolicy,
+        )
 
-    def _build_ui(self):
+        self.setWindowTitle("固化修改设置")
+        self.setMinimumWidth(420)
+        self._preset_values = [
+            ("自定义", ""),
+            ("仅校订文本", "edits"),
+            ("行级兼容（全部）", "line-aligned"),
+            ("仅文档 A", "document-a"),
+            ("仅文档 B", "document-b"),
+            ("全部关闭", "none"),
+        ]
+        self._checks = {}
+        current = policy or SolidifyPolicy(DEFAULT_SOLIDIFY_TYPES)
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        intro = QLabel(
+            "选中的修复会写入正文并从当前工作记录中移除；未选中的修复会重锚后继续保留。"
+            "双侧结构操作须同时启用 A/B 对应类型；审核标记不会丢失。"
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        preset_combo = QComboBox()
+        for label, name in self._preset_values:
+            preset_combo.addItem(label, name)
+        preset_combo.currentIndexChanged.connect(self._apply_preset)
+        layout.addWidget(preset_combo)
 
-        self._group = QGroupBox("文件列表")
-        gl = QVBoxLayout(self._group)
-        gl.setContentsMargins(4, 10, 4, 4)
-        gl.setSpacing(3)
+        for key, label in SOLIDIFY_TYPE_LABELS.items():
+            check = QCheckBox(label)
+            check.setChecked(key in current.enabled)
+            check.toggled.connect(self._mark_custom)
+            layout.addWidget(check)
+            self._checks[key] = check
 
-        # 视图模式切换 + 标题栏
-        top_row = QHBoxLayout()
-        top_row.setSpacing(4)
-        self._mode_combo = QComboBox()
-        self._mode_combo.addItems(["文档列表", "树状视图"])
-        self._mode_combo.setCurrentIndex(0)
-        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
-        top_row.addWidget(QLabel("模式:"))
-        top_row.addWidget(self._mode_combo, 1)
-        self._pos_lbl = QLabel("")
-        top_row.addWidget(self._pos_lbl)
-        gl.addLayout(top_row)
+        matching = next(
+            (
+                index
+                for index, (_label, name) in enumerate(self._preset_values)
+                if name and SOLIDIFY_PRESETS[name] == current.enabled
+            ),
+            0,
+        )
+        preset_combo.blockSignals(True)
+        preset_combo.setCurrentIndex(matching)
+        preset_combo.blockSignals(False)
+        self._preset_combo = preset_combo
 
-        # 树状视图
-        self._tree = QTreeWidget()
-        self._tree.setHeaderHidden(True)
-        self._tree.itemClicked.connect(self._on_item_clicked)
-        gl.addWidget(self._tree)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
-        # 列表视图
-        self._list = QListWidget()
-        self._list.itemClicked.connect(self._on_list_item_clicked)
-        gl.addWidget(self._list)
+    @property
+    def policy(self):
+        from dualign.services.solidify import SolidifyPolicy
 
-        # 单文件提示
-        self._single_lbl = QLabel("仅加载了单文档对，未传递文件列表。")
-        self._single_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._single_lbl.setWordWrap(True)
-        gl.addWidget(self._single_lbl)
+        return SolidifyPolicy(
+            frozenset(key for key, check in self._checks.items() if check.isChecked())
+        )
 
-        layout.addWidget(self._group)
+    def _apply_preset(self, index):
+        from dualign.services.solidify import SolidifyPolicy
 
-        # 初始状态：无条目时显示提示
-        self._refresh_view()
-
-    def _refresh_view(self):
-        """根据 _entries 和 _mode 显示对应视图。"""
-        has_entries = bool(self._entries)
-        is_tree = self._mode_combo.currentIndex() == 1
-
-        self._tree.setVisible(has_entries and is_tree)
-        self._list.setVisible(has_entries and not is_tree)
-        self._single_lbl.setVisible(not has_entries)
-
-        # 更新位置标签
-        self._pos_lbl.setVisible(has_entries)
-
-    def set_entries(self, entries: List[Any]):
-        """设置文件列表。空列表则进入单文件模式。"""
-        self._entries = entries
-        self._tree.clear()
-        self._list.clear()
-
-        for entry in entries:
-            label = getattr(entry, "label", str(entry))
-            # 树状
-            ti = QTreeWidgetItem([label])
-            ti.setData(0, Qt.ItemDataRole.UserRole, entry)
-            self._tree.addTopLevelItem(ti)
-            # 列表
-            li = QListWidgetItem(label)
-            li.setData(Qt.ItemDataRole.UserRole, entry)
-            self._list.addItem(li)
-
-        self._refresh_view()
-
-    def set_current(self, entry: Any):
-        """高亮当前条目。"""
-        self._tree.clearSelection()
-        self._list.clearSelection()
-
-        if entry is None or not self._entries:
-            self._pos_lbl.setText("")
+        name = self._preset_combo.itemData(index)
+        if not name:
             return
+        enabled = SolidifyPolicy.from_preset(name).enabled
+        for key, check in self._checks.items():
+            check.blockSignals(True)
+            check.setChecked(key in enabled)
+            check.blockSignals(False)
 
-        # 找索引
-        try:
-            idx = self._entries.index(entry)
-        except ValueError:
-            idx = -1
+    def _mark_custom(self, _checked):
+        self._preset_combo.blockSignals(True)
+        self._preset_combo.setCurrentIndex(0)
+        self._preset_combo.blockSignals(False)
 
-        if idx >= 0:
-            # 树状
-            for i in range(self._tree.topLevelItemCount()):
-                item = self._tree.topLevelItem(i)
-                if item is not None and item.data(0, Qt.ItemDataRole.UserRole) == entry:
-                    self._tree.setCurrentItem(item)
-                    break
-            # 列表
-            for i in range(self._list.count()):
-                item = self._list.item(i)
-                if item is not None and item.data(Qt.ItemDataRole.UserRole) == entry:
-                    self._list.setCurrentItem(item)
-                    break
-            # 位置标签
-            self._pos_lbl.setText(f"{idx + 1}/{len(self._entries)}")
 
-    def _on_mode_changed(self, idx: int):
-        """平铺/树状切换。"""
-        self._refresh_view()
-        # 当前选中条目在新视图中高亮
-        if self._entries and hasattr(self, "_current_entry"):
-            self.set_current(self._current_entry)
+class SolidifyReviewDialog(QDialog):
+    """Preview selected effects and the report operations that will remain."""
 
-    def _on_item_clicked(self, item: QTreeWidgetItem, col: int):
-        entry = item.data(0, Qt.ItemDataRole.UserRole)
-        if entry is not None:
-            self._current_entry = entry
-            self.entry_selected.emit(entry)
+    def __init__(self, plan, parent=None):
+        super().__init__(parent)
+        from dualign.services.solidify import SOLIDIFY_TYPE_LABELS
 
-    def _on_list_item_clicked(self, item: QListWidgetItem):
-        entry = item.data(Qt.ItemDataRole.UserRole)
-        if entry is not None:
-            self._current_entry = entry
-            self.entry_selected.emit(entry)
+        self.setWindowTitle("审查固化修改")
+        self.resize(980, 680)
+        layout = QVBoxLayout(self)
+        enabled = [
+            SOLIDIFY_TYPE_LABELS[key]
+            for key in SOLIDIFY_TYPE_LABELS
+            if key in plan.policy.enabled
+        ]
+        summary = (
+            f"固化范围：{'、'.join(enabled) or '无'}；"
+            f"写入 {len(plan.applied)} 条，保留 {len(plan.remaining_actions)} 条。"
+        )
+        label = QLabel(summary)
+        label.setWordWrap(True)
+        label.setStyleSheet("font-weight:600;color:#2E7D32;")
+        layout.addWidget(label)
+
+        tabs = QTabWidget()
+        for title, content in (
+            ("文档 A", plan.document_a_diff()),
+            ("文档 B", plan.document_b_diff()),
+        ):
+            editor = QPlainTextEdit(content or "（无变化）")
+            editor.setReadOnly(True)
+            editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            tabs.addTab(editor, title)
+        layout.addWidget(tabs, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        apply_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        apply_button.setText("固化所选修改")
+        apply_button.setEnabled(plan.has_changes)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1140,7 +1162,7 @@ class AboutDialog(QDialog):
         detail = QLabel(
             "<h3>关于 Dualign Studio</h3>"
             "<p>Dualign Studio 是一款面向翻译工作者的双语对齐校验桌面工具，"
-            "专注于将原文与译文精确对齐到行级别。它自动识别并修复结构性错位"
+            "专注于建立两个平行文档之间的块级对应关系。它自动识别结构性错位"
             "（如合并、拆分、遗漏），同时接入大语言模型提供语义层面的审校建议，"
             "显著降低人工校对成本。</p>"
             "<hr>"

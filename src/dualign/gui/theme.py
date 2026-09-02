@@ -262,20 +262,6 @@ class ThemeManager(QObject):
     def is_dark(self) -> bool:
         return self._data.name == "dark"
 
-    @property
-    def is_light(self) -> bool:
-        return not self.is_dark
-
-    # ── 切换 ──
-
-    def set_dark(self) -> None:
-        self._data = DARK
-        self.theme_changed.emit("dark")
-
-    def set_light(self) -> None:
-        self._data = LIGHT
-        self.theme_changed.emit("light")
-
     def apply_to_app(self, app) -> None:
         """设置调色板并跟随系统切换。"""
         hints = app.styleHints()
@@ -310,20 +296,6 @@ class ThemeManager(QObject):
 
 T = ThemeManager()
 
-# 兼容旧式直接导入：from dualign.gui.theme import FG_PRIMARY
-# 注意：导入时会拷贝值，不会随主题切换更新。
-# 新代码请使用: from dualign.gui.theme import T  →  T.FG_PRIMARY
-FG_PRIMARY = T.FG_PRIMARY
-FG_SECONDARY = T.FG_SECONDARY
-FG_MUTED = T.FG_MUTED
-FG_ACCENT = T.FG_ACCENT
-GREEN = T.GREEN
-RED = T.RED
-ORANGE = T.ORANGE
-YELLOW = T.YELLOW
-BLUE = T.BLUE
-ACCENT = T.ACCENT
-
 
 # ═══════════════════════════════════════════════════════════════
 # 禁用色工具 — 获取 Fusion 主题的禁用控件文字色
@@ -351,19 +323,3 @@ def disabled_fg() -> str:
             .name()
         )
     return _DISABLED_FG
-
-
-BG_DARK = T.BG_DARK
-BG_PANEL = T.BG_PANEL
-BG_INPUT = T.BG_INPUT
-BG_HOVER = T.BG_HOVER
-BG_ACTIVE = T.BG_ACTIVE
-BORDER_DIM = T.BORDER_DIM
-BORDER_MUTED = T.BORDER_MUTED
-BORDER_HOVER = T.BORDER_HOVER
-BORDER_FOCUS = T.BORDER_FOCUS
-
-# 欢迎页专用（旧代码也可能直接导入）
-WELCOME_TITLE = T.WELCOME_TITLE
-WELCOME_SUBTITLE = T.WELCOME_SUBTITLE
-WELCOME_VERSION = T.WELCOME_VERSION
