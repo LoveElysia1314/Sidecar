@@ -15,32 +15,12 @@ from typing import List, Optional, Tuple
 from dualign.models.state import AlignmentSnapshot, MISSING
 from dualign.models.action import RepairAction
 from dualign.models.marker import is_merge
+from dualign.models.source import (
+    SOURCE_AUTO,
+    SOURCE_NONE,
+    SOURCE_USER,
+)
 from dualign.core import detect_language_mix
-
-# ── approval 四态管线 ──
-# none → proposed → agent → user（递进，flag 不推进管线）
-#
-# 持久化值仍保留为 "auto"，以兼容旧 report 和筛选设置；它的审批
-# 语义是“机器已提出拟修复，尚未审核”，不是“已自动批准”。
-APPROVAL_NONE = "none"
-APPROVAL_PROPOSED = "auto"
-APPROVAL_AGENT = "agent"
-APPROVAL_USER = "user"
-
-ALL_APPROVAL_STATES = [
-    APPROVAL_NONE,
-    APPROVAL_PROPOSED,
-    APPROVAL_AGENT,
-    APPROVAL_USER,
-]
-
-APPROVAL_LABELS = {
-    APPROVAL_NONE: "未处理",
-    APPROVAL_PROPOSED: "拟修复",
-    APPROVAL_AGENT: "AI 审校",
-    APPROVAL_USER: "用户审校",
-}
-
 
 # ═══════════════════════════════════════════════════════════════
 # build_context_windows — 构建上下文窗口（集中化入口）
@@ -126,8 +106,9 @@ class RelationStatus:
     has_language_mix: bool = False  # 当前译文含中文（Layer 2 可变, 随编辑重新检测）
     is_deleted: bool = False  # 已被删除
 
-    # ── Layer 3: 处理历史 ──
-    approval: str = APPROVAL_NONE
+    # ── Layer 3: 当前结果来源与处理历史 ──
+    effective_source: str = SOURCE_NONE
+    is_user_approved: bool = False
     repair_count: int = 0
     last_operation: str = ""  # merge / split / edit / delete / ok / flag
     is_flagged: bool = False  # 用户手动标记需关注（异常类型 FLAGGED 的持久化状态）
@@ -158,13 +139,16 @@ class RelationStatus:
         NON_1TO1 基于两侧行数是否平衡（编辑/拆分产生 n:n 平衡结构时消失）。
         MIX 基于当前文本重新检测。
         FLAGGED 是用户动作。
-        LOW_SCORE 是原始评分属性，不出现在此。
+        LOW_SCORE 是当前基线关系的评分诊断；文本编辑不会凭空产生新的
+        可比对齐分布，因此它保持到重新对齐建立新基线为止。
         """
         labels = []
         if self.n_src != self.n_tgt:
             labels.append("NON_1TO1")
         if self.has_language_mix:
             labels.append("MIX")
+        if self.is_low_score:
+            labels.append("LOW_SCORE")
         if self.is_flagged:
             labels.append("FLAGGED")
         return labels
@@ -172,7 +156,7 @@ class RelationStatus:
     @property
     def is_reviewable(self) -> bool:
         """用户已审校或已删除 → 不再需审校。GUI 和 AI 共用。"""
-        if self.approval == APPROVAL_USER:
+        if self.is_user_approved:
             return False
         if self.is_deleted:
             return False
@@ -182,9 +166,9 @@ class RelationStatus:
     def is_manual_review_subject(self) -> bool:
         """Whether this relation belongs to the human-review workload.
 
-        Initial anomalies remain relevant after an automatic or agent repair has
+        Initial anomalies remain relevant after an automatic or AI repair has
         made the current shape look regular.  Conversely, an ordinary untouched
-        1:1 relation is not review work merely because its approval is ``none``.
+        1:1 relation is not review work merely because its source is ``none``.
         Deleted relations have no remaining relation to approve.
         """
 
@@ -193,7 +177,7 @@ class RelationStatus:
         return bool(
             self.initial_anomaly_types
             or self.current_anomaly_types
-            or self.approval != APPROVAL_NONE
+            or self.effective_source != SOURCE_NONE
             or self.repair_count
         )
 
@@ -201,13 +185,13 @@ class RelationStatus:
     def requires_manual_review(self) -> bool:
         """Whether a user decision is still required for this relation."""
 
-        return self.is_manual_review_subject and self.approval != APPROVAL_USER
+        return self.is_manual_review_subject and not self.is_user_approved
 
     @property
     def signals(self) -> List[str]:
         """自然语言状态信号（供 AI 和 GUI 展示）。"""
         signals = []
-        if self.approval == APPROVAL_PROPOSED:
+        if self.effective_source == SOURCE_AUTO:
             signals.append("存在拟修复方案")
         if self.has_missing:
             signals.append("缺失待补")
@@ -246,7 +230,8 @@ class RelationReviewInfo:
     has_missing: bool = False
     has_language_mix: bool = False
     is_low_score: bool = False
-    approval: str = ""
+    effective_source: str = SOURCE_NONE
+    is_user_approved: bool = False
     proposal_kind: str = ""
 
     @property
@@ -263,7 +248,7 @@ class RelationReviewInfo:
     @property
     def is_reviewable(self) -> bool:
         """基于当前审批与原始/当前异常判断是否需要审阅。"""
-        if self.approval == APPROVAL_USER:
+        if self.is_user_approved:
             return False
         if self.initial_n_src == 0 and self.initial_n_tgt == 0:
             return False
@@ -287,13 +272,13 @@ class RelationReviewInfo:
         initial_src/initial_tgt 始终展示（当存在时），使 AI 在 edit 决策时
         能直接参考初始文本——edit 操作的是初始文本，不是当前文本。
         """
-        d = {"id": self.ordinal}
+        d = {"id": self.ordinal, "source": self.effective_source}
         sigs = self.signals
         if sigs:
             d["signals"] = sigs
         # 始终标注初始类型，AI 零推理成本获知初始行数关系
         d["orig"] = f"{self.initial_n_src}:{self.initial_n_tgt}"
-        if self.approval == APPROVAL_PROPOSED:
+        if self.effective_source == SOURCE_AUTO:
             # 显式告诉 Agent 它正在审批什么，避免将 ok 理解为空泛的“语义正确”。
             d["proposal"] = self.proposal_kind or "pending"
         if self.src_text:
@@ -327,7 +312,8 @@ class RelationAnomaly:
     marker: str = ""
     resolution: str = ""
     note: str = ""
-    approval: str = APPROVAL_NONE
+    effective_source: str = SOURCE_NONE
+    is_user_approved: bool = False
     signals: tuple[str, ...] = ()
     anomaly_types: tuple[str, ...] = ()
 
@@ -372,28 +358,11 @@ def _calc_low_score(scores: List[float], score: float, k: float = 3.0) -> bool:
     return is_statistical_low_score(score, scores, k=k)
 
 
-def _derive_approval(action: Optional[RepairAction]) -> str:
-    """从 RepairAction 推导四态管线 approval。
-
-    none → proposed → agent → user（递进）。
-    RepairAction.source="auto" 表示机器拟定的方案，并非审批完成。
-    flag 不推进管线：返回 NONE（调用方需向上游查找有效状态）。
-    """
+def derive_effective_source(action: Optional[RepairAction]) -> str:
+    """Project one normalized effective decision to none/auto/ai/user."""
     if action is None:
-        return APPROVAL_NONE
-    if action.kind == "flag":
-        return APPROVAL_NONE  # flag 不推进管线（无论来源）
-    s = action.source
-    if s == "auto":
-        return APPROVAL_PROPOSED
-    if s == "ai":
-        return APPROVAL_AGENT
-    if s == "user":
-        return APPROVAL_USER
-    # 兼容旧 source=""（视为 auto）
-    if not s:
-        return APPROVAL_PROPOSED
-    return APPROVAL_NONE
+        return SOURCE_NONE
+    return action.effective_source
 
 
 def _action_summary(
@@ -420,6 +389,7 @@ def project_relation_statuses(repair_state, k: float = 3.0) -> List[RelationStat
         for source, target, score in snapshot.original_ops
         if len(source) == 1 and len(target) == 1
     ]
+    persisted_anomalies = snapshot.baseline_anomalies
     actions_by_ordinal: dict[int, list[RepairAction]] = {}
     for action in repair_log:
         for ordinal in repair_state.action_ordinals(action):
@@ -430,10 +400,15 @@ def project_relation_statuses(repair_state, k: float = 3.0) -> List[RelationStat
         initial_source_count = len(source)
         initial_target_count = len(target)
         initial_target_text = "\n".join(snapshot.tgt_text(index) for index in target)
+        persisted = persisted_anomalies[ordinal] if persisted_anomalies else frozenset()
         initial_has_mix = (
-            detect_language_mix(initial_target_text)
-            if initial_target_text.strip()
-            else False
+            "MIX" in persisted
+            if persisted_anomalies
+            else (
+                detect_language_mix(initial_target_text)
+                if initial_target_text.strip()
+                else False
+            )
         )
         group = chapter.group(ordinal)
         current_source_text = (
@@ -466,9 +441,13 @@ def project_relation_statuses(repair_state, k: float = 3.0) -> List[RelationStat
                 init_type=f"{initial_source_count}:{initial_target_count}",
                 init_score=float(score),
                 is_low_score=(
-                    _calc_low_score(scores_1to1, float(score), k=k)
-                    if initial_source_count == initial_target_count == 1
-                    else False
+                    "LOW_SCORE" in persisted
+                    if persisted_anomalies
+                    else (
+                        _calc_low_score(scores_1to1, float(score), k=k)
+                        if initial_source_count == initial_target_count == 1
+                        else False
+                    )
                 ),
                 init_has_language_mix=initial_has_mix,
                 n_src=current_source_count,
@@ -483,7 +462,16 @@ def project_relation_statuses(repair_state, k: float = 3.0) -> List[RelationStat
                 ),
                 is_deleted=group is None
                 or (last_action is not None and last_action.kind == "delete"),
-                approval=_derive_approval(last_action),
+                effective_source=(
+                    group.rows[0].effective_source
+                    if group is not None and group.rows
+                    else derive_effective_source(last_action)
+                ),
+                is_user_approved=bool(
+                    last_action is not None
+                    and last_action.is_user_approved
+                    and not is_flagged
+                ),
                 repair_count=repair_count,
                 last_operation=last_action.kind if last_action else "",
                 is_flagged=is_flagged,
@@ -506,9 +494,10 @@ def relation_status_to_info(
         has_missing=state.has_missing,
         has_language_mix=state.has_language_mix,
         is_low_score=state.is_low_score,
-        approval=state.approval,
+        effective_source=state.effective_source,
+        is_user_approved=state.is_user_approved,
         proposal_kind=(
-            state.last_operation if state.approval == APPROVAL_PROPOSED else ""
+            state.last_operation if state.effective_source == SOURCE_AUTO else ""
         ),
         # initial_* 由调用方填充
     )

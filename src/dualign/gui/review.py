@@ -32,6 +32,8 @@ from dualign.models.relation_status import RelationAnomaly
 from dualign.gui.preview_table import AiSuggestionItem
 from dualign.gui.preview_table import SuggestionPreviewTable
 from dualign.gui.filter import FilterPanel
+from dualign.core.text import smart_join_lines
+from dualign.models.marker import needs_zero_score
 
 REVIEW_SHORTCUTS = {
     "merge": "M",
@@ -62,8 +64,10 @@ from dualign.services.ai_repair_agent import (
     ChapterContext,
     build_chapter_context,
     AgentEvent,
+    AgentRunResult,
     MaxTurnsExceeded,
 )
+from dualign.services.cancellation import CancellationError, CancellationToken
 from dualign.gui.theme import T, disabled_fg
 
 if TYPE_CHECKING:
@@ -120,12 +124,18 @@ class AgentRunThread(QThread):
         self.agent_ctx = ctx
         self.token_stats: dict = {"prompt": 0, "cache": 0, "completion": 0}
         self.elapsed: float = 0.0
+        self._cancellation_token = CancellationToken()
+
+    def request_cancel(self) -> bool:
+        """Request cooperative cancellation without terminating the QThread."""
+        return self._cancellation_token.cancel()
 
     def run(self):
         try:
             import time as _time
 
-            _start = _time.time()
+            _start = _time.perf_counter()
+            self._cancellation_token.raise_if_cancelled()
             # ── 拟修复（异步线程内构造，不阻塞主线程）──
             ctx = self._ctx
             if self._repair_state is not None:
@@ -141,6 +151,7 @@ class AgentRunThread(QThread):
                 )
                 self._repair_state = session.proposed_state
                 ctx = session.context
+                self._cancellation_token.raise_if_cancelled()
 
             agent = AiRepairAgent(
                 backend=self._backend,
@@ -154,6 +165,7 @@ class AgentRunThread(QThread):
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
                 request_timeout=self._request_timeout,
+                cancellation_token=self._cancellation_token,
             )
 
             # ── 收集 turn_log 和 token 统计（用于日志导出）──
@@ -169,14 +181,28 @@ class AgentRunThread(QThread):
                     _token_stats["completion"] += evt.usage.get("completion_tokens", 0)
                 self._on_agent_event(evt)
 
-            result = agent.run(
-                ctx, on_event=_wrapped_on_event, initial_state=self._repair_state
-            )
+            try:
+                result = agent.run(
+                    ctx, on_event=_wrapped_on_event, initial_state=self._repair_state
+                )
+            finally:
+                agent.close()
             self.turn_log = _local_turn_log
             self.token_stats = _token_stats
             self.agent_ctx = ctx
-            self.elapsed = _time.time() - _start
+            self.elapsed = _time.perf_counter() - _start
+            result.elapsed_seconds = self.elapsed
             self.finished_result.emit(result)
+        except CancellationError:
+            self.elapsed = _time.perf_counter() - _start
+            self.finished_result.emit(
+                AgentRunResult(
+                    status="cancelled",
+                    pending_ids=tuple(self._ctx.reviewable_ids),
+                    note="用户已取消",
+                    elapsed_seconds=self.elapsed,
+                )
+            )
         except MaxTurnsExceeded as e:
             self.error_occurred.emit(f"Agent 超时: {e}")
         except Exception as e:
@@ -226,6 +252,10 @@ class ReviewController(QWidget):
         # 焦点跟踪：当前聚焦的 AI 建议
         self._focused_action: Optional[RepairAction] = None
         self._suggestions: list[AiSuggestionItem] = []
+        self._suggestion_score_cache: dict[tuple[str, str], float] = {}
+        self._suggestion_score_batch_id = 0
+        self._suggestion_score_batches: dict[int, list[tuple[str, str]]] = {}
+        self._suggestion_scores_pending: set[tuple[str, str]] = set()
         # ── 内嵌筛选面板（不再从外部注入）──
         self._filter_panel = FilterPanel()
         self._filter_panel.filter_changed.connect(self._on_filter_changed)
@@ -252,6 +282,12 @@ class ReviewController(QWidget):
 
     def set_window(self, window: DualignWindow):
         self._window = window
+        score_manager = getattr(window, "_score_mgr", None)
+        if score_manager is not None:
+            score_manager.flat_batch_ready.connect(
+                self._on_suggestion_scores_ready,
+                Qt.ConnectionType.UniqueConnection,
+            )
 
     def _on_filter_changed(self):
         """转发筛选变更到主窗口。"""
@@ -495,7 +531,7 @@ class ReviewController(QWidget):
         # 策略选择只占一列；剩余两列用于章节级工作流选项。
         dg.addWidget(QLabel("对齐策略："), 1, 0)
         self._strategy_combo = QComboBox()
-        self._strategy_combo.addItems(["最小信息量", "文档A为准", "文档B为准"])
+        self._strategy_combo.addItems(["最小结构修改", "文档A为准", "文档B为准"])
         self._strategy_combo.setCurrentIndex(1)
         self._strategy_combo.currentIndexChanged.connect(self.strategy_changed.emit)
         self._strategy_combo.setMinimumContentsLength(6)
@@ -624,9 +660,7 @@ class ReviewController(QWidget):
         self._btn_refs["suggest"].clicked.connect(self._on_ai_analyze)
         ag.addWidget(self._btn_refs["suggest"], 0, 0)
         self._ai_review_btn = QPushButton("一键审校")
-        self._ai_review_btn.clicked.connect(
-            lambda: self.doc_ai_chapter_requested.emit()
-        )
+        self._ai_review_btn.clicked.connect(self._on_ai_review_clicked)
         ag.addWidget(self._ai_review_btn, 0, 1)
         self._apply_all_btn = QPushButton("一键应用")
         self._apply_all_btn.clicked.connect(self._apply_all_pending)
@@ -843,8 +877,6 @@ class ReviewController(QWidget):
         if ordinal >= len(snapshot.original_ops):
             self._disable_all_buttons()
             return
-        s_idx, t_idx, _ = snapshot.original_ops[ordinal]
-        ls, lt = len(s_idx), len(t_idx)
 
         # 同一份选择投影同时驱动工具栏、菜单和服务层校验。
         from dualign.services.repair import RepairService
@@ -854,13 +886,13 @@ class ReviewController(QWidget):
             w._repair_state, selected
         )
 
-        predicted = self._predict_auto_action(ls, lt, getattr(w, "_strategy", "src"))
-
         for key, btn in self._btn_refs.items():
             if key in capabilities:
                 enabled = capabilities[key]
             elif key == "suggest":
-                enabled = predicted is not None  # 有自动修复建议时可用
+                # AI 审校是对当前文本的显式请求，不依赖机器
+                # 策略是否能预生成结构修复。已处理或普通 1:1 也可重审。
+                enabled = True
             else:
                 enabled = False
 
@@ -895,11 +927,17 @@ class ReviewController(QWidget):
         ordinals = self._current_ordinals()
         if ordinals:
             return ordinals[0]
-        # 异常列表无对应行时回退到表格选中
+        # 异常列表无对应行时先取表格选择，再取统一焦点。点击侧栏按钮会
+        # 让表格失去 Qt 焦点，但不应让“审校本条”失去它所指的关系。
         w = self._window
         if w is not None:
             sel = sorted(w.selected_ordinals)
-            return sel[0] if sel else None
+            if sel:
+                return sel[0]
+            focus = getattr(w, "_focus", None)
+            ordinal = getattr(focus, "focused_ordinal", None)
+            if ordinal is not None:
+                return ordinal
         return None
 
     def _selected_ordinals(self) -> List[int]:
@@ -998,15 +1036,20 @@ class ReviewController(QWidget):
         snapshot = w._repair_state.snapshot if w._repair_state else None
         cur_repair_state = w._repair_state  # 保留当前状态（含已有操作标记）
         items = []
+        score_requests: list[tuple[str, str]] = []
         for action, status in actions_to_show:
             ordinal = snapshot.operation_index(action.relation_ids[0])
             rows_data = self._compute_action_preview(action, snapshot, cur_repair_state)
             # 获取初始文本（action 前）— 从 snapshot 原始文本获取
             ini_src, ini_tgt = "", ""
             if snapshot and 0 <= ordinal < len(snapshot.original_ops):
-                s_idx, t_idx, _ = snapshot.original_ops[ordinal]
-                ini_src_lines = [snapshot.src_text(i) for i in s_idx]
-                ini_tgt_lines = [snapshot.tgt_text(j) for j in t_idx]
+                action_ordinals = snapshot.operation_indices(action.relation_ids)
+                ini_src_lines = []
+                ini_tgt_lines = []
+                for action_ordinal in action_ordinals:
+                    s_idx, t_idx, _ = snapshot.original_ops[action_ordinal]
+                    ini_src_lines.extend(snapshot.src_text(i) for i in s_idx)
+                    ini_tgt_lines.extend(snapshot.tgt_text(j) for j in t_idx)
                 ini_src = (
                     "\n".join(ini_src_lines)
                     if len(ini_src_lines) > 1
@@ -1027,7 +1070,19 @@ class ReviewController(QWidget):
                 for i in range(n):
                     src = src_lines[i] if i < len(src_lines) else ""
                     tgt = tgt_lines[i] if i < len(tgt_lines) else ""
-                    rows_data.append((src, tgt, "", "", 0.0, 0.0, 1, 1))
+                    rows_data.append(
+                        (
+                            src,
+                            tgt,
+                            "",
+                            "",
+                            0.0,
+                            0.0,
+                            1,
+                            1,
+                            action.effective_source,
+                        )
+                    )
             # 每子行创建独立的 AiSuggestionItem，携带准确的 score/n_src/n_tgt
             sub_items = []
             for i, (
@@ -1039,6 +1094,7 @@ class ReviewController(QWidget):
                 score,
                 n_src,
                 n_tgt,
+                effective_source,
             ) in enumerate(rows_data):
                 sub_items.append(
                     AiSuggestionItem(
@@ -1056,6 +1112,8 @@ class ReviewController(QWidget):
                         n_tgt=n_tgt,
                         init_src_text=ini_src,
                         init_tgt_text=ini_tgt,
+                        # 建议表展示提案来源，不展示应用后的主表责任来源。
+                        effective_source=action.source,
                     )
                 )
             # ── 计算星标：与主表 relation_text_changes 统一逻辑 ──
@@ -1063,6 +1121,7 @@ class ReviewController(QWidget):
             for si in sub_items:
                 si.star_src = star_src
                 si.star_tgt = star_tgt
+            self._prepare_suggestion_scores(action, status, sub_items, score_requests)
             items.extend(sub_items)
 
         # 按当前关系序号升序排列，方便用户按顺序审阅
@@ -1120,11 +1179,91 @@ class ReviewController(QWidget):
 
         self._suggestions = items
 
+        score_manager = getattr(w, "_score_mgr", None)
+        scorer = getattr(w, "_scorer", None)
+        if score_manager is not None and scorer is not None and score_requests:
+            score_manager.set_scorer(scorer)
+            self._suggestion_score_batch_id -= 1
+            batch_id = self._suggestion_score_batch_id
+            self._suggestion_score_batches[batch_id] = score_requests
+            self._suggestion_scores_pending.update(score_requests)
+            score_manager.request_flat_batch(
+                [key[0] for key in score_requests],
+                [key[1] for key in score_requests],
+                batch_id,
+            )
+
         # 重建后恢复高亮：从 FocusManager.focused_ordinal 恢复，
         # 而非 self._focused_action（后者可能来自旧建议而非当前点击的关系）。
         w = self._window
         if w and hasattr(w, "_focus") and w._focus.focused_ordinal is not None:
             self.focus_relation_ai(w._focus.focused_ordinal)
+
+    def _prepare_suggestion_scores(
+        self,
+        action: RepairAction,
+        status: str,
+        items: list[AiSuggestionItem],
+        requests: list[tuple[str, str]],
+    ) -> None:
+        """Resolve cached scores and queue only missing proposed text scores."""
+        if not items:
+            return
+        if needs_zero_score(action.marker):
+            for item in items:
+                item.score = 0.0
+            return
+
+        group_scoped = len(items) > 1 and (
+            action.kind == "merge" or items[0].n_src != items[0].n_tgt
+        )
+        if group_scoped:
+            keys = [
+                (
+                    smart_join_lines(
+                        [item.src_text for item in items if item.src_text]
+                    ),
+                    smart_join_lines(
+                        [item.tgt_text for item in items if item.tgt_text]
+                    ),
+                )
+            ] + [("", "")] * (len(items) - 1)
+        else:
+            keys = [(item.src_text or "", item.tgt_text or "") for item in items]
+
+        relation_id = action.relation_ids[0]
+        current_cache = getattr(self._window, "_score_cache", None)
+        for item, key in zip(items, keys):
+            item.suggestion_score_key = key
+            if key == ("", ""):
+                continue
+            cached = self._suggestion_score_cache.get(key)
+            if cached is None and status == "已应用" and current_cache is not None:
+                cached = current_cache.get(relation_id, item.sub)
+            if cached is not None:
+                item.score = float(cached)
+                self._suggestion_score_cache[key] = float(cached)
+            elif key not in self._suggestion_scores_pending and key not in requests:
+                requests.append(key)
+
+    def _on_suggestion_scores_ready(self, batch_id: int, scores) -> None:
+        """Apply asynchronous scores only to the latest suggestion generation."""
+        keys = self._suggestion_score_batches.pop(batch_id, None)
+        if keys is None:
+            return
+        self._suggestion_scores_pending.difference_update(keys)
+        if scores is None:
+            return
+        for key, score in zip(keys, scores):
+            self._suggestion_score_cache[key] = float(score)
+        changed = False
+        for item in self._suggestions:
+            key = getattr(item, "suggestion_score_key", None)
+            if key in self._suggestion_score_cache:
+                item.score = self._suggestion_score_cache[key]
+                changed = True
+        if changed and hasattr(self, "_preview_table"):
+            self._preview_table.set_items(self._suggestions)
 
     def _sync_suggestion_widths(self):
         """同步预览表和 AI 建议表的列宽与主对齐表一致。"""
@@ -1140,10 +1279,11 @@ class ReviewController(QWidget):
         action: RepairAction,
         snapshot,
         repair_state=None,
-    ) -> list[tuple[str, str, str, str, float, float, int, int]] | None:
+    ) -> list[tuple[str, str, str, str, float, float, int, int, str]] | None:
         """通过 replay 引擎计算单条建议执行后的预览数据。
 
-        返回: [(src, tgt, init_type, cur_type, init_score, score, n_src, n_tgt), ...]
+        返回: [(src, tgt, init_type, cur_type, init_score, score,
+                n_src, n_tgt, effective_source), ...]
         每子行一条。从当前 repair_state 开始（保留已有操作标记），再叠加预览 action。
         repair_state 为 None 时仅从原始快照计算。
         """
@@ -1169,6 +1309,7 @@ class ReviewController(QWidget):
                 r.score,
                 r.n_src,
                 r.n_tgt,
+                r.effective_source,
             )
             for r in relation_rows
         ]
@@ -1359,13 +1500,42 @@ class ReviewController(QWidget):
 
     def _on_ai_analyze(self):
         """AI 分析当前选中的文本对（支持多选）。"""
+        if self._has_active_agent():
+            self._cancel_active_agent()
+            return
         ordinals = self._selected_ordinals()
         if not ordinals:
             ordinal = self._current_ordinal()
             if ordinal is not None:
                 ordinals = [ordinal]
-        if ordinals:
+        if not ordinals:
+            self._emit_log("请先选择要审校的文本对", "warning")
+            return
+        try:
             self.analyze_relations(ordinals)
+        except Exception as exc:
+            import logging
+
+            logging.getLogger("dualign.ai").exception("无法启动单条 AI 审校")
+            self._on_agent_error(str(exc))
+
+    def _on_ai_review_clicked(self):
+        if self._has_active_agent():
+            self._cancel_active_agent()
+        else:
+            self.doc_ai_chapter_requested.emit()
+
+    def _has_active_agent(self) -> bool:
+        return any(thread.isRunning() for thread in self._active_threads)
+
+    def _cancel_active_agent(self):
+        requested = False
+        for thread in self._active_threads:
+            if thread.isRunning():
+                requested = thread.request_cancel() or requested
+        if requested:
+            self._emit_log("正在停止 AI 校订…", "info")
+        self._set_ai_running_state(True, stopping=True)
 
     def _emit_log(self, message: str, role: str = "info"):
         """通过信号将日志消息路由到全局 LogPanel。"""
@@ -1485,26 +1655,21 @@ class ReviewController(QWidget):
     # ── AI 建议操作（由侧边栏按钮触发）──
 
     def _on_ai_accept_focused(self):
-        """应用当前聚焦的建议，并自动打上 [OK] 标签。
+        """将当前聚焦的建议采纳为用户作出的最终决策。
 
-        统一方案：ToolExecutor 源头已将 ok 解析为正确 kind，
-        不再区分是否存在拟修复，全部走 _apply_ai_action 流程。
+        建议来源保留在 AiProposalStore；进入 repair_log 的动作由点击
+        “应用”的人负责。有内容修改时，动作本身即构成审批；只有原文
+        无需修改的建议才以 user-source ``ok`` 落盘。
         """
         action = self._focused_action
         if action is None:
             return
 
-        self.action_requested.emit(action)
+        self.action_requested.emit(action.adopted_by("user"))
 
         w = self._window
         if w and w._repair_state:
             w._repair_state.ai_proposal_store.accept(action)
-
-            # 追加 [OK] 确认标记
-            ok_action = self._make_user_approval(action)
-            w._undo_stack.append(w._repair_state)
-            w._repair_state = w._repair_state.apply(ok_action)
-            w._refresh()
             w._save_session()
         self.actions_updated.emit()
         self._rebuild_ai_suggestions()
@@ -1595,11 +1760,14 @@ class ReviewController(QWidget):
             skip_auto_repair=True,
         )
         if ctx is None:
-            return
+            self._emit_log("无法为所选文本对构建 AI 审校上下文", "warning")
+            return False
         self._reviewed_count = 0
         n_meta = len(ctx.reviewable_infos)
         max_turns = min(12, n_meta * 2 + 2)
+        self._emit_log(f"开始审校关系 {ctx.reviewable_ids}", "system")
         self._start_agent(ctx, max_turns=max_turns)
+        return True
 
     def analyze_chapter_batch(self):
         """使用 AiRepairAgent 校订全章异常。
@@ -1635,10 +1803,8 @@ class ReviewController(QWidget):
     def _apply_all_pending(self):
         """一键应用所有待处理的 AI 建议。
 
-        用户手动点击「应用全部」时的行为：
-          - 保留 AI 操作痕迹（[AI][M] 等 marker）
-          - 叠加 [OK] 标记表示用户审核通过 → [AI][M] [OK]
-          - 区别：自动应用模式不叠加 [OK]，保持纯 [AI][M]
+        用户点击「应用全部」时，每条建议转为 user-source 的最终动作；
+        自动应用模式仍保留动作原本的来源。
         """
         w = self._window
         if w is None:
@@ -1646,20 +1812,24 @@ class ReviewController(QWidget):
         actions = list(self._pending_action_list)
         if not actions:
             return
-        from dualign.models.action import RepairAction
-
-        for a in actions:
-            # 先通过标准入口 apply（生成 [AI][M] 等 marker）
-            self.action_requested.emit(a)
-            if w._repair_state:
-                a = w._repair_state.validate_action(a)
-                w._repair_state.ai_proposal_store.add(a)
-                w._repair_state.ai_proposal_store.accept(a)
-                # 叠加 [OK] 标记用户审核通过
-                ok_action = self._make_user_approval(a)
-                w._repair_state = w._repair_state.apply(ok_action)
+        adopted = [(proposal, proposal.adopted_by("user")) for proposal in actions]
+        applied = w._apply_actions(
+            [action for _proposal, action in adopted],
+            auto=False,
+            save=False,
+            refresh=False,
+            show_status=False,
+            rebuild_suggestions=False,
+        )
+        applied_ids = {id(action) for action in applied}
         if w._repair_state:
+            for proposal, action in adopted:
+                if id(action) in applied_ids:
+                    w._repair_state.ai_proposal_store.accept(proposal)
+        if w._repair_state:
+            w._save_session()
             w._refresh()
+            w._set_temp_status(f"已批量应用 {len(applied)} 条 AI 建议", "success")
         self._rebuild_ai_suggestions()
         self.actions_updated.emit()
 
@@ -1714,7 +1884,7 @@ class ReviewController(QWidget):
 
     def _start_agent(self, ctx: ChapterContext, max_turns: int = 20):
         """启动 AgentRunThread 并连接信号。"""
-        self._disable_ai_buttons(True)
+        self._set_ai_running_state(True)
 
         w = self._window
         # 传递嵌入模型引用 + 策略偏好
@@ -1786,10 +1956,17 @@ class ReviewController(QWidget):
             self._on_agent_error(evt.error or "未知错误")
         elif evt.type == "llm_call":
             ai_logger.debug(f"Turn {evt.turn}: LLM 调用中")
+        elif evt.type == "llm_response":
+            ai_logger.debug(f"Turn {evt.turn}: LLM 返回（{evt.elapsed_seconds:.2f}s）")
         elif evt.type == "tool_start":
             # 工具调用详情 → DEBUG，避免刷屏
             args_str = str(evt.tool_args) if evt.tool_args else ""
             ai_logger.debug(f"Turn {evt.turn}: {evt.tool_name}({args_str})")
+        elif evt.type == "tool_result":
+            ai_logger.debug(
+                f"Turn {evt.turn}: {evt.tool_name} 完成"
+                f"（{evt.elapsed_seconds:.3f}s）"
+            )
         elif evt.type == "review_done" and evt.review_action:
             # ── 逐量更新：Agent 每完成一处 review 就立即添加到界面 ──
             ra = evt.review_action
@@ -1832,19 +2009,33 @@ class ReviewController(QWidget):
         item = next(it for it in self._suggestions if it.ordinal == ordinal)
         self._focus_suggestion(item.action, ordinal)
 
-    @staticmethod
-    def _make_user_approval(action: RepairAction) -> RepairAction:
-        """Create the explicit human decision made by an Apply click."""
-        return RepairAction.make_ok(action.relation_ids[0], source="user")
-
     def _on_agent_finished(self, result):
         """Agent 结束 → 保存已产生建议并传递完成语义。
 
         拟修复在 AgentRunThread 中已构造，w._repair_state 已包含 auto-repair 操作。
         对存在拟修复的关系，AI 的 "ok" 应转换为等效操作（如 split/merge）显示在建议表中。
         """
-        self._disable_ai_buttons(False)
+        self._set_ai_running_state(False)
         actions = result.actions
+
+        if result.status == "cancelled":
+            self._emit_log(f"AI 校订已停止；保留 {len(actions)} 条已完成建议", "info")
+
+        thread = self._active_threads[-1] if self._active_threads else None
+        if thread is not None:
+            llm_seconds = sum(
+                float(tr.get("timing", {}).get("llm_seconds", 0.0) or 0.0)
+                for tr in thread.turn_log
+            )
+            tool_seconds = sum(
+                float(tr.get("timing", {}).get("tool_seconds", 0.0) or 0.0)
+                for tr in thread.turn_log
+            )
+            self.log_message.emit(
+                f"AI 校订耗时 {thread.elapsed:.2f}s"
+                f"（模型 {llm_seconds:.2f}s，工具 {tool_seconds:.3f}s）",
+                "info",
+            )
 
         if not actions:
             self._rebuild_ai_suggestions()
@@ -1867,13 +2058,33 @@ class ReviewController(QWidget):
         # 全部存入 ai_proposal_store（统一 action 管理入口）
         store = w._repair_state.ai_proposal_store if w and w._repair_state else None
 
+        # “审校本条”是一次新的明确请求。只有新运行已产生结果时，
+        # 才替换其覆盖关系的旧建议；运行失败或无结果时保留旧建议。
+        if store and not self._batch_mode and thread is not None:
+            reviewed_relation_ids = {
+                w._repair_state.snapshot.relation_id(ordinal)
+                for ordinal in thread.agent_ctx.reviewable_ids
+            }
+            store.remove_for_relations(reviewed_relation_ids)
+
         if safe_actions:
-            for a in safe_actions:
-                a = w._repair_state.validate_action(a)
-                if store:
-                    store.add(a)
-                    store.accept(a)
-                self.action_requested.emit(a)
+            validated = [w._repair_state.validate_action(a) for a in safe_actions]
+            if store:
+                for action in validated:
+                    store.add(action)
+            applied = w._apply_actions(
+                validated,
+                auto=True,
+                save=False,
+                refresh=False,
+                show_status=False,
+                rebuild_suggestions=False,
+            )
+            if store:
+                for action in applied:
+                    store.accept(action)
+            if applied:
+                w._refresh()
 
         if review_actions:
             for a in review_actions:
@@ -1886,8 +2097,7 @@ class ReviewController(QWidget):
         if w:
             w._save_session()
 
-        if self._active_threads:
-            thread = self._active_threads[-1]
+        if thread is not None:
             if hasattr(thread, "turn_log") and thread.turn_log:
                 from dualign.services.ai_repair_agent import (
                     dump_agent_debug,
@@ -1926,10 +2136,11 @@ class ReviewController(QWidget):
             self.batch_finished.emit(result)
 
     def _on_agent_error(self, error: str):
-        self._disable_ai_buttons(False)
+        self._set_ai_running_state(False)
+        self._emit_log(f"AI 校订失败：{error}", "error")
         self.ai_error.emit(error)
 
-    def _disable_ai_buttons(self, loading: bool):
+    def _set_ai_running_state(self, loading: bool, *, stopping: bool = False):
         for attr in (
             "_ai_clear_btn",
             "_prev_suggestion_btn",
@@ -1939,3 +2150,14 @@ class ReviewController(QWidget):
             btn = getattr(self, attr, None)
             if btn is not None:
                 btn.setEnabled(not loading)
+        suggest = self._btn_refs.get("suggest")
+        if suggest is not None:
+            suggest.setEnabled(not stopping)
+            suggest.setText(
+                "正在停止…" if stopping else ("停止审校" if loading else "审校本条")
+            )
+        if self._ai_review_btn is not None:
+            self._ai_review_btn.setEnabled(not stopping)
+            self._ai_review_btn.setText(
+                "正在停止…" if stopping else ("停止审校" if loading else "一键审校")
+            )

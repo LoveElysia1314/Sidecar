@@ -214,7 +214,7 @@ python scripts/build_exe.py
 ```bash
 # 需安装 Inno Setup 6
 python scripts/build.py
-# → Dualign_Setup_v0.8.0-beta.1.exe
+# → Dualign_Setup_v0.8.0-rc.1.exe
 ```
 
 `scripts/build_exe.py` 只负责 PyInstaller 目录或单文件构建；安装包、便携包和发布 ZIP

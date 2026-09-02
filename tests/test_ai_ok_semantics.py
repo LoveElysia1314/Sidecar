@@ -4,9 +4,9 @@
   1. ai_repair_chapter 调用 agent.run(ctx) 未传 initial_state，导致
      ToolExecutor._get_current_snap_action 恒返回 None，_handle_ok 的
      "AI ok 等同于认可已有修复操作" 语义永远不生效 —— AI 对已合并的
-     snap 发 ok 会生成独立的 ok（marker [AI][OK]）而非转换后的 merge。
-  2. replay 的 _apply_info_free 对 [AI][OK]/[AI][F] 直接设置 marker，
-     覆盖已有 [M]/[S]/[E]/[D]/[P] —— 合并等修复操作从状态列消失。
+     snap 发 ok 会生成独立的 ok，而非转换后的 merge。
+  2. 来源与操作曾编码到同一 marker，导致审批覆盖或污染 M/S/E/D/P/F。
+     现在操作与 effective_source 分别投影。
 """
 
 import json
@@ -76,7 +76,8 @@ class TestOkConvertsToExistingRepair:
         assert act is not None
         assert act.kind == "merge"  # AI ok 认可已有合并 → 转换为 merge
         assert act.source == "ai"
-        assert act.marker == "[AI][M]"
+        assert act.marker == "[M]"
+        assert act.effective_source == "ai"
 
     def test_ok_with_initial_state_on_clean_snap_stays_ok(self):
         ctx = ChapterContext.from_repair_state(
@@ -92,13 +93,14 @@ class TestOkConvertsToExistingRepair:
         ex.execute(ToolCall("c3", "ok", {"target": "1"}))
         act = ex.reviewed_actions.get(1)
         assert act.kind == "ok"  # snap 1 无先前修复 → 真正的通过
-        assert act.marker == "[AI][OK]"
+        assert act.marker == "[OK]"
+        assert act.effective_source == "ai"
 
 
-class TestAiOkDoesNotEraseRepairMarker:
-    """Bug B：replay 时 [AI][OK] 必须叠加而非覆盖已有修复标记。"""
+class TestReviewMetadataDoesNotDuplicateRepairMarker:
+    """Reviewing content updates provenance instead of adding a second marker."""
 
-    def test_ai_ok_preserves_merge_marker(self):
+    def test_ai_ok_reviews_the_existing_merge(self):
         state = RepairState(
             _snapshot(),
             [
@@ -106,8 +108,10 @@ class TestAiOkDoesNotEraseRepairMarker:
                 RepairAction(kind="ok", source="ai", relation_ids=("L000002",)),
             ],
         )
-        markers = {row.marker for row in state.current.rows if row.ordinal == 1}
-        assert markers == {"[M] [AI][OK]"}, markers
+        rows = [row for row in state.current.rows if row.ordinal == 1]
+        assert {row.marker for row in rows} == {"[M]"}
+        assert {row.effective_source for row in rows} == {"ai"}
+        assert state.repair_log[0].data["reviewed_by"] == ["ai"]
 
     def test_ai_flag_preserves_repair_marker(self):
         state = RepairState(
@@ -117,31 +121,36 @@ class TestAiOkDoesNotEraseRepairMarker:
                 RepairAction(kind="flag", source="ai", relation_ids=("L000002",)),
             ],
         )
-        markers = {row.marker for row in state.current.rows if row.ordinal == 1}
-        assert markers == {"[M] [AI][F]"}, markers
+        rows = [row for row in state.current.rows if row.ordinal == 1]
+        assert {row.marker for row in rows} == {"[M] [F]"}
+        assert {row.effective_source for row in rows} == {"auto"}
 
     def test_ai_ok_without_prior_repair_keeps_full_marker(self):
         state = RepairState(
             _snapshot(),
             [RepairAction(kind="ok", source="ai", relation_ids=("L000002",))],
         )
-        markers = {row.marker for row in state.current.rows if row.ordinal == 1}
-        assert markers == {"[AI][OK]"}, markers
+        rows = [row for row in state.current.rows if row.ordinal == 1]
+        assert {row.marker for row in rows} == {"[OK]"}
+        assert {row.effective_source for row in rows} == {"ai"}
 
-    def test_manual_ok_still_combines(self):
-        # 对照组：手动 ok（无 AI 前缀）行为不变
+    def test_manual_ok_adopts_the_existing_repair(self):
         state = RepairState(
             _snapshot(),
             [
                 RepairAction.make_merge("L000002", sub_count=2),
-                RepairAction.make_ok("L000002"),
+                RepairAction.make_ok("L000002", source="user"),
             ],
         )
-        markers = {row.marker for row in state.current.rows if row.ordinal == 1}
-        assert markers == {"[M] [OK]"}, markers
+        rows = [row for row in state.current.rows if row.ordinal == 1]
+        assert {row.marker for row in rows} == {"[M] [OK]"}
+        assert {row.effective_source for row in rows} == {"user"}
+        assert state.repair_log[0].is_user_approved
+        assert state.repair_log[0].source == "user"
+        assert state.repair_log[0].data["reviewed_by"] == ["user"]
 
-    def test_ok_f_mutual_exclusion_with_ai_prefix(self):
-        # [OK] 与 [F] 互斥：已有 [AI][OK] 再叠加 AI flag → 移除 [OK] 保留 [AI][F]
+    def test_flag_is_orthogonal_to_effective_source(self):
+        # 标记重新开启关注点，但不抹除对未变文本的既有 AI 确认。
         state = RepairState(
             _snapshot(),
             [
@@ -149,8 +158,9 @@ class TestAiOkDoesNotEraseRepairMarker:
                 RepairAction(kind="flag", source="ai", relation_ids=("L000002",)),
             ],
         )
-        markers = {row.marker for row in state.current.rows if row.ordinal == 1}
-        assert markers == {"[AI][F]"}, markers
+        rows = [row for row in state.current.rows if row.ordinal == 1]
+        assert {row.marker for row in rows} == {"[F]"}
+        assert {row.effective_source for row in rows} == {"ai"}
 
 
 class _ScriptedBackend(LLMBackend):
@@ -197,7 +207,9 @@ def test_review_session_keeps_context_and_proposed_state_together():
     # Context 和 proposed_state 均保留 merge 后的组内行布局。
     info = session.context.get_relation_info(1)
     assert info.src_text.splitlines() == ["S1", "S2"]
-    assert json.loads(str(info))["proposal"] == "merge"
+    info_payload = json.loads(str(info))
+    assert info_payload["source"] == "auto"
+    assert info_payload["proposal"] == "merge"
 
     ex = ToolExecutor(
         session.context,

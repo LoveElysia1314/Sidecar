@@ -30,8 +30,9 @@ from PySide6.QtWidgets import (
     QStyle,
 )
 
-from dualign.services.table_projection import project_table_cells
-from dualign.models.marker import resolve_hex_color
+from dualign.services.table_projection import CURRENT_STATUS, project_table_cells
+from dualign.models.marker import is_approved, resolve_hex_color
+from dualign.models.source import SOURCE_AI, canonical_source
 from dualign.gui.theme import T
 
 # ═══════════════════════════════════════════════════════════════
@@ -85,6 +86,20 @@ _LIGHT_TEXT_NORMAL = "#2C2C2C"
 _LIGHT_TEXT_DELETED = "#B71C1C"
 _LIGHT_TEXT_CONTEXT = "#757575"
 
+_DARK_SOURCE_COLORS = {
+    "none": "#80868B",
+    "auto": "#78909C",
+    "ai": "#9575CD",
+    "user": "#26A69A",
+}
+_LIGHT_SOURCE_COLORS = {
+    "none": "#757575",
+    "auto": "#546E7A",
+    "ai": "#673AB7",
+    "user": "#00897B",
+}
+_AI_APPROVED_COLOR = "#81C784"
+
 TYPE_CL_11 = QColor(_DARK_TYPE_11)
 TYPE_CL_NON11 = QColor(_DARK_TYPE_NON11)
 TYPE_CL_10_01 = QColor(_DARK_TYPE_10_01)
@@ -94,6 +109,7 @@ TEXT_CL_DELETED = QColor(_DARK_TEXT_DELETED)
 TEXT_CL_CONTEXT = QColor(_DARK_TEXT_CONTEXT)
 
 _SELECTED_BG = QColor(79, 195, 247, 50)
+SOURCE_COLORS = {source: QColor(color) for source, color in _DARK_SOURCE_COLORS.items()}
 
 
 def refresh_theme_colors():
@@ -102,7 +118,7 @@ def refresh_theme_colors():
 
     global TYPE_CL_11, TYPE_CL_NON11, TYPE_CL_10_01
     global TEXT_CL_NORMAL, TEXT_CL_DELETED, TEXT_CL_CONTEXT
-    global _SELECTED_BG
+    global _SELECTED_BG, SOURCE_COLORS
     if _T.is_dark:
         TYPE_CL_11 = QColor(_DARK_TYPE_11)
         TYPE_CL_NON11 = QColor(_DARK_TYPE_NON11)
@@ -111,6 +127,9 @@ def refresh_theme_colors():
         TEXT_CL_DELETED = QColor(_DARK_TEXT_DELETED)
         TEXT_CL_CONTEXT = QColor(_DARK_TEXT_CONTEXT)
         _SELECTED_BG = QColor(79, 195, 247, 50)
+        SOURCE_COLORS = {
+            source: QColor(color) for source, color in _DARK_SOURCE_COLORS.items()
+        }
     else:
         TYPE_CL_11 = QColor(_LIGHT_TYPE_11)
         TYPE_CL_NON11 = QColor(_LIGHT_TYPE_NON11)
@@ -119,6 +138,9 @@ def refresh_theme_colors():
         TEXT_CL_DELETED = QColor(_LIGHT_TEXT_DELETED)
         TEXT_CL_CONTEXT = QColor(_LIGHT_TEXT_CONTEXT)
         _SELECTED_BG = QColor(0, 122, 204, 40)
+        SOURCE_COLORS = {
+            source: QColor(color) for source, color in _LIGHT_SOURCE_COLORS.items()
+        }
 
 
 def type_cl(init_type: str) -> QColor:
@@ -140,11 +162,19 @@ def type_cl(init_type: str) -> QColor:
     return TYPE_CL_11
 
 
-def marker_cl(marker: str) -> QColor:
+def marker_cl(marker: str, effective_source: str = "none") -> QColor:
     """操作标记 → QColor。"""
     if not marker:
         return TYPE_CL_11
+    if is_approved(marker) and canonical_source(effective_source) == SOURCE_AI:
+        return QColor(_AI_APPROVED_COLOR)
     return QColor(resolve_hex_color(marker))
+
+
+def source_cl(source: str) -> QColor:
+    """有效来源 → 与操作/认可状态相互独立的类别色。"""
+
+    return SOURCE_COLORS[canonical_source(source)]
 
 
 _ANOMALY_COLORS = {
@@ -199,15 +229,26 @@ def relation_text_changes(
     if action is None:
         return False, False
 
-    s_idx, t_idx, _ = snapshot.original_ops[ordinal]
+    operation_indices = (ordinal,)
+    relation_ids = tuple(getattr(action, "relation_ids", ()))
+    if len(relation_ids) > 1:
+        try:
+            operation_indices = snapshot.operation_indices(relation_ids)
+        except (AttributeError, KeyError, ValueError):
+            operation_indices = (ordinal,)
+
+    orig_src = []
+    orig_tgt = []
+    for operation_index in operation_indices:
+        s_idx, t_idx, _ = snapshot.original_ops[operation_index]
+        orig_src.extend(snapshot.src_text(i) for i in s_idx)
+        orig_tgt.extend(snapshot.tgt_text(j) for j in t_idx)
 
     if action.kind == "edit":
         d = action.data
         new_src = d.get("new_src_lines")
         new_tgt = d.get("new_tgt_lines")
         edit_side = d.get("edit_side")
-        orig_src = [snapshot.src_text(i) for i in s_idx]
-        orig_tgt = [snapshot.tgt_text(j) for j in t_idx]
         src_ch = (new_src is not None) and (new_src != orig_src)
         tgt_ch = (new_tgt is not None) and (new_tgt != orig_tgt)
         if edit_side == "src" and src_ch:
@@ -225,8 +266,6 @@ def relation_text_changes(
         d = action.data or {}
         new_src = d.get("new_src_lines")
         new_tgt = d.get("new_tgt_lines")
-        orig_src = [snapshot.src_text(i) for i in s_idx]
-        orig_tgt = [snapshot.tgt_text(j) for j in t_idx]
         src_ch = (new_src is not None) and (new_src != orig_src)
         tgt_ch = (new_tgt is not None) and (new_tgt != orig_tgt)
         return src_ch, tgt_ch
@@ -242,12 +281,17 @@ def text_color_for_side(
     is_ctx: bool,
     marker: str,
     atypes: set,
+    effective_source: str = "none",
 ) -> QColor:
     """根据变化状态和 marker/异常类型返回文本前景色。"""
     if is_del:
         return TEXT_CL_DELETED
     if is_ctx:
         return TEXT_CL_CONTEXT
+    # 显式认可面向整个文本对，而不是某一侧的文本差异。AI 的纯 OK
+    # 使用较浅绿色；人工 OK 使用标准绿色。
+    if is_approved(marker):
+        return marker_cl(marker, effective_source)
     changed = src_changed if for_src else tgt_changed
     if changed:
         return marker_cl(marker) if marker else TYPE_CL_NON11
@@ -292,8 +336,8 @@ class HighlightDelegate(QStyledItemDelegate):
             return super().sizeHint(option, index)
 
         col = index.column()
-        # 仅 col 5/6（原文/译文）按列宽 word-wrap；其它列单行
-        if col not in (5, 6):
+        # 仅 col 6/7（原文/译文）按列宽 word-wrap；其它列单行
+        if col not in (6, 7):
             return super().sizeHint(option, index)
 
         table = self.parent()
@@ -587,7 +631,9 @@ class BaseTextTable(QWidget):
         self._render_spanned_cells = set(projection.covered_cells)
 
         # 元数据
-        hidden_cur = set(projection.covered_rows(2 + self._get_span_col_offset()))
+        hidden_cur = set(
+            projection.covered_rows(CURRENT_STATUS + self._get_span_col_offset())
+        )
         # 单元格级分隔虚线：合并 [M] 子行之间画虚线
         self._divider_delegate.set_divider_cells(set(projection.divider_cells))
 

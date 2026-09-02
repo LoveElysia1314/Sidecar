@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from dualign.common import load_text_lines
@@ -15,6 +16,7 @@ from dualign.core import (
 )
 from dualign.core.calibration import resolve_alignment_calibration
 from dualign.services.cached_encoder import CachedEncoder
+from dualign.services.cancellation import CancellationToken
 from dualign.services.embedding_cache import EmbeddingCache
 from dualign.services.report_io import (
     ReportError,
@@ -22,8 +24,14 @@ from dualign.services.report_io import (
     load_report,
     operations_from_report,
     relation_ids_from_report,
+    report_matches_documents,
     report_matches_alignment,
     save_report,
+)
+from dualign.services.state_reconciliation import (
+    reconcile_relation_state,
+    relation_fingerprints,
+    relation_fingerprints_from_report,
 )
 
 LEGACY_ALGORITHM = "legacy-anchor-v1"
@@ -79,7 +87,9 @@ def default_report_path(document_a_path: str | Path) -> Path:
     return path.parent / f"{stem}.report.json"
 
 
-def _review_flags_from_alignment(operations: list, alignment: dict) -> list:
+def _review_flags_from_alignment(
+    operations: list, alignment: dict, relation_ids=()
+) -> list:
     from dualign.services.repair import review_flags_for_uncertain_regions
 
     regions = []
@@ -115,6 +125,7 @@ def _review_flags_from_alignment(operations: list, alignment: dict) -> list:
         operations,
         regions,
         alternative_operations=alternative_operations,
+        relation_ids=relation_ids,
     )
 
 
@@ -274,7 +285,7 @@ def _auto_repair_state(
     needs_embeddings = repair_model is not None and any(
         (plan := choose_auto_repair(len(source), len(target), repair_strategy))
         is not None
-        and plan.requires_model
+        and plan.may_require_model
         for source, target, _score in state.snapshot.original_ops
     )
     if not needs_embeddings:
@@ -295,6 +306,8 @@ def align_documents(
     reset_work_state: bool = False,
     reuse_alignment: bool = True,
     preserve_work_state: bool = False,
+    previous_report_path: str | Path = "",
+    cancellation_token: CancellationToken | None = None,
 ) -> dict:
     """Align two documents and persist only their replayable work report.
 
@@ -302,8 +315,15 @@ def align_documents(
     expensive alignment relations. ``reset_work_state`` rebuilds the report;
     with ``preserve_work_state`` it retains existing review decisions and only
     auto-repairs unresolved relations, otherwise it starts from clean state.
+    ``previous_report_path`` may supply non-authoritative work state archived
+    by a caller after upstream text changed; it is never treated as a cache hit.
     """
 
+    def check_cancelled() -> None:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
+
+    check_cancelled()
     path_a = Path(document_a_path)
     path_b = Path(document_b_path)
     if not path_a.is_file():
@@ -314,6 +334,7 @@ def align_documents(
     cfg = config or AlignConfig()
     lines_a = load_text_lines(str(path_a))
     lines_b = load_text_lines(str(path_b))
+    check_cancelled()
 
     encoder = model
     if lines_a and lines_b:
@@ -327,6 +348,21 @@ def align_documents(
         )
     calibration_id = resolved.calibration_id if resolved is not None else ""
     provenance = _provenance(encoder, cfg, calibration_id)
+
+    existing_report = None
+    state_sources = [target]
+    if previous_report_path:
+        previous_target = Path(previous_report_path)
+        if previous_target != target:
+            state_sources.append(previous_target)
+    for state_source in state_sources:
+        if not state_source.is_file():
+            continue
+        try:
+            existing_report = load_report(state_source)
+            break
+        except ReportError:
+            continue
 
     if reuse_alignment and target.is_file():
         try:
@@ -388,6 +424,7 @@ def align_documents(
                         repair_log=repair_log,
                         previous=cached if preserve_work_state else None,
                     )
+                    check_cancelled()
                     save_report(report, target)
                     return {
                         "success": True,
@@ -417,58 +454,142 @@ def align_documents(
     if lines_a and lines_b:
         with EmbeddingCache(get_embedding_cache_path()) as cache:
             cached_encoder = CachedEncoder(encoder, cache)
+            embeddings_a = cached_encoder.encode(lines_a)
+            check_cancelled()
+            embeddings_b = cached_encoder.encode(lines_b)
+            check_cancelled()
             result = _run_alignment(
                 lines_a,
                 lines_b,
-                cached_encoder.encode(lines_a),
-                cached_encoder.encode(lines_b),
+                embeddings_a,
+                embeddings_b,
                 cfg,
                 cached_encoder.encode,
                 resolved.calibration if resolved is not None else None,
             )
+            check_cancelled()
     else:
         result = _empty_result(len(lines_a), len(lines_b), cfg)
 
     quality = _quality_diagnostics(result, len(lines_a), len(lines_b))
     alignment = alignment_payload(result, calibration_id=calibration_id)
-    repair_log = []
+    reconciliation = None
+    relation_ids = ()
+    previous = None
+    if existing_report is not None and not reset_work_state:
+        try:
+            old_operations = operations_from_report(existing_report)
+            old_relation_ids = relation_ids_from_report(existing_report)
+            old_fingerprints = relation_fingerprints_from_report(
+                existing_report, expected_count=len(old_operations)
+            )
+            documents_unchanged = report_matches_documents(
+                existing_report, path_a, path_b
+            )
+            # Legacy v1 reports did not persist relation content.  They can be
+            # migrated safely only while the exact documents are still here.
+            if old_fingerprints is None and documents_unchanged:
+                old_fingerprints = relation_fingerprints(
+                    old_operations, lines_a, lines_b
+                )
+            if old_fingerprints is not None:
+                reconciliation = reconcile_relation_state(
+                    source_operations=old_operations,
+                    source_relation_ids=old_relation_ids,
+                    source_fingerprints=old_fingerprints,
+                    target_operations=result.all_ops,
+                    target_fingerprints=relation_fingerprints(
+                        result.all_ops, lines_a, lines_b
+                    ),
+                    repair_log=existing_report.get("repair_log", ()),
+                    ai_proposals=existing_report.get("ai_proposals"),
+                    scores=existing_report.get("scores"),
+                    positional_identity=documents_unchanged,
+                    cause="alignment-refresh",
+                )
+                relation_ids = reconciliation.relation_ids
+                previous = dict(existing_report)
+                previous["ai_proposals"] = reconciliation.ai_proposals
+                previous["scores"] = reconciliation.scores
+                old_alignment = dict(existing_report.get("alignment") or {})
+                preserve_ai_review = (
+                    reconciliation.audit["invalidated_relations"] == 0
+                    and reconciliation.audit["new_relations"] == 0
+                    and old_alignment.get("status", "aligned") == "aligned"
+                    and result.status == "aligned"
+                )
+                previous["ai_review"] = (
+                    existing_report.get("ai_review", {}) if preserve_ai_review else {}
+                )
+                history = list(previous.get("history", []))
+                history.append(
+                    {
+                        "type": "alignment-state-reconciliation",
+                        "at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                        **reconciliation.audit,
+                        "preserved_ai_review": preserve_ai_review,
+                    }
+                )
+                previous["history"] = history
+        except (ReportError, ValueError):
+            reconciliation = None
+            relation_ids = ()
+            previous = None
+
+    repair_log = list(reconciliation.repair_log) if reconciliation else []
     if result.status == "aligned" and result.all_ops:
+        from dualign.models.action import RepairAction
         from dualign.models.state import AlignmentSnapshot
         from dualign.services.repair import RepairState
 
         state = RepairState(
-            AlignmentSnapshot.from_alignment(result.all_ops, lines_a, lines_b)
+            AlignmentSnapshot.from_alignment(
+                result.all_ops, lines_a, lines_b, relation_ids
+            ),
+            [RepairAction.from_dict(action) for action in repair_log],
         )
-        repair_log = _auto_repair_state(state, strategy, encoder, quality).repair_log
+        repair_log = _auto_repair_state(
+            state,
+            strategy,
+            encoder,
+            quality,
+            unresolved_only=reconciliation is not None,
+        ).repair_log
     elif result.status == "needs_review" and result.all_ops:
         from dualign.services.repair import review_flags_for_uncertain_regions
 
-        repair_log = review_flags_for_uncertain_regions(
+        generated_flags = review_flags_for_uncertain_regions(
             result.all_ops,
             result.uncertain_regions,
             alternative_operations=result.alternative_ops,
+            relation_ids=relation_ids,
         )
-
-    previous = None
-    if reuse_alignment and target.is_file() and not reset_work_state:
-        try:
-            candidate = load_report(target)
-            if report_matches_alignment(candidate, path_a, path_b, provenance):
-                previous = candidate
-        except ReportError:
-            pass
+        already_owned = {
+            relation_id
+            for action in repair_log
+            for relation_id in action.get("relation_ids", ())
+        }
+        repair_log.extend(
+            action
+            for action in generated_flags
+            if not (set(action.relation_ids) & already_owned)
+        )
     report = build_report(
         chapter_id=path_a.stem.split(".")[0],
         document_a_path=path_a,
         document_b_path=path_b,
         operations=result.all_ops,
+        relation_ids=relation_ids,
         stats=result.stats or {},
         quality=quality,
         provenance=provenance,
         alignment=alignment,
         repair_log=repair_log,
         previous=previous,
+        document_a_lines=lines_a,
+        document_b_lines=lines_b,
     )
+    check_cancelled()
     save_report(report, target)
     return {
         "success": True,
@@ -480,6 +601,9 @@ def align_documents(
         "reason": result.reason or None,
         "cache_hit": False,
         "work_state_reset": reset_work_state,
+        "work_state_reconciliation": (
+            dict(reconciliation.audit) if reconciliation is not None else None
+        ),
     }
 
 

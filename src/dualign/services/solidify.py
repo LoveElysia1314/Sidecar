@@ -20,6 +20,7 @@ from dualign.models.action import RepairAction
 from dualign.models.pair_editing import PairEditingState
 from dualign.services._text_diff import unified_text_diff
 from dualign.services.alignment_io import create_alignment_pair
+from dualign.services.cancellation import CancellationError
 from dualign.services.pair_save import (
     PairSaveError,
     PairSaveResult,
@@ -169,6 +170,28 @@ def _replacement_count(values: object) -> int:
 
 
 @dataclass(frozen=True)
+class SolidificationChange:
+    """One applied relation-level effect with exact document deltas."""
+
+    relation_ids: tuple[str, ...]
+    kind: str
+    source: str
+    effects: tuple[str, ...]
+    document_a_before: tuple[str, ...]
+    document_a_after: tuple[str, ...]
+    document_b_before: tuple[str, ...]
+    document_b_after: tuple[str, ...]
+
+    @property
+    def document_a_changed(self) -> bool:
+        return self.document_a_before != self.document_a_after
+
+    @property
+    def document_b_changed(self) -> bool:
+        return self.document_b_before != self.document_b_after
+
+
+@dataclass(frozen=True)
 class SolidificationPlan:
     baseline: PairEditingState
     solidified: PairEditingState
@@ -176,6 +199,7 @@ class SolidificationPlan:
     remaining_actions: tuple[RepairAction, ...]
     applied: tuple[dict, ...]
     changed_relation_ids: frozenset[str]
+    changes: tuple[SolidificationChange, ...] = ()
 
     @property
     def document_a_changed(self) -> bool:
@@ -289,6 +313,7 @@ class BatchSolidificationResult:
     succeeded: tuple[SolidifyTarget, ...]
     failed: tuple[BatchSolidificationIssue, ...]
     skipped: tuple[BatchSolidificationIssue, ...]
+    cancelled: bool = False
 
 
 @dataclass(frozen=True)
@@ -315,6 +340,38 @@ def build_solidification_plan(
     relation_to_link = {link.id: link.id for link in state.links}
     pending: list[_PendingAction] = []
     applied: list[dict] = []
+    changes: list[SolidificationChange] = []
+
+    def relation_texts(
+        current: PairEditingState, link_ids: tuple[str, ...]
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        return (
+            tuple(
+                _block_texts(current, _ordered_block_ids(current, link_ids, "a"), "a")
+            ),
+            tuple(
+                _block_texts(current, _ordered_block_ids(current, link_ids, "b"), "b")
+            ),
+        )
+
+    def record_change(
+        action: RepairAction,
+        effects: Iterable[str],
+        before: tuple[tuple[str, ...], tuple[str, ...]],
+        after: tuple[tuple[str, ...], tuple[str, ...]],
+    ) -> None:
+        changes.append(
+            SolidificationChange(
+                relation_ids=action.relation_ids,
+                kind=action.kind,
+                source=action.source,
+                effects=tuple(sorted(effects)),
+                document_a_before=before[0],
+                document_a_after=after[0],
+                document_b_before=before[1],
+                document_b_after=after[1],
+            )
+        )
 
     def links_for(action: RepairAction) -> tuple[str, ...]:
         result: list[str] = []
@@ -361,6 +418,7 @@ def build_solidification_plan(
             if not selected:
                 pending.append(_PendingAction(action, link_ids))
                 continue
+            before = relation_texts(state, link_ids)
             anchor = merge_links(link_ids, action.relation_ids)
             kwargs = {}
             if "a" in selected:
@@ -372,11 +430,18 @@ def build_solidification_plan(
                     _smart_join_lines(_block_texts(state, ids_b, "b"))
                 ]
             state = state.edit_link_content(anchor, **kwargs)
+            selected_effects = tuple(effects[s] for s in selected)
             applied.append(
                 {
                     "action": action.to_dict(),
-                    "effects": sorted(effects[s] for s in selected),
+                    "effects": sorted(selected_effects),
                 }
+            )
+            record_change(
+                action,
+                selected_effects,
+                before,
+                relation_texts(state, (anchor,)),
             )
             remaining_sides = set(effects) - selected
             if remaining_sides:
@@ -405,6 +470,7 @@ def build_solidification_plan(
             if selected != affected:
                 pending.append(_PendingAction(action, link_ids))
                 continue
+            before = relation_texts(state, link_ids)
             anchor = merge_links(link_ids, action.relation_ids)
             kwargs = {
                 "document_a" if side == "a" else "document_b": list(
@@ -413,11 +479,18 @@ def build_solidification_plan(
                 for side in affected
             }
             state = state.edit_link_content(anchor, **kwargs)
+            selected_effects = tuple(f"split_{side}" for side in affected)
             applied.append(
                 {
                     "action": action.to_dict(),
-                    "effects": sorted(f"split_{side}" for side in affected),
+                    "effects": sorted(selected_effects),
                 }
+            )
+            record_change(
+                action,
+                selected_effects,
+                before,
+                relation_texts(state, (anchor,)),
             )
             continue
 
@@ -437,17 +510,25 @@ def build_solidification_plan(
             if not selected:
                 pending.append(_PendingAction(action, link_ids))
                 continue
+            before = relation_texts(state, link_ids)
             anchor = merge_links(link_ids, action.relation_ids)
             kwargs = {
                 candidates[side][2]: list(action.data.get(candidates[side][1]) or ())
                 for side in selected
             }
             state = state.edit_link_content(anchor, **kwargs)
+            selected_effects = tuple(candidates[s][0] for s in selected)
             applied.append(
                 {
                     "action": action.to_dict(),
-                    "effects": sorted(candidates[s][0] for s in selected),
+                    "effects": sorted(selected_effects),
                 }
+            )
+            record_change(
+                action,
+                selected_effects,
+                before,
+                relation_texts(state, (anchor,)),
             )
             remaining_sides = present - selected
             if remaining_sides:
@@ -468,9 +549,11 @@ def build_solidification_plan(
             if not policy.includes("delete_pair"):
                 pending.append(_PendingAction(action, link_ids))
                 continue
+            before = relation_texts(state, link_ids)
             anchor = merge_links(link_ids, action.relation_ids)
             state = state.delete_link_content(anchor)
             applied.append({"action": action.to_dict(), "effects": ["delete_pair"]})
+            record_change(action, ("delete_pair",), before, ((), ()))
             continue
 
         pending.append(_PendingAction(action, link_ids))
@@ -503,6 +586,7 @@ def build_solidification_plan(
         remaining_actions=tuple(remaining),
         applied=tuple(applied),
         changed_relation_ids=changed_relation_ids,
+        changes=tuple(changes),
     )
 
 
@@ -570,14 +654,23 @@ def solidify_report(
 
 
 def plan_batch_solidification(
-    targets: Iterable[SolidifyTarget], policy: SolidifyPolicy
+    targets: Iterable[SolidifyTarget],
+    policy: SolidifyPolicy,
+    *,
+    cancellation_token=None,
+    progress_callback=None,
 ) -> BatchSolidificationPlan:
     """Build an immutable, exact batch preview without modifying any file."""
 
+    target_items = tuple(targets)
     ready: list[BatchSolidificationItem] = []
     skipped: list[BatchSolidificationIssue] = []
     seen: set[tuple[str, str, str]] = set()
-    for target in targets:
+    for index, target in enumerate(target_items, 1):
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
+        if progress_callback is not None:
+            progress_callback(index, len(target_items), target)
         identity = tuple(
             os.path.normcase(str(Path(path).resolve()))
             for path in (
@@ -617,14 +710,23 @@ def plan_batch_solidification(
 
 def apply_batch_solidification(
     batch: BatchSolidificationPlan,
+    *,
+    cancellation_token=None,
+    progress_callback=None,
 ) -> BatchSolidificationResult:
     """Commit exactly the plans shown in a batch preview, one transaction each."""
 
     succeeded: list[SolidifyTarget] = []
     failed: list[BatchSolidificationIssue] = []
-    for item in batch.ready:
+    cancelled = False
+    for index, item in enumerate(batch.ready, 1):
+        if cancellation_token is not None and cancellation_token.is_cancelled:
+            cancelled = True
+            break
         plan = item.plan
         target = item.target
+        if progress_callback is not None:
+            progress_callback(index, len(batch.ready), target, "prepare", True)
         try:
             save_pair_transaction(
                 plan.solidified,
@@ -638,8 +740,27 @@ def apply_batch_solidification(
                 solidification_policy=batch.policy.to_dict(),
                 applied_repairs=plan.applied,
                 changed_relation_ids=plan.changed_relation_ids,
+                cancellation_token=cancellation_token,
+                progress_callback=(
+                    (
+                        lambda message, cancellable, i=index, t=target: progress_callback(
+                            i,
+                            len(batch.ready),
+                            t,
+                            message,
+                            cancellable,
+                        )
+                    )
+                    if progress_callback is not None
+                    else None
+                ),
             )
             succeeded.append(target)
+        except CancellationError:
+            cancelled = True
+            break
         except (OSError, ValueError, PairSaveError) as exc:
             failed.append(BatchSolidificationIssue(target, str(exc), error=True))
-    return BatchSolidificationResult(tuple(succeeded), tuple(failed), batch.skipped)
+    return BatchSolidificationResult(
+        tuple(succeeded), tuple(failed), batch.skipped, cancelled
+    )

@@ -19,6 +19,10 @@ from dualign.algorithms.mdl import (
     normalize_embeddings,
     symmetric_nearest_score,
 )
+from dualign.algorithms.mdl.cosine_observation import (
+    COSINE_OBSERVATION_ID,
+    observed_cosine_matrix,
+)
 from dualign.services.cached_encoder import CachedEncoder
 from dualign.services.embedding import _try_lazy_load_model
 from dualign.services.embedding_cache import EmbeddingCache
@@ -113,6 +117,8 @@ def main() -> int:
                 {
                     "case": case["number"],
                     "report": str(report_path),
+                    "lines_a": lines_a,
+                    "lines_b": lines_b,
                     "a": normalize_embeddings(encoder.encode(lines_a)),
                     "b": normalize_embeddings(encoder.encode(lines_b)),
                 }
@@ -122,7 +128,12 @@ def main() -> int:
         nonparallel = []
         score_matrices = {}
         for index, document in enumerate(documents):
-            scores = np.dot(document["a"], document["b"].T)
+            scores = observed_cosine_matrix(
+                document["lines_a"],
+                document["lines_b"],
+                document["a"],
+                document["b"],
+            )
             score_matrices[document["case"]] = scores
             parallel.append(
                 {
@@ -138,7 +149,12 @@ def main() -> int:
             # sides, never pairs a document with itself, and has no random seed
             # or searched pairing. It is calibration, not a held-out estimate.
             other = documents[(index + 1) % len(documents)]
-            mismatch_scores = np.dot(document["a"], other["b"].T)
+            mismatch_scores = observed_cosine_matrix(
+                document["lines_a"],
+                other["lines_b"],
+                document["a"],
+                other["b"],
+            )
             nonparallel.append(
                 {
                     "kind": "nonparallel",
@@ -158,9 +174,11 @@ def main() -> int:
             raw = report_path.parent.parent / "raw"
             lines_a = load_text_lines(raw / report_documents["a"]["path"])
             lines_b = load_text_lines(raw / report_documents["b"]["path"])
-            scores = np.dot(
+            scores = observed_cosine_matrix(
+                lines_a,
+                lines_b,
                 normalize_embeddings(encoder.encode(lines_a)),
-                normalize_embeddings(encoder.encode(lines_b)).T,
+                normalize_embeddings(encoder.encode(lines_b)),
             )
             acceptable_hard.append(
                 {
@@ -237,6 +255,7 @@ def main() -> int:
 
         payload = {
             "experiment": "minimal deterministic alignment-gate calibration",
+            "score_observation": COSINE_OBSERVATION_ID,
             "alpha": args.alpha,
             "null_pairing": "cyclic_next_derangement",
             "reorder_stress": "four equal blocks; middle swap and reverse",

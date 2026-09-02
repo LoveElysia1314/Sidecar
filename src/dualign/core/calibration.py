@@ -52,7 +52,7 @@ def embedding_identity(model=None) -> EmbeddingIdentity:
 
 def _load_resources() -> list[dict]:
     resource = files("dualign.resources").joinpath(
-        "alignment_calibration_harrier_0_6b_v2.json"
+        "alignment_calibration_harrier_0_6b_v3.json"
     )
     return [json.loads(resource.read_text(encoding="utf-8"))]
 

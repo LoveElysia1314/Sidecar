@@ -57,7 +57,9 @@ plan, result = solidify_report(
 )
 ```
 
-GUI 与 CLI 都使用该 API 和 `pair_save` 三文件事务。可用类型为 `merge_a`、`split_a`、`edit_a`、`merge_b`、`split_b`、`edit_b` 和 `delete_pair`；占位不是固化类型。双侧 N:M 结构操作只有在两侧相应类型均启用时才原子应用。报告会对固化后的未来正文重新运行正式对齐；已固化效果进入 `history`，未固化操作、待处理 AI 建议、评分以及 `flag` / `ok` 仅在双侧有序文本关系完全相同且唯一时重锚。程序不创建 `.bak`。
+GUI 与 CLI 都使用该 API 和 `pair_save` 三文件事务。可用类型为 `merge_a`、`split_a`、`edit_a`、`merge_b`、`split_b`、`edit_b` 和 `delete_pair`；占位不是固化类型。双侧 N:M 结构操作只有在两侧相应类型均启用时才原子应用。报告会对固化后的未来正文重新运行正式对齐；已固化效果进入 `history`。未固化操作、待处理 AI 建议和评分仅在双侧有序文本关系完全相同且唯一时重锚；`flag` 同样保留，`ok` 还要求新基线中的关系仍属异常。用户 `ok` 会淘汰同关系的待处理 AI 建议。程序不创建 `.bak`。
+
+报告的 `anomaly_diagnostics` 固化当次关系异常及低分参数。`project_relation_statuses()` 和外部摘要消费者优先读取这些事实；修改异常检测设置不会重判已有报告，只在下一次重新对齐时生成新的诊断基线。
 
 批量调用使用与 CLI 相同的共享计划：
 

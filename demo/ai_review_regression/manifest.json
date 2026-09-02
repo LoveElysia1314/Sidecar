@@ -1,0 +1,3311 @@
+{
+  "version": 1,
+  "strategy": "src",
+  "logical_line_count": 300,
+  "operations": [
+    {
+      "source": [
+        0
+      ],
+      "target": [
+        0
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        1
+      ],
+      "target": [
+        1
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        2
+      ],
+      "target": [
+        2
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        3
+      ],
+      "target": [
+        3
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        4
+      ],
+      "target": [
+        4
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        5
+      ],
+      "target": [
+        5
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        6
+      ],
+      "target": [
+        6
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        7
+      ],
+      "target": [
+        7
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        8,
+        9
+      ],
+      "target": [
+        8
+      ],
+      "score": 0.61
+    },
+    {
+      "source": [
+        10
+      ],
+      "target": [
+        9
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        11
+      ],
+      "target": [
+        10
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        12
+      ],
+      "target": [
+        11
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        13
+      ],
+      "target": [
+        12
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        14
+      ],
+      "target": [
+        13
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        15
+      ],
+      "target": [
+        14
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        16
+      ],
+      "target": [
+        15
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        17
+      ],
+      "target": [
+        16
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        18
+      ],
+      "target": [
+        17,
+        18
+      ],
+      "score": 0.64
+    },
+    {
+      "source": [
+        19
+      ],
+      "target": [
+        19
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        20
+      ],
+      "target": [
+        20
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        21
+      ],
+      "target": [
+        21
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        22
+      ],
+      "target": [
+        22
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        23
+      ],
+      "target": [
+        23
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        24
+      ],
+      "target": [
+        24
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        25
+      ],
+      "target": [
+        25
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        26
+      ],
+      "target": [
+        26
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        27
+      ],
+      "target": [],
+      "score": 0.0
+    },
+    {
+      "source": [
+        28
+      ],
+      "target": [
+        27
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        29
+      ],
+      "target": [
+        28
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        30
+      ],
+      "target": [
+        29
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        31
+      ],
+      "target": [
+        30
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        32
+      ],
+      "target": [
+        31
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        33
+      ],
+      "target": [
+        32
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        34
+      ],
+      "target": [
+        33
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        35
+      ],
+      "target": [
+        34
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [],
+      "target": [
+        35
+      ],
+      "score": 0.0
+    },
+    {
+      "source": [
+        36
+      ],
+      "target": [
+        36
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        37
+      ],
+      "target": [
+        37
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        38
+      ],
+      "target": [
+        38
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        39
+      ],
+      "target": [
+        39
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        40
+      ],
+      "target": [
+        40
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        41
+      ],
+      "target": [
+        41
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        42
+      ],
+      "target": [
+        42
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        43
+      ],
+      "target": [
+        43
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        44,
+        45
+      ],
+      "target": [
+        44,
+        45
+      ],
+      "score": 0.72
+    },
+    {
+      "source": [
+        46
+      ],
+      "target": [
+        46
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        47
+      ],
+      "target": [
+        47
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        48
+      ],
+      "target": [
+        48
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        49
+      ],
+      "target": [
+        49
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        50
+      ],
+      "target": [
+        50
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        51
+      ],
+      "target": [
+        51
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        52
+      ],
+      "target": [
+        52
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        53
+      ],
+      "target": [
+        53
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        54,
+        55
+      ],
+      "target": [
+        54
+      ],
+      "score": 0.55
+    },
+    {
+      "source": [
+        56
+      ],
+      "target": [
+        55
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        57
+      ],
+      "target": [
+        56
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        58
+      ],
+      "target": [
+        57
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        59
+      ],
+      "target": [
+        58
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        60
+      ],
+      "target": [
+        59
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        61
+      ],
+      "target": [
+        60
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        62
+      ],
+      "target": [
+        61
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        63
+      ],
+      "target": [
+        62
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        64
+      ],
+      "target": [
+        63,
+        64
+      ],
+      "score": 0.58
+    },
+    {
+      "source": [
+        65
+      ],
+      "target": [
+        65
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        66
+      ],
+      "target": [
+        66
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        67
+      ],
+      "target": [
+        67
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        68
+      ],
+      "target": [
+        68
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        69
+      ],
+      "target": [
+        69
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        70
+      ],
+      "target": [
+        70
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        71
+      ],
+      "target": [
+        71
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        72
+      ],
+      "target": [
+        72
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        73
+      ],
+      "target": [
+        73
+      ],
+      "score": 0.69
+    },
+    {
+      "source": [
+        74
+      ],
+      "target": [
+        74
+      ],
+      "score": 0.69
+    },
+    {
+      "source": [
+        75
+      ],
+      "target": [
+        75
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        76
+      ],
+      "target": [
+        76
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        77
+      ],
+      "target": [
+        77
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        78
+      ],
+      "target": [
+        78
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        79
+      ],
+      "target": [
+        79
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        80
+      ],
+      "target": [
+        80
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        81
+      ],
+      "target": [
+        81
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        82
+      ],
+      "target": [
+        82
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        83
+      ],
+      "target": [
+        83
+      ],
+      "score": 0.67
+    },
+    {
+      "source": [
+        84
+      ],
+      "target": [
+        84
+      ],
+      "score": 0.67
+    },
+    {
+      "source": [
+        85
+      ],
+      "target": [
+        85
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        86
+      ],
+      "target": [
+        86
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        87
+      ],
+      "target": [
+        87
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        88
+      ],
+      "target": [
+        88
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        89
+      ],
+      "target": [
+        89
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        90
+      ],
+      "target": [
+        90
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        91
+      ],
+      "target": [
+        91
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        92
+      ],
+      "target": [
+        92
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        93
+      ],
+      "target": [
+        93,
+        94
+      ],
+      "score": 0.63
+    },
+    {
+      "source": [
+        94
+      ],
+      "target": [],
+      "score": 0.0
+    },
+    {
+      "source": [
+        95
+      ],
+      "target": [
+        95
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        96
+      ],
+      "target": [
+        96
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        97
+      ],
+      "target": [
+        97
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        98
+      ],
+      "target": [
+        98
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        99
+      ],
+      "target": [
+        99
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        100
+      ],
+      "target": [
+        100
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        101
+      ],
+      "target": [
+        101
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        102
+      ],
+      "target": [
+        102
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        103,
+        104,
+        105,
+        106,
+        107
+      ],
+      "target": [
+        103,
+        104,
+        105,
+        106,
+        107
+      ],
+      "score": 0.71
+    },
+    {
+      "source": [
+        108
+      ],
+      "target": [
+        108
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        109
+      ],
+      "target": [
+        109
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        110
+      ],
+      "target": [
+        110
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        111
+      ],
+      "target": [
+        111
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        112
+      ],
+      "target": [
+        112
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        113
+      ],
+      "target": [
+        113
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        114
+      ],
+      "target": [
+        114
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        115
+      ],
+      "target": [
+        115
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        116,
+        117
+      ],
+      "target": [
+        116,
+        117
+      ],
+      "score": 0.78
+    },
+    {
+      "source": [
+        118
+      ],
+      "target": [
+        118
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        119
+      ],
+      "target": [
+        119
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        120
+      ],
+      "target": [
+        120
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        121
+      ],
+      "target": [
+        121
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        122
+      ],
+      "target": [
+        122
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        123
+      ],
+      "target": [
+        123
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        124
+      ],
+      "target": [
+        124
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        125
+      ],
+      "target": [
+        125
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        126
+      ],
+      "target": [
+        126
+      ],
+      "score": 0.76
+    },
+    {
+      "source": [
+        127
+      ],
+      "target": [
+        127
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        128
+      ],
+      "target": [
+        128
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        129
+      ],
+      "target": [
+        129
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        130
+      ],
+      "target": [
+        130
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        131
+      ],
+      "target": [
+        131
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        132
+      ],
+      "target": [
+        132
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        133
+      ],
+      "target": [
+        133
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        134
+      ],
+      "target": [
+        134
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        135
+      ],
+      "target": [
+        135
+      ],
+      "score": 0.81
+    },
+    {
+      "source": [
+        136
+      ],
+      "target": [
+        136
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        137
+      ],
+      "target": [
+        137
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        138
+      ],
+      "target": [
+        138
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        139
+      ],
+      "target": [
+        139
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        140
+      ],
+      "target": [
+        140
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        141
+      ],
+      "target": [
+        141
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        142
+      ],
+      "target": [
+        142
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        143
+      ],
+      "target": [
+        143
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        144
+      ],
+      "target": [
+        144
+      ],
+      "score": 0.82
+    },
+    {
+      "source": [
+        145
+      ],
+      "target": [
+        145
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        146
+      ],
+      "target": [
+        146
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        147
+      ],
+      "target": [
+        147
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        148
+      ],
+      "target": [
+        148
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        149
+      ],
+      "target": [
+        149
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        150
+      ],
+      "target": [
+        150
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        151
+      ],
+      "target": [
+        151
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        152
+      ],
+      "target": [
+        152
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [],
+      "target": [
+        153
+      ],
+      "score": 0.0
+    },
+    {
+      "source": [
+        153
+      ],
+      "target": [
+        154
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        154
+      ],
+      "target": [
+        155
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        155
+      ],
+      "target": [
+        156
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        156
+      ],
+      "target": [
+        157
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        157
+      ],
+      "target": [
+        158
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        158
+      ],
+      "target": [
+        159
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        159
+      ],
+      "target": [
+        160
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        160
+      ],
+      "target": [
+        161
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        161
+      ],
+      "target": [
+        162
+      ],
+      "score": 0.57
+    },
+    {
+      "source": [
+        162
+      ],
+      "target": [
+        163
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        163
+      ],
+      "target": [
+        164
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        164
+      ],
+      "target": [
+        165
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        165
+      ],
+      "target": [
+        166
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        166
+      ],
+      "target": [
+        167
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        167
+      ],
+      "target": [
+        168
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        168
+      ],
+      "target": [
+        169
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        169
+      ],
+      "target": [
+        170
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        170
+      ],
+      "target": [
+        171
+      ],
+      "score": 0.74
+    },
+    {
+      "source": [
+        171
+      ],
+      "target": [
+        172
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        172
+      ],
+      "target": [
+        173
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        173
+      ],
+      "target": [
+        174
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        174
+      ],
+      "target": [
+        175
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        175
+      ],
+      "target": [
+        176
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        176
+      ],
+      "target": [
+        177
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        177
+      ],
+      "target": [
+        178
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        178
+      ],
+      "target": [
+        179
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        179
+      ],
+      "target": [
+        180
+      ],
+      "score": 0.08
+    },
+    {
+      "source": [
+        180
+      ],
+      "target": [
+        181
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        181
+      ],
+      "target": [
+        182
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        182
+      ],
+      "target": [
+        183
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        183
+      ],
+      "target": [
+        184
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        184
+      ],
+      "target": [
+        185
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        185
+      ],
+      "target": [
+        186
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        186
+      ],
+      "target": [
+        187
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        187
+      ],
+      "target": [
+        188
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        188
+      ],
+      "target": [
+        189
+      ],
+      "score": 0.05
+    },
+    {
+      "source": [
+        189
+      ],
+      "target": [
+        190
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        190
+      ],
+      "target": [
+        191
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        191
+      ],
+      "target": [
+        192
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        192
+      ],
+      "target": [
+        193
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        193
+      ],
+      "target": [
+        194
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        194
+      ],
+      "target": [
+        195
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        195
+      ],
+      "target": [
+        196
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        196
+      ],
+      "target": [
+        197
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        197
+      ],
+      "target": [
+        198
+      ],
+      "score": 0.07
+    },
+    {
+      "source": [
+        198
+      ],
+      "target": [
+        199
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        199
+      ],
+      "target": [
+        200
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        200
+      ],
+      "target": [
+        201
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        201
+      ],
+      "target": [
+        202
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        202
+      ],
+      "target": [
+        203
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        203
+      ],
+      "target": [
+        204
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        204
+      ],
+      "target": [
+        205
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        205
+      ],
+      "target": [
+        206
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        206
+      ],
+      "target": [
+        207
+      ],
+      "score": 0.82
+    },
+    {
+      "source": [
+        207
+      ],
+      "target": [],
+      "score": 0.0
+    },
+    {
+      "source": [
+        208
+      ],
+      "target": [
+        208
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        209
+      ],
+      "target": [
+        209
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        210
+      ],
+      "target": [
+        210
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        211
+      ],
+      "target": [
+        211
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        212
+      ],
+      "target": [
+        212
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        213
+      ],
+      "target": [
+        213
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        214
+      ],
+      "target": [
+        214
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        215
+      ],
+      "target": [
+        215
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        216
+      ],
+      "target": [
+        216
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        217
+      ],
+      "target": [
+        217
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        218
+      ],
+      "target": [
+        218
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        219
+      ],
+      "target": [
+        219
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        220
+      ],
+      "target": [
+        220
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        221
+      ],
+      "target": [
+        221
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        222
+      ],
+      "target": [
+        222
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        223
+      ],
+      "target": [
+        223
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        224
+      ],
+      "target": [
+        224
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        225
+      ],
+      "target": [
+        225
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        226
+      ],
+      "target": [
+        226
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        227
+      ],
+      "target": [
+        227
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        228
+      ],
+      "target": [
+        228
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        229
+      ],
+      "target": [
+        229
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        230
+      ],
+      "target": [
+        230
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        231
+      ],
+      "target": [
+        231
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        232
+      ],
+      "target": [
+        232
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        233
+      ],
+      "target": [
+        233
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        234
+      ],
+      "target": [
+        234
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        235
+      ],
+      "target": [
+        235
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        236
+      ],
+      "target": [
+        236
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        237
+      ],
+      "target": [
+        237
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        238
+      ],
+      "target": [
+        238
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        239
+      ],
+      "target": [
+        239
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        240
+      ],
+      "target": [
+        240
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        241
+      ],
+      "target": [
+        241
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        242
+      ],
+      "target": [
+        242
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        243
+      ],
+      "target": [
+        243
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        244
+      ],
+      "target": [
+        244
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        245
+      ],
+      "target": [
+        245
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        246
+      ],
+      "target": [
+        246
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        247
+      ],
+      "target": [
+        247
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        248
+      ],
+      "target": [
+        248
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        249
+      ],
+      "target": [
+        249
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        250
+      ],
+      "target": [
+        250
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        251
+      ],
+      "target": [
+        251
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        252
+      ],
+      "target": [
+        252
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        253
+      ],
+      "target": [
+        253
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        254
+      ],
+      "target": [
+        254
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        255
+      ],
+      "target": [
+        255
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        256
+      ],
+      "target": [
+        256
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        257
+      ],
+      "target": [
+        257
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        258
+      ],
+      "target": [
+        258
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        259
+      ],
+      "target": [
+        259
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        260
+      ],
+      "target": [
+        260
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        261
+      ],
+      "target": [
+        261
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        262
+      ],
+      "target": [
+        262
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        263
+      ],
+      "target": [
+        263
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        264
+      ],
+      "target": [
+        264
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        265
+      ],
+      "target": [
+        265
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        266
+      ],
+      "target": [
+        266
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        267
+      ],
+      "target": [
+        267
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        268
+      ],
+      "target": [
+        268
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        269
+      ],
+      "target": [
+        269
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        270
+      ],
+      "target": [
+        270
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        271
+      ],
+      "target": [
+        271
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        272
+      ],
+      "target": [
+        272
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        273
+      ],
+      "target": [
+        273
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        274
+      ],
+      "target": [
+        274
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        275
+      ],
+      "target": [
+        275
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        276
+      ],
+      "target": [
+        276
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        277
+      ],
+      "target": [
+        277
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        278
+      ],
+      "target": [
+        278
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        279
+      ],
+      "target": [
+        279
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        280
+      ],
+      "target": [
+        280
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        281
+      ],
+      "target": [
+        281
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        282
+      ],
+      "target": [
+        282
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        283
+      ],
+      "target": [
+        283
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        284
+      ],
+      "target": [
+        284
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        285
+      ],
+      "target": [
+        285
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        286
+      ],
+      "target": [
+        286
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        287
+      ],
+      "target": [
+        287
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        288
+      ],
+      "target": [
+        288
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        289
+      ],
+      "target": [
+        289
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        290
+      ],
+      "target": [
+        290
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        291
+      ],
+      "target": [
+        291
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        292
+      ],
+      "target": [
+        292
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        293
+      ],
+      "target": [
+        293
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        294
+      ],
+      "target": [
+        294
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        295
+      ],
+      "target": [
+        295
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        296
+      ],
+      "target": [
+        296
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        297
+      ],
+      "target": [
+        297
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        298
+      ],
+      "target": [
+        298
+      ],
+      "score": 0.92
+    },
+    {
+      "source": [
+        299
+      ],
+      "target": [
+        299
+      ],
+      "score": 0.92
+    }
+  ],
+  "pre_actions": [
+    {
+      "kind": "flag",
+      "relations": [
+        71,
+        72
+      ],
+      "source": "auto",
+      "data": {
+        "note": "结构证据存在分歧，请结合上下文判断。",
+        "reason": "composition_disagreement",
+        "uncertain_region": {
+          "start": {
+            "source": 73,
+            "target": 73
+          },
+          "end": {
+            "source": 75,
+            "target": 75
+          }
+        },
+        "current_structure": "1:1+1:1",
+        "alternative_structure": ""
+      }
+    },
+    {
+      "kind": "flag",
+      "relations": [
+        81,
+        82
+      ],
+      "source": "auto",
+      "data": {
+        "note": "结构证据存在分歧，请结合上下文判断。",
+        "reason": "composition_disagreement",
+        "uncertain_region": {
+          "start": {
+            "source": 83,
+            "target": 83
+          },
+          "end": {
+            "source": 85,
+            "target": 85
+          }
+        },
+        "current_structure": "1:1+1:1",
+        "alternative_structure": ""
+      }
+    },
+    {
+      "kind": "flag",
+      "relations": [
+        92
+      ],
+      "source": "auto",
+      "data": {
+        "note": "自动质量检测：目标侧存在缺失，请结合邻文核查信息归属。"
+      }
+    },
+    {
+      "kind": "flag",
+      "relations": [
+        110
+      ],
+      "source": "user",
+      "data": {
+        "note": "{待翻译}"
+      }
+    },
+    {
+      "kind": "flag",
+      "relations": [
+        128
+      ],
+      "source": "auto",
+      "data": {
+        "note": "自动质量检测：请核查信息是否完整对应。"
+      }
+    },
+    {
+      "kind": "flag",
+      "relations": [
+        137
+      ],
+      "source": "auto",
+      "data": {
+        "note": "自动质量检测：请核查文本是否达到可发布质量。"
+      }
+    },
+    {
+      "kind": "flag",
+      "relations": [
+        200,
+        201
+      ],
+      "source": "auto",
+      "data": {
+        "note": "结构证据存在分歧，请结合上下文判断。",
+        "reason": "composition_disagreement",
+        "uncertain_region": {
+          "start": {
+            "source": 206,
+            "target": 207
+          },
+          "end": {
+            "source": 208,
+            "target": 208
+          }
+        },
+        "current_structure": "1:1+1:0",
+        "alternative_structure": "2:1"
+      }
+    }
+  ],
+  "review_relations": [
+    8,
+    17,
+    26,
+    35,
+    44,
+    53,
+    62,
+    71,
+    72,
+    81,
+    82,
+    92,
+    101,
+    110,
+    119,
+    128,
+    137,
+    146,
+    155,
+    164,
+    173,
+    182,
+    191,
+    200,
+    201
+  ],
+  "cases": [
+    {
+      "id": "matrix_split_target",
+      "title": "独立原文句应拆分合并译文",
+      "category": "strategy_matrix",
+      "relations": [
+        8
+      ],
+      "review_relations": [
+        8
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "split",
+          "edit"
+        ],
+        "pair_count": 2,
+        "target_contains_all": [
+          "rain",
+          "children"
+        ]
+      }
+    },
+    {
+      "id": "matrix_merge_target",
+      "title": "同一原文句的译文断行应合并",
+      "category": "strategy_matrix",
+      "relations": [
+        17
+      ],
+      "review_relations": [
+        17
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "merge",
+          "edit"
+        ],
+        "pair_count": 1,
+        "target_contains_all": [
+          "window",
+          "morning air"
+        ]
+      }
+    },
+    {
+      "id": "matrix_fill_missing",
+      "title": "原文独有内容需要补译",
+      "category": "strategy_matrix",
+      "relations": [
+        26
+      ],
+      "review_relations": [
+        26
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "edit"
+        ],
+        "pair_count": 1,
+        "target_contains_all": [
+          "key",
+          "flower"
+        ],
+        "target_forbidden": [
+          "MISSING"
+        ]
+      }
+    },
+    {
+      "id": "matrix_delete_target",
+      "title": "A 为准时删除目标侧独有广告",
+      "category": "strategy_matrix",
+      "relations": [
+        35
+      ],
+      "review_relations": [
+        35
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "delete"
+        ],
+        "pair_count": 0
+      }
+    },
+    {
+      "id": "matrix_balanced_nm",
+      "title": "平衡 N:M 应整理为独立语义单元",
+      "category": "strategy_matrix",
+      "relations": [
+        44
+      ],
+      "review_relations": [
+        44
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "edit"
+        ],
+        "pair_count": 2,
+        "target_contains_all": [
+          "lights",
+          "performance"
+        ]
+      }
+    },
+    {
+      "id": "source_accidental_break",
+      "title": "原文意外断行不应机械拆译文",
+      "category": "boundary_reasoning",
+      "relations": [
+        53
+      ],
+      "review_relations": [
+        53
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "merge",
+          "edit"
+        ],
+        "pair_count": 1,
+        "source_contains_all": [
+          "周围景色"
+        ],
+        "target_contains_all": [
+          "clouds",
+          "gloom"
+        ]
+      }
+    },
+    {
+      "id": "target_accidental_break",
+      "title": "目标侧意外断行应恢复自然句子",
+      "category": "boundary_reasoning",
+      "relations": [
+        62
+      ],
+      "review_relations": [
+        62
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "merge",
+          "edit"
+        ],
+        "pair_count": 1,
+        "target_contains_all": [
+          "door",
+          "stairs"
+        ]
+      }
+    },
+    {
+      "id": "cross_relation_shift",
+      "title": "相邻关系间的信息分配错误",
+      "category": "boundary_reasoning",
+      "relations": [
+        71,
+        72
+      ],
+      "review_relations": [
+        71,
+        72
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "edit"
+        ],
+        "pair_count": 2,
+        "target_contains_all": [
+          "Alice",
+          "bell",
+          "dinner"
+        ],
+        "target_occurrences": {
+          "rang": 1
+        }
+      }
+    },
+    {
+      "id": "short_sound_shift",
+      "title": "简短拟声词造成的隐蔽跨行错位",
+      "category": "boundary_reasoning",
+      "relations": [
+        81,
+        82
+      ],
+      "review_relations": [
+        81,
+        82
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "edit"
+        ],
+        "pair_count": 2,
+        "target_contains_all": [
+          "Bang",
+          "Misaki"
+        ],
+        "target_occurrences": {
+          "Bang": 1
+        }
+      }
+    },
+    {
+      "id": "context_relocation_from_previous",
+      "title": "缺失译文已错放在上一关系末尾",
+      "category": "boundary_reasoning",
+      "relations": [
+        91,
+        92
+      ],
+      "review_relations": [
+        92
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "edit"
+        ],
+        "pair_count": 2,
+        "target_contains_all": [
+          "room fell silent",
+          "Yuigahama murmured"
+        ],
+        "target_occurrences": {
+          "Yuigahama murmured": 1
+        }
+      }
+    },
+    {
+      "id": "repeated_mixed_name",
+      "title": "目标正文连续残留源侧文字仍需转换",
+      "category": "translation_quality",
+      "relations": [
+        101
+      ],
+      "review_relations": [
+        101
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "edit"
+        ],
+        "pair_count": 5,
+        "target_forbidden": [
+          "坂"
+        ],
+        "target_contains_all": [
+          "nora"
+        ]
+      }
+    },
+    {
+      "id": "mixed_person_name",
+      "title": "目标正文中的源侧文字需要转写",
+      "category": "translation_quality",
+      "relations": [
+        110
+      ],
+      "review_relations": [
+        110
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "edit"
+        ],
+        "pair_count": 2,
+        "target_forbidden": [
+          "黑玉"
+        ],
+        "target_contains_all": [
+          "Heiyu",
+          "Accelerator"
+        ]
+      }
+    },
+    {
+      "id": "mixed_common_word",
+      "title": "英文句中的普通中文词残留",
+      "category": "translation_quality",
+      "relations": [
+        119
+      ],
+      "review_relations": [
+        119
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "edit"
+        ],
+        "pair_count": 1,
+        "target_forbidden": [
+          "级别"
+        ],
+        "target_contains_all": [
+          "physical education"
+        ]
+      }
+    },
+    {
+      "id": "hallucinated_detail",
+      "title": "目标侧擅自增加事实",
+      "category": "translation_quality",
+      "relations": [
+        128
+      ],
+      "review_relations": [
+        128
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "edit"
+        ],
+        "pair_count": 1,
+        "target_forbidden": [
+          "younger brother"
+        ],
+        "target_contains_all": [
+          "cup",
+          "table"
+        ]
+      }
+    },
+    {
+      "id": "aigc_style_drift",
+      "title": "表面对齐但表达机械重复",
+      "category": "translation_quality",
+      "relations": [
+        137
+      ],
+      "review_relations": [
+        137
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "edit"
+        ],
+        "pair_count": 1,
+        "target_forbidden": [
+          "in a quiet manner"
+        ],
+        "target_forbidden_all": [
+          [
+            "quietly",
+            "quiet manner"
+          ],
+          [
+            "quiet room",
+            "in a quiet manner"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "target_only_stray_content",
+      "title": "B 侧多出的无对应正文应移除",
+      "category": "contextual_completeness",
+      "relations": [
+        146
+      ],
+      "review_relations": [
+        146
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "delete"
+        ],
+        "pair_count": 0
+      }
+    },
+    {
+      "id": "source_long_note_missing",
+      "title": "A 侧正文后的长注释不可在 B 侧遗漏",
+      "category": "contextual_completeness",
+      "relations": [
+        155
+      ],
+      "review_relations": [
+        155
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "edit"
+        ],
+        "pair_count_any": [
+          1,
+          2
+        ],
+        "target_contains_all": [
+          "gatekeeper",
+          "translator",
+          "silver"
+        ]
+      }
+    },
+    {
+      "id": "functional_script_note",
+      "title": "译注中作为说明对象的外文应保留",
+      "category": "false_positive",
+      "relations": [
+        164
+      ],
+      "review_relations": [
+        164
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "ok"
+        ],
+        "pair_count": 1,
+        "unchanged": true,
+        "target_contains_all": [
+          "友",
+          "トモ"
+        ]
+      }
+    },
+    {
+      "id": "functional_kaomoji",
+      "title": "颜文字是表达内容而非语言杂糅",
+      "category": "false_positive",
+      "relations": [
+        173
+      ],
+      "review_relations": [
+        173
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "ok"
+        ],
+        "pair_count": 1,
+        "unchanged": true,
+        "target_contains_all": [
+          "＾▽＾"
+        ]
+      }
+    },
+    {
+      "id": "low_score_correct",
+      "title": "低分但语义完全对应",
+      "category": "false_positive",
+      "relations": [
+        182
+      ],
+      "review_relations": [
+        182
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "ok"
+        ],
+        "pair_count": 1,
+        "unchanged": true
+      }
+    },
+    {
+      "id": "established_foreign_title",
+      "title": "既定外文标题不应被误译",
+      "category": "false_positive",
+      "relations": [
+        191
+      ],
+      "review_relations": [
+        191
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "ok"
+        ],
+        "pair_count": 1,
+        "unchanged": true,
+        "target_contains_all": [
+          "Girls Side"
+        ]
+      }
+    },
+    {
+      "id": "composition_duplicate_name",
+      "title": "分块错误导致相邻关系重复姓名",
+      "category": "context_and_flags",
+      "relations": [
+        200,
+        201
+      ],
+      "review_relations": [
+        200,
+        201
+      ],
+      "expected": {
+        "allowed_kinds": [
+          "merge",
+          "edit"
+        ],
+        "pair_count_any": [
+          1,
+          2
+        ],
+        "target_occurrences": {
+          "Yukinoshita Yukino": 1
+        },
+        "target_forbidden": [
+          "MISSING"
+        ]
+      }
+    }
+  ]
+}

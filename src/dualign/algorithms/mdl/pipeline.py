@@ -13,6 +13,7 @@ from dualign.algorithms.mdl.composition_mdl import (
     align_counterfactual_composition_models_mdl,
     decision_relevant_candidates,
 )
+from dualign.algorithms.mdl.cosine_observation import observed_cosine_matrix
 from dualign.algorithms.mdl.candidate_graph import (
     CenteredFrontierMDLResult,
     align_centered_frontier_mdl,
@@ -28,6 +29,7 @@ from dualign.algorithms.mdl.robustness import (
     conformal_upper_p,
     symmetric_nearest_score,
 )
+from dualign.core.punctuation import UniversalSplitter
 
 
 @dataclass(frozen=True)
@@ -192,6 +194,186 @@ def _reviewable_uncertain_regions(
     return _uncertain_regions(provisional, alternative)
 
 
+def _path_segment(
+    path: list[Operation],
+    start: tuple[int, int],
+    end: tuple[int, int],
+) -> list[Operation]:
+    """Return the complete path segment between two path vertices."""
+
+    cursor = (0, 0)
+    segment: list[Operation] = []
+    collecting = cursor == start
+    for operation in path:
+        source, target, _score = operation
+        next_cursor = (cursor[0] + len(source), cursor[1] + len(target))
+        if collecting:
+            segment.append(operation)
+            if next_cursor == end:
+                return segment
+            if next_cursor[0] > end[0] or next_cursor[1] > end[1]:
+                break
+        elif next_cursor == start:
+            collecting = True
+        cursor = next_cursor
+    raise ValueError("分歧区域不是路径的完整片段")
+
+
+def _hard_boundary_sum_gain(
+    lines_a: list[str],
+    lines_b: list[str],
+    source_vectors: np.ndarray,
+    target_vectors: np.ndarray,
+    provisional_segment: list[Operation],
+    alternative_segment: list[Operation],
+    encode_fn: Callable[[list[str]], np.ndarray],
+) -> float | None:
+    """Return the best latent hard-boundary witness for a 2:1/1:2 merge.
+
+    This is deliberately a one-way witness.  It is defined only when the
+    conservative path is one gap plus one 1:1 relation and posterior proposes
+    the corresponding two-line merge.  Failure is therefore absence of extra
+    evidence, never evidence against the merge.
+    """
+
+    if len(provisional_segment) != 2 or len(alternative_segment) != 1:
+        return None
+    compound_source, compound_target, _score = alternative_segment[0]
+    gap_count = sum(
+        not source or not target for source, target, _ in provisional_segment
+    )
+    atomic_count = sum(
+        len(source) == len(target) == 1 for source, target, _ in provisional_segment
+    )
+    if gap_count != 1 or atomic_count != 1:
+        return None
+
+    if len(compound_source) == 2 and len(compound_target) == 1:
+        target_index = compound_target[0]
+        whole = lines_b[target_index]
+        points = [
+            point
+            for point in UniversalSplitter.find_hard_split_points(whole)
+            if whole[:point].strip() and whole[point:].strip()
+        ]
+        if not points:
+            return None
+        fragments = [
+            part
+            for point in points
+            for part in (whole[:point].strip(), whole[point:].strip())
+        ]
+        fragment_vectors = normalize_embeddings(encode_fn(fragments))
+        baseline = observed_cosine_matrix(
+            [lines_a[index] for index in compound_source],
+            [whole],
+            source_vectors[list(compound_source)],
+            target_vectors[[target_index]],
+        )[:, 0].astype(np.float64)
+        split_scores = observed_cosine_matrix(
+            [lines_a[index] for index in compound_source],
+            fragments,
+            source_vectors[list(compound_source)],
+            fragment_vectors,
+        ).astype(np.float64)
+        return max(
+            float(
+                split_scores[0, 2 * point_index]
+                + split_scores[1, 2 * point_index + 1]
+                - baseline.sum()
+            )
+            for point_index in range(len(points))
+        )
+
+    if len(compound_source) == 1 and len(compound_target) == 2:
+        source_index = compound_source[0]
+        whole = lines_a[source_index]
+        points = [
+            point
+            for point in UniversalSplitter.find_hard_split_points(whole)
+            if whole[:point].strip() and whole[point:].strip()
+        ]
+        if not points:
+            return None
+        fragments = [
+            part
+            for point in points
+            for part in (whole[:point].strip(), whole[point:].strip())
+        ]
+        fragment_vectors = normalize_embeddings(encode_fn(fragments))
+        baseline = observed_cosine_matrix(
+            [whole],
+            [lines_b[index] for index in compound_target],
+            source_vectors[[source_index]],
+            target_vectors[list(compound_target)],
+        )[0].astype(np.float64)
+        split_scores = observed_cosine_matrix(
+            fragments,
+            [lines_b[index] for index in compound_target],
+            fragment_vectors,
+            target_vectors[list(compound_target)],
+        ).astype(np.float64)
+        return max(
+            float(
+                split_scores[2 * point_index, 0]
+                + split_scores[2 * point_index + 1, 1]
+                - baseline.sum()
+            )
+            for point_index in range(len(points))
+        )
+    return None
+
+
+def _resolve_hard_boundary_witnesses(
+    lines_a: list[str],
+    lines_b: list[str],
+    source_vectors: np.ndarray,
+    target_vectors: np.ndarray,
+    provisional: list[Operation],
+    alternative: list[Operation],
+    regions: tuple[tuple[tuple[int, int], tuple[int, int]], ...],
+    encode_fn: Callable[[list[str]], np.ndarray],
+) -> tuple[list[Operation], tuple[tuple[tuple[int, int], tuple[int, int]], ...]]:
+    """Promote posterior only where a latent hard split has positive total gain."""
+
+    resolved: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+    for start, end in regions:
+        provisional_segment = _path_segment(provisional, start, end)
+        alternative_segment = _path_segment(alternative, start, end)
+        gain = _hard_boundary_sum_gain(
+            lines_a,
+            lines_b,
+            source_vectors,
+            target_vectors,
+            provisional_segment,
+            alternative_segment,
+            encode_fn,
+        )
+        if gain is not None and gain > 0.0:
+            resolved.add((start, end))
+
+    if not resolved:
+        return provisional, regions
+
+    resolved_path: list[Operation] = []
+    cursor = (0, 0)
+    for region in regions:
+        start, end = region
+        if cursor != start:
+            resolved_path.extend(_path_segment(provisional, cursor, start))
+        selected = alternative if region in resolved else provisional
+        resolved_path.extend(_path_segment(selected, start, end))
+        cursor = end
+    final_end = (
+        sum(len(source) for source, _target, _score in provisional),
+        sum(len(target) for _source, target, _score in provisional),
+    )
+    if cursor != final_end:
+        resolved_path.extend(_path_segment(provisional, cursor, final_end))
+    remaining = tuple(region for region in regions if region not in resolved)
+    return resolved_path, remaining
+
+
 def align_mdl_pipeline(
     lines_a: list[str],
     lines_b: list[str],
@@ -220,7 +402,12 @@ def align_mdl_pipeline(
     if not lines_a or not lines_b:
         raise ValueError("统计门控研究管线要求两侧文档均非空")
 
-    scores = np.dot(source_vectors, target_vectors.T)
+    scores = observed_cosine_matrix(
+        lines_a,
+        lines_b,
+        source_vectors,
+        target_vectors,
+    )
     gate, evidence = _assess_alignment_applicability(scores, calibration)
     gate_seconds = time.perf_counter() - started
     if not gate.accepted:
@@ -275,14 +462,26 @@ def align_mdl_pipeline(
         cached_encode,
     )
     composition_seconds = time.perf_counter() - composition_started
-    uncertain_regions = _reviewable_uncertain_regions(
+    model_disagreements = _reviewable_uncertain_regions(
         composition.alignment.all_ops,
         posterior.alignment.all_ops,
     )
+    witness_started = time.perf_counter()
+    provisional_ops, uncertain_regions = _resolve_hard_boundary_witnesses(
+        lines_a,
+        lines_b,
+        source_vectors,
+        target_vectors,
+        composition.alignment.all_ops,
+        posterior.alignment.all_ops,
+        model_disagreements,
+        cached_encode,
+    )
+    witness_seconds = time.perf_counter() - witness_started
     return MDLPipelineResult(
         status="needs_review" if uncertain_regions else "aligned",
         gate=gate,
-        all_ops=composition.alignment.all_ops,
+        all_ops=provisional_ops,
         alternative_ops=posterior.alignment.all_ops,
         uncertain_regions=uncertain_regions,
         atomic_ops=centered.all_ops,
@@ -294,6 +493,7 @@ def align_mdl_pipeline(
             "gate_seconds": round(gate_seconds, 6),
             "centered_seconds": round(centered_seconds, 6),
             "composition_seconds": round(composition_seconds, 6),
+            "hard_boundary_witness_seconds": round(witness_seconds, 6),
             "composition_proposals_before_pruning": len(centered.semantic_candidates),
             "composition_proposals_after_pruning": len(composition_candidates),
             "composition_models": (
@@ -304,7 +504,9 @@ def align_mdl_pipeline(
             "uncertain_regions": len(uncertain_regions),
             # Kept as a zero-valued compatibility field for older reports.
             "suppressed_alternative_regions": 0,
-            "composition_model_disagreement_regions": len(uncertain_regions),
+            "composition_model_disagreement_regions": len(model_disagreements),
+            "hard_boundary_witness_resolutions": len(model_disagreements)
+            - len(uncertain_regions),
             "total_seconds": round(time.perf_counter() - started, 6),
         },
     )

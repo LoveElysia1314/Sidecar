@@ -38,6 +38,7 @@ from dualign.models.relation_status import (
     _parse_type,
 )
 from dualign.services.repair_policy import choose_auto_repair, strategy_for_ai_review
+from dualign.services.cancellation import CancellationError, CancellationToken
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ class AgentRunResult:
     note: str = ""
     model_name: str = ""
     prompt_sha256: str = ""
+    elapsed_seconds: float = 0.0
 
     @property
     def is_complete(self) -> bool:
@@ -100,6 +102,7 @@ class AgentEvent:
     review_action: Optional[RepairAction] = None
     run_result: Optional[AgentRunResult] = None
     error: str = ""
+    elapsed_seconds: float = 0.0
 
 
 @dataclass
@@ -146,10 +149,11 @@ class ChapterContext:
 
         当前文本始终设置为 auto-repair 后的结果（无论传入的 state 是否已修复）。
         初始文本保持原始对齐输出。AI 只需判断「当前文本正确吗？」。
-        auto-repair 是内部状态，不暴露给 AI。
+        当前结果来源与异常信号分别提供给 AI，作为可信度先验和核查线索。
 
         Args:
-            model: 嵌入模型，用于 split 操作。不传时保留原生关系。
+            model: 嵌入模型，用于有多个边界方案的局部归一化。不传时，
+                无新边界的 N:1 / 1:N 仍会自然合并为 1:1。
             skip_auto_repair: 为 True 时跳过内部 auto_repair（调用方已构造拟修复）。
         """
         from dualign.services.repair import RepairService
@@ -296,7 +300,7 @@ def build_chapter_context(
     场景的 split/merge 行为一致。
 
     当 model 为 None 时自动尝试加载嵌入模型。若加载失败，
-    需要 split 的关系保持不变，不得替换成相反的 merge 动作。
+    需要语义边界选择的关系保持不变；唯一的无 gap 合并解仍可直接产生。
 
     Args:
         skip_auto_repair: 为 True 时跳过内部 auto_repair（调用方已构造拟修复）。
@@ -309,7 +313,10 @@ def build_chapter_context(
 
             model = _try_lazy_load_model()
         except Exception as e:
-            logger.warning("嵌入模型加载失败: %s（需要 split 的关系将保持不变）", e)
+            logger.warning(
+                "嵌入模型加载失败: %s（需要语义边界选择的关系将保持不变）",
+                e,
+            )
     if skip_auto_repair:
         context = ChapterContext.from_repair_state(
             state,
@@ -369,6 +376,8 @@ def _get_prompts_dir() -> str:
 
 _tool_definitions_cache: list[dict] | None = None
 _tools_cache: list[dict] | None = None
+_region_tool_definitions_cache: list[dict] | None = None
+_region_tools_cache: list[dict] | None = None
 
 
 def _load_tool_definitions() -> list[dict]:
@@ -405,15 +414,44 @@ def _load_tools() -> list[dict]:
 
 
 def _get_tools_openai() -> list[dict]:
-    """懒加载 TOOLS_OPENAI。"""
-    return _load_tools()
+    """Load the region-oriented production Agent contract."""
+
+    global _region_tool_definitions_cache, _region_tools_cache
+    if _region_tools_cache is not None:
+        return _region_tools_cache
+    path = os.path.join(_get_prompts_dir(), "region-tools.json")
+    with open(path, "r", encoding="utf-8") as handle:
+        definitions = json.load(handle)
+    for tool in definitions:
+        tool.setdefault("parameters", {}).setdefault("additionalProperties", False)
+    _region_tool_definitions_cache = definitions
+    _region_tools_cache = [
+        {
+            "type": "function",
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["parameters"],
+            "strict": bool(tool.get("strict", False)),
+        }
+        for tool in definitions
+    ]
+    return _region_tools_cache
 
 
 def agent_contract_fingerprint(strategy: str = "src") -> str:
     """Return a stable fingerprint of the prompt and tool contract."""
+    tools = _get_tools_openai()
     payload = {
         "prompt": _load_system_prompt(strategy_for_ai_review(strategy)),
-        "tools": _load_tool_definitions(),
+        "tools": [
+            {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["parameters"],
+                "strict": tool["strict"],
+            }
+            for tool in tools
+        ],
     }
     canonical = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -425,11 +463,11 @@ def agent_contract_fingerprint(strategy: str = "src") -> str:
 # 3. 系统提示词
 # ═══════════════════════════════════════════════════════════════
 
-# 策略标签（minimal 映射到 src）
+# 策略标签
 _STRATEGY_LABEL = {
-    "src": "原文优先 (src-first)",
-    "tgt": "译文优先 (tgt-first)",
-    "minimal": "最小变更 (minimal)",
+    "src": "文档 A 为准 (src)",
+    "tgt": "文档 B 为准 (tgt)",
+    "minimal": "最小结构修改 (minimal)",
 }
 
 
@@ -489,6 +527,7 @@ class DeepSeekNativeBackend(LLMBackend):
         api_key: str = "",
         reasoning_effort: str = "low",
         request_timeout: float = 240.0,
+        cancellation_token: CancellationToken | None = None,
     ):
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -496,6 +535,7 @@ class DeepSeekNativeBackend(LLMBackend):
         self.BASE_URL = base_url
         self.reasoning_effort = reasoning_effort
         self.request_timeout = request_timeout
+        self._cancellation_token = cancellation_token
         self._api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
         # Ollama 本地后端：api_key 用占位符，reasoning_effort 强制 none
         self._is_ollama = "localhost" in base_url or "127.0.0.1" in base_url
@@ -537,13 +577,16 @@ class DeepSeekNativeBackend(LLMBackend):
                 )
         return items
 
-    @staticmethod
-    def _normalize_tools(tools: list) -> list:
+    def _normalize_tools(self, tools: list) -> list:
         """统一 tools 为 responses API 扁平格式。
 
         兼容两种输入：
           - chat/completions 嵌套: {"type":"function","function":{name,...}}
           - responses 扁平:       {"type":"function","name",...}
+
+        DeepSeek 的稳定版 Responses 契约尚未声明 ``strict``；其 Beta
+        端点和其他兼容端点可继续接收该标准字段。无论服务端能力如何，
+        工具执行边界都会在本地验证参数。
         """
         out = []
         for t in tools or []:
@@ -556,10 +599,19 @@ class DeepSeekNativeBackend(LLMBackend):
                         "name": fn.get("name", ""),
                         "description": fn.get("description", ""),
                         "parameters": fn.get("parameters", {}),
+                        "strict": bool(fn.get("strict", False)),
                     }
                 )
             else:
-                out.append(t)
+                out.append(dict(t) if isinstance(t, dict) else t)
+        base_url = self.BASE_URL.rstrip("/").lower()
+        stable_deepseek = "api.deepseek.com" in base_url and not base_url.endswith(
+            "/beta"
+        )
+        if self._is_ollama or stable_deepseek:
+            for tool in out:
+                if isinstance(tool, dict):
+                    tool.pop("strict", None)
         return out
 
     def _chat_once(self, client, **kwargs):
@@ -577,12 +629,28 @@ class DeepSeekNativeBackend(LLMBackend):
 
         t = threading.Thread(target=_call, daemon=True)
         t.start()
-        t.join(timeout=self.request_timeout)
+        deadline = (
+            time.monotonic() + self.request_timeout
+            if self.request_timeout > 0
+            else None
+        )
+        while t.is_alive():
+            if self._cancellation_token is not None:
+                self._cancellation_token.raise_if_cancelled()
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                client.close()
+                raise TimeoutError(
+                    f"DeepSeek API 调用超过 {self.request_timeout:.0f}s 未完成"
+                )
+            t.join(0.05 if remaining is None else min(0.05, remaining))
+        if self._cancellation_token is not None:
+            self._cancellation_token.raise_if_cancelled()
         if "error" in error_box:
             raise error_box["error"]
         if "value" in result_box:
             return result_box["value"]
-        raise TimeoutError(f"DeepSeek API 调用超过 {self.request_timeout:.0f}s 未完成")
+        raise RuntimeError("DeepSeek API 调用未返回结果")
 
     def chat(self, messages, thinking=True, tools=None) -> LLMResponse:
         try:
@@ -595,7 +663,14 @@ class DeepSeekNativeBackend(LLMBackend):
                 + chr(10)
                 + "   请在设置面板中配置 API Key，或设置环境变量 DEEPSEEK_API_KEY"
             )
+        if self._cancellation_token is not None:
+            self._cancellation_token.raise_if_cancelled()
         client = OpenAI(api_key=self._api_key, base_url=self.BASE_URL, max_retries=0)
+        unregister = (
+            self._cancellation_token.register(client.close)
+            if self._cancellation_token is not None
+            else lambda: None
+        )
         kwargs = {
             "model": self.MODEL,
             "input": self._to_responses_input(messages),
@@ -614,9 +689,14 @@ class DeepSeekNativeBackend(LLMBackend):
             kwargs["temperature"] = self.temperature
         try:
             resp = self._chat_once(client, **kwargs)
+        except CancellationError:
+            raise
         except Exception as e:
             logger.warning("DeepSeek API 调用失败: %s", e)
             return LLMResponse(content="", usage={"error": str(e)})
+        finally:
+            unregister()
+            client.close()
 
         # ── Responses 响应解析 ──
         usage_raw = resp.usage
@@ -1125,6 +1205,75 @@ class ToolExecutor:
         return f"✅ done{suffix}" + (f": {note}" if note else "")
 
 
+class AgentToolExecutor:
+    """Production region tools with a non-advertised legacy compatibility path.
+
+    The legacy executor remains available for old scripted callers and direct
+    unit tests, but the model only receives ``region-tools.json``.  Once a run
+    uses one contract it cannot mix contracts, keeping completion semantics
+    deterministic.
+    """
+
+    def __init__(self, ctx, *, model=None, initial_state=None, strategy="src"):
+        from dualign.services.ai_review_regions import RegionReviewExecutor
+
+        self.ctx = ctx
+        self._mode = "region"
+        self._region = (
+            RegionReviewExecutor(
+                initial_state,
+                tuple(ctx.reviewable_ids),
+                strategy=strategy_for_ai_review(strategy),
+            )
+            if initial_state is not None
+            else None
+        )
+        self._legacy = ToolExecutor(
+            ctx,
+            model=model,
+            initial_state=initial_state,
+            strategy=strategy,
+        )
+
+    @property
+    def region_executor(self):
+        return self._region
+
+    @property
+    def reviewed_ids(self) -> set[int]:
+        if self._mode == "legacy" or self._region is None:
+            return self._legacy.reviewed_ids
+        return self._region.reviewed_ids
+
+    def execute(self, tool_call: ToolCall) -> str:
+        from dualign.services.ai_review_regions import region_tool_names
+
+        if tool_call.name in region_tool_names():
+            if self._mode == "legacy":
+                return "❌ cannot mix legacy relation tools with region tools"
+            if self._region is None:
+                return "❌ region tools require an initial repair state"
+            return self._region.execute(tool_call.name, tool_call.arguments)
+        if (
+            self._mode == "region"
+            and self._region is not None
+            and (self._region.actions or self._region.resolved_regions)
+        ):
+            return "❌ cannot mix region tools with legacy relation tools"
+        self._mode = "legacy"
+        return self._legacy.execute(tool_call)
+
+    def _unique_reviewed_actions(self) -> List[RepairAction]:
+        if self._mode == "legacy" or self._region is None:
+            return self._legacy._unique_reviewed_actions()
+        return self._region.unique_actions()
+
+    def initial_payload(self) -> dict | None:
+        if self._region is None:
+            return None
+        return self._region.initial_payload()
+
+
 # ═══════════════════════════════════════════════════════════════
 # 6. AiRepairAgent
 # ═══════════════════════════════════════════════════════════════
@@ -1137,7 +1286,7 @@ class MaxTurnsExceeded(Exception):
 class AiRepairAgent:
     """Tool-Calling AI 校订代理。
 
-    工具: ok / edit / merge / delete / flag / view / append / done
+    生产工具按区域检查、接受、编辑、延后和完成；关系级工具仅保留脚本兼容。
     使用 Responses API 后端，支持 DeepSeek 与本地 Ollama 工具调用。
     """
 
@@ -1157,6 +1306,7 @@ class AiRepairAgent:
         reasoning_effort: str = "low",
         max_tokens: int = 8192,
         request_timeout: float = 240.0,
+        cancellation_token: CancellationToken | None = None,
     ):
         self.max_turns = max_turns
         self.verbose = verbose
@@ -1164,6 +1314,7 @@ class AiRepairAgent:
         self._model_name = model_name
         self._strategy = strategy_for_ai_review(strategy)
         self._thinking = thinking
+        self._cancellation_token = cancellation_token or CancellationToken()
         if llm_backend is not None:
             self._llm = llm_backend
         elif not isinstance(backend, str) and hasattr(backend, "chat"):
@@ -1177,13 +1328,26 @@ class AiRepairAgent:
                 api_key=api_key,
                 reasoning_effort=reasoning_effort,
                 request_timeout=request_timeout,
+                cancellation_token=self._cancellation_token,
             )
         else:
             raise ValueError(
                 f"不支持的 AI 审校后端: {backend}；"
                 "请传入 llm_backend 或使用 deepseek"
             )
+        cancel_backend = getattr(self._llm, "cancel", None)
+        self._unregister_backend_cancel = (
+            self._cancellation_token.register(cancel_backend)
+            if callable(cancel_backend)
+            else lambda: None
+        )
         self._idle_turns = 0
+
+    def close(self) -> None:
+        self._unregister_backend_cancel()
+        close_backend = getattr(self._llm, "close", None)
+        if callable(close_backend):
+            close_backend()
 
     def run(
         self,
@@ -1192,10 +1356,14 @@ class AiRepairAgent:
         initial_state=None,
     ) -> AgentRunResult:
         """initial_state: 启动时的 RepairState，view 用它重放已审校操作生成最新状态。"""
-        executor = ToolExecutor(
+        run_started = time.perf_counter()
+        self._cancellation_token.raise_if_cancelled()
+        executor = AgentToolExecutor(
             ctx, model=self._model, initial_state=initial_state, strategy=self._strategy
         )
-        messages = self._build_initial_messages(ctx)
+        messages = self._build_initial_messages(
+            ctx, region_payload=executor.initial_payload()
+        )
         turn_log: List[dict] = []
 
         def _emit(evt_type, **kw):
@@ -1226,6 +1394,7 @@ class AiRepairAgent:
                 note=note,
                 model_name=self._model_name,
                 prompt_sha256=agent_contract_fingerprint(self._strategy),
+                elapsed_seconds=time.perf_counter() - run_started,
             )
             _emit(
                 "done",
@@ -1234,6 +1403,7 @@ class AiRepairAgent:
                 messages=messages,
                 turn_log=turn_log,
                 run_result=result,
+                elapsed_seconds=result.elapsed_seconds,
             )
             return result
 
@@ -1246,8 +1416,16 @@ class AiRepairAgent:
             )
 
         for turn in range(1, self.max_turns + 1):
-            t0 = time.time()
+            if self._cancellation_token.is_cancelled:
+                return _finish("cancelled", turn=turn - 1, note="用户已取消")
+            turn_started = time.perf_counter()
+            tool_seconds = 0.0
             tools = _get_tools_openai()
+
+            def _record_turn_timing(record: dict) -> None:
+                timing = record["timing"]
+                timing["tool_seconds"] = round(tool_seconds, 6)
+                timing["total_seconds"] = round(time.perf_counter() - turn_started, 6)
 
             remaining = [
                 i for i in ctx.reviewable_ids if i not in executor.reviewed_ids
@@ -1257,25 +1435,26 @@ class AiRepairAgent:
                 _new_progress = (
                     f"### 待审进度: {len(executor.reviewed_ids)}/"
                     f"{len(ctx.reviewable_ids)} | 剩余: {remaining}\n"
-                    "继续审校剩余关系。完成后调用 done。"
+                    "继续解决剩余审阅区域。完成后调用 finish_review。"
                 )
             else:
-                _new_progress = "### ✅ 待审列表已清空\n\n检查是否有遗漏的异常关系——若有，用 `append` 追加后继续审校。确认无遗漏后，调用 `done` 结束。"
+                _new_progress = (
+                    "### ✅ 待审入口已全部解决\n\n" "调用 finish_review 完成本轮审校。"
+                )
             if messages[-1]["role"] == "user" and "### 待审" in messages[-1]["content"]:
                 messages[-1] = {"role": "user", "content": _new_progress}
             else:
                 messages.append({"role": "user", "content": _new_progress})
 
             _emit("llm_call", turn=turn)
-            response = self._llm.chat(messages, thinking=self._thinking, tools=tools)
-
-            # ── LLM 调用失败 → 立即上报错误 ──
-            if response.usage and response.usage.get("error"):
-                err_msg = response.usage["error"]
-                logger.error("LLM 调用失败 (Turn %d): %s", turn, err_msg)
-                if on_event:
-                    on_event(AgentEvent(type="error", turn=turn, error=err_msg))
-                return _finish("failed", turn=turn, note=err_msg)
+            llm_started = time.perf_counter()
+            try:
+                response = self._llm.chat(
+                    messages, thinking=self._thinking, tools=tools
+                )
+            except CancellationError:
+                return _finish("cancelled", turn=turn, note="用户已取消")
+            llm_seconds = time.perf_counter() - llm_started
 
             turn_record = {
                 "turn": turn,
@@ -1292,19 +1471,38 @@ class AiRepairAgent:
                     "usage": response.usage,
                 },
                 "tool_results": [],
+                "timing": {
+                    "llm_seconds": round(llm_seconds, 6),
+                    "tool_seconds": 0.0,
+                    "total_seconds": 0.0,
+                },
             }
             turn_log.append(turn_record)
 
+            # ── LLM 调用失败 → 立即上报错误 ──
+            if response.usage and response.usage.get("error"):
+                _record_turn_timing(turn_record)
+                err_msg = response.usage["error"]
+                logger.error("LLM 调用失败 (Turn %d): %s", turn, err_msg)
+                if on_event:
+                    on_event(AgentEvent(type="error", turn=turn, error=err_msg))
+                return _finish("failed", turn=turn, note=err_msg)
+
             if self.verbose and response.usage:
                 logger.info(
-                    "[Turn %d] %d->%d tokens in %.1fs",
+                    "[Turn %d] %d->%d tokens | 模型 %.2fs",
                     turn,
                     response.usage.get("prompt_tokens", 0),
                     response.usage.get("completion_tokens", 0),
-                    time.time() - t0,
+                    llm_seconds,
                 )
 
-            _emit("llm_response", turn=turn, usage=response.usage)
+            _emit(
+                "llm_response",
+                turn=turn,
+                usage=response.usage,
+                elapsed_seconds=llm_seconds,
+            )
 
             if not response.tool_calls:
                 self._idle_turns += 1
@@ -1313,6 +1511,7 @@ class AiRepairAgent:
                 ]
 
                 if self._idle_turns >= 3 or (self._idle_turns >= 2 and not remaining):
+                    _record_turn_timing(turn_record)
                     # 连续 3 轮空闲 → 强制退出；或 2 轮空闲且已全部完成 → 正常退出
                     if self.verbose:
                         logger.info(
@@ -1343,7 +1542,7 @@ class AiRepairAgent:
                             f"**进度**: {len(executor.reviewed_ids)}/{len(ctx.reviewable_ids)}\n"
                             f"剩余 {len(remaining)} 个: {remaining[:10]}\n\n"
                             f"你已经连续 {self._idle_turns} 轮没有操作。"
-                            f"请继续审查，或调用 `done` 并设置 force=true 跳过剩余项（需说明理由）。"
+                            f"请继续审查；无法可靠解决的区域应调用 defer_region。"
                         )
                     else:
                         _idle_prompt = (
@@ -1353,9 +1552,7 @@ class AiRepairAgent:
                         )
                 else:
                     _idle_prompt = (
-                        "### ✅ 待审列表已清空\n\n"
-                        "检查是否有遗漏的异常关系——若有，用 `append` 追加后继续审校。"
-                        "确认无遗漏后，调用 `done` 结束。"
+                        "### ✅ 待审列表已清空\n\n" "调用 finish_review 完成本轮审校。"
                     )
                 if (
                     messages[-1]["role"] == "user"
@@ -1364,6 +1561,7 @@ class AiRepairAgent:
                     messages[-1] = {"role": "user", "content": _idle_prompt}
                 else:
                     messages.append({"role": "user", "content": _idle_prompt})
+                _record_turn_timing(turn_record)
                 continue
 
             self._idle_turns = 0
@@ -1392,15 +1590,32 @@ class AiRepairAgent:
             done_force = False
             done_note = ""
             for tc in response.tool_calls:
+                if self._cancellation_token.is_cancelled:
+                    _record_turn_timing(turn_record)
+                    return _finish("cancelled", turn=turn, note="用户已取消")
                 _emit(
                     "tool_start", turn=turn, tool_name=tc.name, tool_args=tc.arguments
                 )
+                tool_started = time.perf_counter()
                 result = executor.execute(tc)
+                tool_elapsed = time.perf_counter() - tool_started
+                tool_seconds += tool_elapsed
                 if self.verbose:
                     rp = result[:120] + "..." if len(result) > 120 else result
-                    logger.info("    -> %s(%s) = %s", tc.name, tc.arguments, rp)
+                    logger.info(
+                        "    -> %s(%s) [%.3fs] = %s",
+                        tc.name,
+                        tc.arguments,
+                        tool_elapsed,
+                        rp,
+                    )
                 turn_record["tool_results"].append(
-                    {"tool_name": tc.name, "arguments": tc.arguments, "result": result}
+                    {
+                        "tool_name": tc.name,
+                        "arguments": tc.arguments,
+                        "result": result,
+                        "elapsed_seconds": round(tool_elapsed, 6),
+                    }
                 )
                 _emit(
                     "tool_result",
@@ -1408,19 +1623,24 @@ class AiRepairAgent:
                     tool_name=tc.name,
                     tool_args=tc.arguments,
                     tool_result=result,
+                    elapsed_seconds=tool_elapsed,
                 )
                 messages.append(
                     {"role": "tool", "tool_call_id": tc.id, "content": result}
                 )
-                if tc.name == "done":
+                if tc.name in {"done", "finish_review"}:
                     done_result = result
-                    raw_force = tc.arguments.get("force", False)
+                    raw_force = (
+                        tc.arguments.get("force", False) if tc.name == "done" else False
+                    )
                     done_force = (
                         raw_force.strip().lower() in ("true", "1", "yes")
                         if isinstance(raw_force, str)
                         else bool(raw_force)
                     )
                     done_note = str(tc.arguments.get("note", ""))
+
+            _record_turn_timing(turn_record)
 
             # done 被接受才退出；被拒绝则继续让模型修复剩余关系。
             if done_result is not None:
@@ -1436,13 +1656,19 @@ class AiRepairAgent:
                         logger.info("done 被拒绝（剩余 %d 个待审），继续审校", n_remain)
                     continue
                 if self.verbose:
-                    logger.info("AI 调用 done，审校完成于 Turn %d", turn)
+                    logger.info("AI 完成区域审校于 Turn %d", turn)
                 return _finish(
                     "forced" if done_force else "completed",
                     turn=turn,
                     note=done_note,
                     forced=done_force,
                 )
+
+            region_executor = executor.region_executor
+            if region_executor is not None and not region_executor.pending_region_ids:
+                if self.verbose:
+                    logger.info("AI 完成全部区域，自动结束于 Turn %d", turn)
+                return _finish("completed", turn=turn)
 
         # ── 审校后校验 ──
         unreviewed = [i for i in ctx.reviewable_ids if i not in executor.reviewed_ids]
@@ -1458,12 +1684,27 @@ class AiRepairAgent:
             note=(f"达到最大轮数 {self.max_turns}" if unreviewed else ""),
         )
 
-    def _build_initial_messages(self, ctx: ChapterContext) -> List[dict]:
+    def _build_initial_messages(
+        self, ctx: ChapterContext, region_payload: dict | None = None
+    ) -> List[dict]:
         prompt = _load_system_prompt(self._strategy)
+        user_message = (
+            self._build_region_user_message(ctx, region_payload)
+            if region_payload is not None
+            else self._build_initial_user_message(ctx)
+        )
         return [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": self._build_initial_user_message(ctx)},
+            {"role": "user", "content": user_message},
         ]
+
+    def _build_region_user_message(self, ctx: ChapterContext, payload: dict) -> str:
+        task = {
+            "chapter": ctx.chapter_title or ctx.chapter_id,
+            "strategy": _STRATEGY_LABEL.get(self._strategy, "原文优先"),
+            **payload,
+        }
+        return json.dumps(task, ensure_ascii=False, indent=2)
 
     # ═══════════════════════════════════════════════════════════════
     # 6. AiRepairAgent (cont.)
@@ -1597,6 +1838,23 @@ def format_action(a, ctx=None) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 
+def _summarize_agent_timing(turn_log: list, elapsed: float) -> dict:
+    """Aggregate stable timing fields without depending on a specific backend."""
+    llm_seconds = sum(
+        float(tr.get("timing", {}).get("llm_seconds", 0.0) or 0.0) for tr in turn_log
+    )
+    tool_seconds = sum(
+        float(tr.get("timing", {}).get("tool_seconds", 0.0) or 0.0) for tr in turn_log
+    )
+    total_seconds = max(float(elapsed or 0.0), llm_seconds + tool_seconds)
+    return {
+        "total_seconds": round(total_seconds, 3),
+        "llm_seconds": round(llm_seconds, 3),
+        "tool_seconds": round(tool_seconds, 3),
+        "other_seconds": round(max(0.0, total_seconds - llm_seconds - tool_seconds), 3),
+    }
+
+
 def dump_agent_debug(
     ctx: ChapterContext,
     actions: list,
@@ -1621,6 +1879,7 @@ def dump_agent_debug(
         extra_info: 额外信息（如标准答案命中率），附加在文件头
     """
     lines: list[str] = []
+    timing_summary = _summarize_agent_timing(turn_log, elapsed)
 
     # ── 文件头统计 ──
     lines.append("# AI 审校 Debug 日志\n")
@@ -1630,7 +1889,15 @@ def dump_agent_debug(
     )
     done = len([a for a in actions if a.kind != "ok"])
     lines.append(f"- **审校完成**: {done}/{len(ctx.reviewable_infos)}")
-    lines.append(f"- **轮次**: {len(turn_log)} | **耗时**: {elapsed:.1f}s")
+    lines.append(
+        f"- **轮次**: {len(turn_log)} | **总耗时**: "
+        f"{timing_summary['total_seconds']:.2f}s"
+    )
+    lines.append(
+        f"- **耗时分解**: 模型等待 {timing_summary['llm_seconds']:.2f}s | "
+        f"工具执行 {timing_summary['tool_seconds']:.3f}s | "
+        f"准备与调度 {timing_summary['other_seconds']:.2f}s"
+    )
     lines.append(
         f"- **Token**: 输入 {prompt_tokens} (缓存 {cache_tokens}) -> 输出 {completion_tokens}"
     )
@@ -1649,6 +1916,13 @@ def dump_agent_debug(
         if usage:
             lines.append(
                 f"**Token**: {usage.get('prompt_tokens', '?')} -> {usage.get('completion_tokens', '?')}\n"
+            )
+        turn_timing = tr.get("timing", {})
+        if turn_timing:
+            lines.append(
+                f"**耗时**: 模型 {float(turn_timing.get('llm_seconds', 0.0)):.2f}s | "
+                f"工具 {float(turn_timing.get('tool_seconds', 0.0)):.3f}s | "
+                f"本轮 {float(turn_timing.get('total_seconds', 0.0)):.2f}s\n"
             )
 
         # 推理过程
@@ -1683,7 +1957,8 @@ def dump_agent_debug(
                 tname = trr.get("tool_name", "?")
                 targs = trr.get("arguments", {})
                 tres = str(trr.get("result", ""))
-                lines.append(f"**{tname}**({targs}):")
+                tool_elapsed = float(trr.get("elapsed_seconds", 0.0) or 0.0)
+                lines.append(f"**{tname}**({targs}) · {tool_elapsed:.3f}s:")
                 lines.append("```")
                 lines.append(tres[:500])  # 截断防止文件过大
                 lines.append("```\n")
@@ -1731,13 +2006,15 @@ def dump_agent_raw(
         "turn_log": [...]    // 包含完整的 request_messages + response + tool_results
     }
     """
+    timing_summary = _summarize_agent_timing(turn_log, elapsed)
     data = {
         "chapter_id": ctx.chapter_id,
         "strategy": getattr(ctx, "_strategy", ""),
         "total_pairs": ctx.total_pairs,
         "reviewable_count": len(ctx.reviewable_infos),
         "turns": len(turn_log),
-        "elapsed_seconds": round(elapsed, 2),
+        "elapsed_seconds": timing_summary["total_seconds"],
+        "timing": timing_summary,
         "token_usage": {
             "prompt": prompt_tokens,
             "cache": cache_tokens,

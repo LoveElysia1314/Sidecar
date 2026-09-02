@@ -4,17 +4,18 @@ from types import SimpleNamespace
 from dualign.gui.window_actions import WindowActionsMixin
 from dualign.gui.window_table import WindowTableMixin
 from dualign.gui.review import REVIEW_SHORTCUTS, ReviewController
+from dualign.gui.preview_table import AiSuggestionItem
 from dualign.gui.base_table import compute_text_colors, relation_text_changes
 from dualign.gui.settings import DualignConfig, KEY_AUTO_NEXT_CHAPTER
 from dualign.gui.window import DualignWindow
 from dualign.models.action import RepairAction
 from dualign.models.relation_status import (
-    APPROVAL_USER,
     RelationAnomaly,
     project_relation_statuses,
 )
+from dualign.models.source import SOURCE_USER
 from dualign.models.state import AlignmentSnapshot
-from dualign.services.repair import RepairState
+from dualign.services.repair import RepairService, RepairState
 
 
 class _Emitter:
@@ -23,6 +24,14 @@ class _Emitter:
 
     def emit(self):
         self.count += 1
+
+
+class _Button:
+    def __init__(self):
+        self.enabled = None
+
+    def setEnabled(self, enabled):
+        self.enabled = enabled
 
 
 def test_relation_text_changes_are_shared_but_marker_coloring_stays_visual():
@@ -41,7 +50,7 @@ def test_relation_text_changes_are_shared_but_marker_coloring_stays_visual():
 class _ReviewNavigationHarness:
     def __init__(self, auto_next):
         self._current_idx = 0
-        self._anomalies = [RelationAnomaly(approval="user")]
+        self._anomalies = [RelationAnomaly(effective_source="user")]
         self._auto_next = auto_next
         self.next_chapter_requested = _Emitter()
         self.visited = []
@@ -87,6 +96,29 @@ class _FlagHarness(WindowActionsMixin):
         pass
 
     def _set_temp_status(self, *_args):
+        pass
+
+
+class _ApplyHarness(WindowActionsMixin):
+    def __init__(self):
+        self._repair_state = RepairState.from_ops([((0,), (0,), 0.5)], ["A"], ["B"])
+        self._undo_stack = deque(maxlen=50)
+        self._redo_stack = deque(maxlen=50)
+        self.invalidated = []
+
+    def _invalidate_relation_scores(self, ordinals):
+        self.invalidated.extend(ordinals)
+
+    def _save_session(self):
+        pass
+
+    def _refresh(self):
+        pass
+
+    def _set_temp_status(self, *_args):
+        pass
+
+    def _status(self, *_args):
         pass
 
 
@@ -138,7 +170,8 @@ def test_review_shortcuts_cover_every_direct_review_operation():
 
 def test_auto_action_preview_uses_the_auto_repair_strategy_matrix():
     assert ReviewController._predict_auto_action(1, 0, "src") == "placeholder"
-    assert ReviewController._predict_auto_action(1, 0, "minimal") == "delete"
+    assert ReviewController._predict_auto_action(1, 0, "minimal") == "placeholder"
+    assert ReviewController._predict_auto_action(0, 1, "minimal") == "placeholder"
 
 
 def test_handled_last_item_advances_when_enabled():
@@ -184,6 +217,27 @@ def test_flag_note_update_and_removal_are_single_undoable_operations():
     assert len(window._undo_stack) == 2
     assert window._repair_state.flag_for_relation(relation_id) is None
     assert window._repair_state.action_for_relation(relation_id).kind == "edit"
+
+
+def test_ok_and_flag_do_not_invalidate_semantic_scores():
+    window = _ApplyHarness()
+
+    window._apply_action(window._repair_state.make_action("ok", 0))
+    window._apply_action(window._repair_state.make_action("flag", 0, note="check"))
+
+    assert window.invalidated == []
+
+
+def test_content_action_still_invalidates_semantic_scores():
+    window = _ApplyHarness()
+
+    window._apply_action(
+        window._repair_state.make_action(
+            "edit", 0, new_src_lines=["A"], new_tgt_lines=["B+"]
+        )
+    )
+
+    assert window.invalidated == [0]
 
 
 def test_undo_projects_relation_identity_before_resetting_ai_proposal():
@@ -244,6 +298,27 @@ def test_explicit_ai_selection_bypasses_anomaly_filter():
     assert not context.get_relation_info(0).is_reviewable
 
 
+def test_browse_mode_allows_explicit_rereview_without_an_auto_repair_plan():
+    state = RepairState.from_ops([((0,), (0,), 0.99)], ["A"], ["B"])
+    state = state.apply(state.make_action("ok", 0, source="ai"))
+    suggest = _Button()
+    review = SimpleNamespace(
+        _window=SimpleNamespace(
+            _repair_state=state,
+            _strategy="src",
+            selected_ordinals={0},
+        ),
+        _btn_refs={"suggest": suggest},
+        _selected_ordinals=lambda: [0],
+        _disable_all_buttons=lambda: None,
+        _sync_menu_actions=lambda: None,
+    )
+
+    ReviewController._update_browse_button_states(review, 0)
+
+    assert suggest.enabled is True
+
+
 def test_chapter_ai_still_requires_anomalies_without_explicit_selection():
     state = RepairState.from_ops([((0,), (0,), 0.99)], ["A"], ["B"])
     review = SimpleNamespace(
@@ -263,16 +338,106 @@ def test_chapter_ai_still_requires_anomalies_without_explicit_selection():
     assert context is None
 
 
-def test_applying_ai_suggestion_creates_a_user_approval():
+def test_adopting_ai_suggestion_is_a_user_action_but_not_user_approval():
     state = RepairState.from_ops([((0, 1), (0,), 0.7)], ["A", "B"], ["AB"])
     action = RepairAction.make_merge("L000001", source="ai")
 
-    approved = state.apply(action).apply(ReviewController._make_user_approval(action))
+    approved = state.apply(action.adopted_by("user"))
     status = project_relation_statuses(approved)[0]
 
+    assert len(approved.repair_log) == 1
     assert approved.repair_log[-1].source == "user"
-    assert status.approval == APPROVAL_USER
-    assert not status.requires_manual_review
+    assert approved.current.group(0).rows[0].marker == "[M]"
+    assert status.effective_source == SOURCE_USER
+    assert not status.is_user_approved
+    assert status.requires_manual_review
+
+
+def test_accept_button_adopts_proposal_without_ai_or_redundant_ok_marker():
+    state = RepairState.from_ops([((0,), (0,), 0.7)], ["A"], ["B"])
+    proposal = RepairAction.make_edit(
+        "L000001", source="ai", new_src_lines=["A"], new_tgt_lines=["B+"]
+    )
+    state.ai_proposal_store.add(proposal)
+    window = SimpleNamespace(
+        _repair_state=state,
+        _status_bar=SimpleNamespace(is_auto_advance=lambda: False),
+        _save_session=lambda: None,
+    )
+
+    def apply_action(action):
+        window._repair_state = window._repair_state.apply(action)
+
+    review = SimpleNamespace(
+        _focused_action=proposal,
+        _window=window,
+        action_requested=SimpleNamespace(emit=apply_action),
+        actions_updated=_Emitter(),
+        _rebuild_ai_suggestions=lambda: None,
+        _set_focused_action=lambda _action: None,
+        _on_next_suggestion=lambda: None,
+    )
+
+    ReviewController._on_ai_accept_focused(review)
+
+    applied = window._repair_state.repair_log
+    assert len(applied) == 1
+    assert applied[0].kind == "edit"
+    assert applied[0].source == "user"
+    assert window._repair_state.current.group(0).rows[0].marker == "[E]"
+    assert window._repair_state.ai_proposal_store.get_status(proposal) == "accepted"
+
+
+def test_accepted_suggestion_preview_uses_current_score_cache():
+    action = RepairAction.make_edit(
+        "L000001", source="ai", new_src_lines=["A"], new_tgt_lines=["B+"]
+    )
+    item = AiSuggestionItem(
+        0,
+        action,
+        "已应用",
+        src_line="A",
+        tgt_line="B+",
+        score=0.0,
+    )
+    review = SimpleNamespace(
+        _window=SimpleNamespace(
+            _score_cache=SimpleNamespace(get=lambda relation_id, sub: 0.721)
+        ),
+        _suggestion_score_cache={},
+        _suggestion_scores_pending=set(),
+    )
+    requests = []
+
+    ReviewController._prepare_suggestion_scores(
+        review, action, "已应用", [item], requests
+    )
+
+    assert item.score == 0.721
+    assert requests == []
+
+
+def test_pending_suggestion_score_requests_are_deduplicated():
+    action = RepairAction.make_edit(
+        "L000001", source="ai", new_src_lines=["A"], new_tgt_lines=["B+"]
+    )
+    first = AiSuggestionItem(0, action, src_line="A", tgt_line="B+")
+    second = AiSuggestionItem(0, action, src_line="A", tgt_line="B+")
+    review = SimpleNamespace(
+        _window=SimpleNamespace(_score_cache=None),
+        _suggestion_score_cache={},
+        _suggestion_scores_pending=set(),
+    )
+    requests = []
+
+    ReviewController._prepare_suggestion_scores(
+        review, action, "pending", [first], requests
+    )
+    ReviewController._prepare_suggestion_scores(
+        review, action, "pending", [second], requests
+    )
+
+    assert requests == [("A", "B+")]
 
 
 def test_chapter_ai_excludes_user_reviewed_relations_but_explicit_review_can_include():
@@ -280,7 +445,7 @@ def test_chapter_ai_excludes_user_reviewed_relations_but_explicit_review_can_inc
     state = state.apply(RepairAction.make_ok("L000001", source="user"))
     review = SimpleNamespace(
         _window=SimpleNamespace(_repair_state=state, _strategy="src", _model=object()),
-        _anomalies=[RelationAnomaly(ordinals=(0,), approval="user")],
+        _anomalies=[RelationAnomaly(ordinals=(0,), effective_source="user")],
     )
 
     assert (
@@ -292,6 +457,98 @@ def test_chapter_ai_excludes_user_reviewed_relations_but_explicit_review_can_inc
         skip_auto_repair=True,
     )
     assert explicit.reviewable_ids == [0]
+
+
+def test_review_current_relation_falls_back_to_unified_focus():
+    review = SimpleNamespace(
+        _current_ordinals=lambda: [],
+        _window=SimpleNamespace(
+            selected_ordinals=set(),
+            _focus=SimpleNamespace(focused_ordinal=7),
+        ),
+    )
+
+    assert ReviewController._current_ordinal(review) == 7
+
+
+def test_review_button_uses_focused_relation_when_selection_is_empty():
+    analyzed = []
+    review = SimpleNamespace(
+        _has_active_agent=lambda: False,
+        _selected_ordinals=lambda: [],
+        _current_ordinal=lambda: 7,
+        analyze_relations=lambda ordinals: analyzed.append(ordinals),
+        _emit_log=lambda *_args: None,
+        _on_agent_error=lambda _error: None,
+    )
+
+    ReviewController._on_ai_analyze(review)
+
+    assert analyzed == [[7]]
+
+
+def test_review_button_click_dispatches_the_unified_focus():
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    review = ReviewController()
+    review._window = SimpleNamespace(
+        selected_ordinals=set(),
+        _focus=SimpleNamespace(focused_ordinal=7),
+    )
+    analyzed = []
+    review.analyze_relations = lambda ordinals: analyzed.append(ordinals)
+    review._btn_refs["suggest"].setEnabled(True)
+
+    review._btn_refs["suggest"].click()
+
+    assert analyzed == [[7]]
+    review.close()
+    app.processEvents()
+
+
+def test_review_button_reports_missing_relation_instead_of_silent_noop():
+    logs = []
+    review = SimpleNamespace(
+        _has_active_agent=lambda: False,
+        _selected_ordinals=lambda: [],
+        _current_ordinal=lambda: None,
+        _emit_log=lambda message, role: logs.append((message, role)),
+    )
+
+    ReviewController._on_ai_analyze(review)
+
+    assert logs == [("请先选择要审校的文本对", "warning")]
+
+
+def test_cancel_active_agent_requests_cooperative_stop_and_updates_ui():
+    class Thread:
+        def __init__(self):
+            self.cancel_calls = 0
+
+        def isRunning(self):
+            return True
+
+        def request_cancel(self):
+            self.cancel_calls += 1
+            return True
+
+    thread = Thread()
+    logs = []
+    states = []
+    review = SimpleNamespace(
+        _active_threads=[thread],
+        _emit_log=lambda message, role: logs.append((message, role)),
+        _set_ai_running_state=lambda loading, **kwargs: states.append(
+            (loading, kwargs)
+        ),
+    )
+
+    ReviewController._cancel_active_agent(review)
+
+    assert thread.cancel_calls == 1
+    assert logs == [("正在停止 AI 校订…", "info")]
+    assert states == [(True, {"stopping": True})]
 
 
 def test_user_collapsed_ai_panel_stays_closed_during_auto_sync(monkeypatch):
@@ -312,3 +569,108 @@ def test_ai_panel_can_auto_expand_without_user_collapse(monkeypatch):
 
     assert not window._bottom_collapsed
     assert window.toggle_origins == [False]
+
+
+def test_manual_edit_of_a_bundled_group_keeps_its_full_original_scope(monkeypatch):
+    snapshot = AlignmentSnapshot.from_alignment(
+        [((0,), (), 0.0), ((1,), (0,), 0.8)],
+        ["专长", "无特别专长。"],
+        ["Special skills: None in particular."],
+    )
+    state = RepairService.repair_bundle_relations(RepairState(snapshot), [0, 1])
+    captured = {}
+
+    class Dialog:
+        DialogCode = SimpleNamespace(Accepted=1)
+
+        def __init__(
+            self,
+            src_lines,
+            tgt_lines,
+            _parent,
+            *,
+            initial_src_lines,
+            initial_tgt_lines,
+        ):
+            captured["src"] = src_lines
+            captured["tgt"] = tgt_lines
+            captured["initial_src"] = initial_src_lines
+            captured["initial_tgt"] = initial_tgt_lines
+            self.result_src_lines = ["专长：无特别专长。"]
+            self.result_tgt_lines = ["Special skills: None in particular."]
+
+        def exec(self):
+            return self.DialogCode.Accepted
+
+    class Harness(WindowActionsMixin):
+        def __init__(self):
+            self._repair_state = state
+            self.applied = None
+
+        def _apply_action(self, action, auto=False):
+            self.applied = action
+
+    monkeypatch.setattr("dualign.gui.window_actions.BlockEditDialog", Dialog)
+    window = Harness()
+
+    window.do_edit_single(0)
+
+    assert captured["initial_src"] == ["专长", "无特别专长。"]
+    assert captured["initial_tgt"] == ["Special skills: None in particular."]
+    assert window.applied.relation_ids == ("L000001", "L000002")
+
+
+def test_ok_on_a_bundled_group_targets_its_complete_scope():
+    snapshot = AlignmentSnapshot.from_alignment(
+        [((0,), (0,), 0.8), ((), (1,), 0.0)],
+        ["甲"],
+        ["A", "correction"],
+    )
+    state = RepairService.repair_multi_edit(
+        RepairState(snapshot), [0, 1], ["甲"], ["A"]
+    )
+
+    class Harness(WindowActionsMixin):
+        def __init__(self):
+            self._repair_state = state
+            self.applied = None
+
+        def _apply_action(self, action, auto=False):
+            self.applied = action
+
+    window = Harness()
+    window.do_ok(0)
+
+    assert window.applied.kind == "ok"
+    assert window.applied.relation_ids == ("L000001", "L000002")
+
+
+def test_cross_relation_edit_color_compares_against_the_complete_baseline():
+    snapshot = AlignmentSnapshot.from_alignment(
+        [((0,), (0,), 0.8), ((1,), (1,), 0.7)], ["甲", "乙"], ["A", "B"]
+    )
+    unchanged = RepairAction.make_edit(
+        ("L000001", "L000002"),
+        source="user",
+        new_src_lines=["甲", "乙"],
+        new_tgt_lines=["A", "B"],
+    )
+
+    assert relation_text_changes(0, unchanged, snapshot) == (False, False)
+
+
+def test_copying_a_bundled_group_describes_its_full_scope():
+    snapshot = AlignmentSnapshot.from_alignment(
+        [((0,), (), 0.0), ((1,), (0,), 0.8)],
+        ["专长", "无特别专长。"],
+        ["Special skills: None in particular."],
+    )
+    state = RepairService.repair_bundle_relations(RepairState(snapshot), [0, 1])
+    window = SimpleNamespace(_repair_state=state)
+
+    markdown = WindowTableMixin._format_relations(window, [0], fmt="markdown")
+    tsv = WindowTableMixin._format_relations(window, [0], fmt="tsv")
+
+    assert "| 0/1 | 1:0+1:1 |" in markdown
+    assert "专长" in markdown and "无特别专长。" in markdown
+    assert "relation[0/1]\tinit=1:0+1:1" in tsv

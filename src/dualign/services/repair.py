@@ -14,12 +14,12 @@ from dualign.models.state import AlignmentSnapshot, MISSING
 from dualign.models.relation_identity import normalize_relation_ids
 from dualign.models.action import (
     AiProposalStore,
+    CONTENT_ACTION_KINDS,
     RepairAction,
 )
 from dualign.models.marker import (
     is_merge,
     is_deleted,
-    is_approved,
     is_placeholder,
     is_edit,
     is_split,
@@ -27,6 +27,7 @@ from dualign.models.marker import (
     combine,
     needs_zero_score,
 )
+from dualign.models.source import highest_source
 from dualign.models.state import ChapterState, RelationGroup, RelationRow
 from dualign.core.text import op_type_str, smart_join_lines as _smart_join_lines
 from dualign.services.embedding_cache import EmbeddingCache
@@ -137,7 +138,7 @@ def review_flags_for_uncertain_regions(
             f"组合证据分歧区 {region_index}（A 行 {line_range(start[0], end[0])}，"
             f"B 行 {line_range(start[1], end[1])}）：当前路径 "
             f"{current_structure or '未记录'}；备选路径 "
-            f"{alternative_structure or '未记录'}。请人工复核。"
+            f"{alternative_structure or '未记录'}；结构选择尚未确定。"
         )
         region_data = {
             "start": {"source": start[0], "target": start[1]},
@@ -199,15 +200,19 @@ def _expand_text_lines(texts: List[str]) -> List[str]:
     return expanded
 
 
-def _apply_info_free(state: ChapterState, ordinal: int, marker: str) -> ChapterState:
-    """info-free 操作: 只设 marker。文本在渲染时从 snapshot 重建。
+def _apply_info_free(
+    state: ChapterState, ordinal: int, action: RepairAction
+) -> ChapterState:
+    """Apply a marker/trust-only action without rebuilding ordinary text.
 
     [P] 是例外：它需要将 cur_type 改为 "1:1" 并填充空侧文本，
-    否则后续 [OK] 叠加时占位符文本会丢失。
+    否则后续仅提升来源时占位符文本会丢失。
     """
     g = state.group(ordinal)
     if g is None:
         return state
+    marker = action.marker
+    effective_source = action.effective_source
 
     if is_placeholder(marker):
         # [P]: 生成包含 ⟢MISSING⟣ 文本的 1:1 行
@@ -232,21 +237,34 @@ def _apply_info_free(state: ChapterState, ordinal: int, marker: str) -> ChapterS
                     for i in range(ls)
                 ]
             return _apply_info_full(
-                state, ordinal, [t[0] for t in texts], [t[1] for t in texts], [], marker
+                state,
+                ordinal,
+                [t[0] for t in texts],
+                [t[1] for t in texts],
+                [],
+                marker,
+                effective_source,
             )
-        return state.replace_relation(ordinal, g.with_marker(marker))
+        return state.replace_relation(ordinal, g.with_marker(marker, effective_source))
 
-    # [OK] / [F] 是元标记：叠加到现有操作标记上，保留修复信息与来源前缀。
-    # 例如 [M] + [AI][OK] → "[M] [AI][OK]"（AI 认可了合并，而非覆盖它）。
-    # 无先前操作时保持完整标记（[OK] / [AI][OK]）原样设置。
-    if is_approved(marker) or is_flagged(marker):
+    if action.kind == "ok":
+        current_source = g.rows[0].effective_source if g.rows else "none"
+        effective_source = highest_source((current_source, effective_source))
+        if marker:
+            existing = g.rows[0].marker if g.rows else ""
+            return state.replace_relation(
+                ordinal,
+                g.with_marker(combine(existing, marker), effective_source),
+            )
+        return state.replace_relation(
+            ordinal, g.with_effective_source(effective_source)
+        )
+
+    if is_flagged(marker):
         existing = g.rows[0].marker if g.rows else ""
-        if existing:
-            new = combine(existing, marker)
-            return state.replace_relation(ordinal, g.with_marker(new))
-        return state.replace_relation(ordinal, g.with_marker(marker))
+        return state.replace_relation(ordinal, g.with_marker(combine(existing, marker)))
 
-    return state.replace_relation(ordinal, g.with_marker(marker))
+    return state.replace_relation(ordinal, g.with_marker(marker, effective_source))
 
 
 def _apply_info_full(
@@ -256,6 +274,7 @@ def _apply_info_full(
     new_tgt: List[str],
     scores: List[float],
     marker: str,
+    effective_source: str,
 ) -> ChapterState:
     """info-full 操作: 完整替换为新文本对 (edit/split)。
 
@@ -296,7 +315,9 @@ def _apply_info_full(
         )
         for k in range(n)
     ]
-    return state.replace_relation(ordinal, g.with_text(texts, scores, marker))
+    return state.replace_relation(
+        ordinal, g.with_text(texts, scores, marker, effective_source)
+    )
 
 
 def _apply_multi_relation_merge(
@@ -356,7 +377,8 @@ def _apply_multi_relation_merge(
                     # 原始关系边界仍由 init_type 保存，供初始列分别显示。
                     n_src=total_src,
                     n_tgt=total_tgt,
-                    marker="[M]",
+                    marker=action.marker,
+                    effective_source=action.effective_source,
                     init_score_text="",
                 )
             )
@@ -428,6 +450,7 @@ def _apply_multi_relation_edit(
                 n_src=n,
                 n_tgt=n,
                 marker=action.marker,
+                effective_source=action.effective_source,
                 init_score_text=ist if k == 0 else "",
             )
         )
@@ -474,7 +497,7 @@ def replay(snapshot: AlignmentSnapshot, log: List[RepairAction]) -> ChapterState
             continue
         ordinal = operation_indices[0]
 
-        # ── marker 由 RepairAction.marker 统一构建（含来源前缀）──
+        # marker and effective_source are orthogonal projections of the action.
         _marker = act.marker
 
         # 多关系操作
@@ -484,6 +507,10 @@ def replay(snapshot: AlignmentSnapshot, log: List[RepairAction]) -> ChapterState
                 continue
             elif act.kind == "edit":
                 state = _apply_multi_relation_edit(state, act, operation_indices)
+                continue
+            elif act.kind == "delete":
+                for operation_index in operation_indices:
+                    state = state.remove_relation(operation_index)
                 continue
 
         # info-free: merge, delete, placeholder, flag, ok
@@ -495,7 +522,7 @@ def replay(snapshot: AlignmentSnapshot, log: List[RepairAction]) -> ChapterState
             "flag",
             "ok",
         ):
-            state = _apply_info_free(state, ordinal, _marker)
+            state = _apply_info_free(state, ordinal, act)
 
         # info-full: split, edit
         elif act.kind in ("split", "edit"):
@@ -503,7 +530,15 @@ def replay(snapshot: AlignmentSnapshot, log: List[RepairAction]) -> ChapterState
             new_src: List[str] = d.get("new_src_lines", [])
             new_tgt: List[str] = d.get("new_tgt_lines", [])
             scores: List[float] = d.get("split_scores") or d.get("inherited_scores", [])
-            state = _apply_info_full(state, ordinal, new_src, new_tgt, scores, _marker)
+            state = _apply_info_full(
+                state,
+                ordinal,
+                new_src,
+                new_tgt,
+                scores,
+                _marker,
+                act.effective_source,
+            )
 
     return state
 
@@ -516,11 +551,14 @@ def replay(snapshot: AlignmentSnapshot, log: List[RepairAction]) -> ChapterState
 def normalize_repair_log(actions) -> list[RepairAction]:
     """Collapse an append-only action stream into its effective decisions.
 
-    Content decisions and review decisions are independent state axes:
+    Content decisions and unresolved flags are independent state axes:
 
-    - a newer content action replaces older content and invalidates ``ok``;
+    - a newer content action replaces older content;
     - ``flag`` survives content changes until somebody explicitly resolves it;
-    - ``ok`` resolves ``flag``; a later ``flag`` reopens the review concern.
+    - ``ok`` resolves ``flag``; a later ``flag`` reopens the concern without
+      erasing who last accepted the otherwise unchanged result.
+    - reviewing existing content updates that action's reviewer/responsibility
+      instead of creating a redundant second ``ok`` marker.
 
     Preserved flags are moved behind replacement content so replay renders
     ``[F]`` on the new content.  The rules depend on action meaning, not on
@@ -530,20 +568,84 @@ def normalize_repair_log(actions) -> list[RepairAction]:
     def targets(action: RepairAction) -> set[tuple[str, object]]:
         return {("relation", relation_id) for relation_id in action.relation_ids}
 
+    def resolved_flag_targets(action: RepairAction) -> set[tuple[str, object]]:
+        resolved: set[tuple[str, object]] = set()
+        for payload in action.data.get("resolved_flag_actions", ()):
+            if not isinstance(payload, dict):
+                continue
+            for relation_id in payload.get("relation_ids", ()):
+                resolved.add(("relation", str(relation_id)))
+        return resolved
+
+    def reviewers(action: RepairAction) -> tuple[str, ...]:
+        values = list(action.reviewers)
+        if action.source in {"ai", "user"}:
+            values = [*values, action.source]
+        return tuple(dict.fromkeys(str(value) for value in values if value))
+
+    def merge_approval_metadata(
+        content: RepairAction, review: RepairAction
+    ) -> RepairAction:
+        result = content
+        for reviewer in reviewers(review):
+            result = result.with_reviewer(reviewer)
+        if review.source == "user":
+            result = result.with_source("user")
+            result.data["user_approved"] = True
+        approvals: set[str] = set()
+        for decision in (content, review):
+            values = decision.data.get("approvals", ())
+            if isinstance(values, str):
+                values = (values,)
+            approvals.update(str(value) for value in values)
+        if approvals:
+            result.data["approvals"] = approvals
+        return result
+
     normalized: list[RepairAction] = []
     for action in actions:
         affected = targets(action)
-        if action.kind == "flag":
+        resolved_flags = resolved_flag_targets(action)
+        if resolved_flags:
             normalized = [
                 previous
                 for previous in normalized
-                if not (
-                    targets(previous) & affected and previous.kind in {"flag", "ok"}
-                )
+                if not (previous.kind == "flag" and targets(previous) & resolved_flags)
             ]
+        if action.kind == "flag":
+            reopened: list[RepairAction] = []
+            for previous in normalized:
+                if not (targets(previous) & affected):
+                    reopened.append(previous)
+                    continue
+                if previous.kind == "flag":
+                    continue
+                if previous.data.get("user_approved"):
+                    previous = RepairAction.from_dict(previous.to_dict())
+                    previous.data.pop("user_approved", None)
+                reopened.append(previous)
+            normalized = reopened
             normalized.append(action)
             continue
         if action.kind == "ok":
+            existing_content = any(
+                previous.kind in CONTENT_ACTION_KINDS and targets(previous) & affected
+                for previous in normalized
+            )
+            if existing_content:
+                normalized = [
+                    (
+                        merge_approval_metadata(previous, action)
+                        if previous.kind in CONTENT_ACTION_KINDS
+                        and targets(previous) & affected
+                        else previous
+                    )
+                    for previous in normalized
+                    if not (
+                        previous.kind in {"flag", "ok"} and targets(previous) & affected
+                    )
+                ]
+                continue
             normalized = [
                 previous
                 for previous in normalized
@@ -692,6 +794,17 @@ class RepairState:
             self._ai_proposal_store,
         )
 
+    def apply_many(self, actions) -> RepairState:
+        """Apply one logical transaction with a single normalization pass."""
+        additions = list(actions)
+        if not additions:
+            return self
+        return RepairState(
+            self._snapshot,
+            [*self._repair_log, *additions],
+            self._ai_proposal_store,
+        )
+
     def reset(self) -> RepairState:
         """重置所有修复，保留 AI 建议。"""
         return RepairState(self._snapshot, [], self._ai_proposal_store)
@@ -709,6 +822,22 @@ class RepairState:
             self._ai_proposal_store,
         )
 
+    def reset_relations(self, relation_ids) -> RepairState:
+        """Reset every decision intersecting one current relation scope."""
+
+        selected = {str(value) for value in relation_ids}
+        for relation_id in selected:
+            self._snapshot.operation_index(relation_id)
+        return RepairState(
+            self._snapshot,
+            [
+                action
+                for action in self._repair_log
+                if not selected.intersection(action.relation_ids)
+            ],
+            self._ai_proposal_store,
+        )
+
     def action_for_relation(self, relation_id: str) -> Optional[RepairAction]:
         """查找指定稳定关系身份的最新动作。"""
         self._snapshot.operation_index(relation_id)
@@ -716,6 +845,59 @@ class RepairState:
             if relation_id in action.relation_ids:
                 return action
         return None
+
+    def content_action_for_relation(self, relation_id: str) -> Optional[RepairAction]:
+        """查找决定指定关系当前文本与结构的动作。"""
+        self._snapshot.operation_index(relation_id)
+        for action in reversed(self._repair_log):
+            if (
+                action.kind in CONTENT_ACTION_KINDS
+                and relation_id in action.relation_ids
+            ):
+                return action
+        return None
+
+    def current_relation_ordinals(self, ordinal: int) -> tuple[int, ...]:
+        """Return the immutable relations represented by one current group.
+
+        A cross-relation edit or merge is rendered as a single group anchored
+        at its first relation.  Commands concerning that visible group must
+        operate on the whole action scope, not only on its anchor.
+        """
+
+        relation_id = self._snapshot.relation_id(ordinal)
+        action = self.content_action_for_relation(relation_id)
+        if action is None:
+            return (ordinal,)
+        action_ordinals = self.action_ordinals(action)
+        return action_ordinals if len(action_ordinals) > 1 else (ordinal,)
+
+    def current_relation_selection(self, ordinals) -> tuple[int, ...]:
+        """Expand visible group anchors into a de-duplicated baseline scope."""
+
+        expanded: set[int] = set()
+        for ordinal in ordinals:
+            expanded.update(self.current_relation_ordinals(int(ordinal)))
+        return tuple(sorted(expanded))
+
+    def original_text_lines(
+        self, ordinals: tuple[int, ...] | list[int], side: str
+    ) -> list[str]:
+        """Collect baseline text for a current relation scope."""
+
+        if side not in {"src", "tgt"}:
+            raise ValueError("side must be 'src' or 'tgt'")
+        result: list[str] = []
+        for ordinal in ordinals:
+            source_indices, target_indices, _score = self._snapshot.original_ops[
+                ordinal
+            ]
+            indices = source_indices if side == "src" else target_indices
+            text_at = (
+                self._snapshot.src_text if side == "src" else self._snapshot.tgt_text
+            )
+            result.extend(text_at(index) for index in indices)
+        return result
 
     def relation_text_changed(self, relation_id: str) -> bool:
         """Whether current row texts/layout differ from the immutable baseline."""
@@ -854,20 +1036,24 @@ class RepairService:
     ) -> RepairState:
         """遍历所有非 1:1 关系，按策略一键修复。
 
-        核心原则: 每种策略保持首选侧不动，修改另一侧。
-          - src-first:  保持原文不动 → 修改译文侧
-          - tgt-first:  保持译文不动 → 修改原文侧
-          - minimal:    不引入新信息（只合并，不拆分/插入）
+        核心原则: 策略确定内容权威侧，并在可行时优先保留其分段。
+          - src-first:  文档 A 内容为准 → 优先调整文档 B 的边界
+          - tgt-first:  文档 B 内容为准 → 优先调整文档 A 的边界
+          - minimal:    保留已有信息，以合并或缺失侧占位避免破坏性修改
+
+        当另一侧没有可靠的内部边界时，合并权威侧的相邻分段不改变其内容，
+        是完整无 gap 约束下的自然 1:1 归一化。
 
         策略矩阵:
           | Type   | src-first        | tgt-first        | minimal     |
           |--------|------------------|------------------|-------------|
           | N:1    | split tgt  [S]   | merge src  [M]   | merge src [M]|
           | 1:M    | merge tgt  [M]   | split src  [S]   | merge tgt [M]|
-          | 1:0    | placeholder [P]  | delete     [D]   | delete    [D]|
-          | 0:1    | delete     [D]   | placeholder [P]  | delete    [D]|
+          | 1:0    | placeholder [P]  | delete     [D]   | placeholder [P]|
+          | 0:1    | delete     [D]   | placeholder [P]  | placeholder [P]|
 
-        拆分需要 model。无 model 时保留原生关系，不得静默换成相反动作。
+        只有存在多个局部边界方案时才需要 model。少行侧无可用硬边界时，
+        N:1 / 1:N 的唯一无 gap 完整覆盖是将多行侧合并为 1:1，直接归一化。
         """
         result = state
         snapshot = result.snapshot
@@ -883,11 +1069,17 @@ class RepairService:
             expected = choose_auto_repair(
                 len(source_indices), len(target_indices), strategy
             )
-            if expected is None or action.kind != expected.kind:
+            if expected is None:
                 return False
             if expected.kind == "split":
-                return str(action.data.get("side") or "") == expected.side
-            return True
+                if action.kind == "split":
+                    return str(action.data.get("side") or "") == expected.side
+                return bool(
+                    action.kind == "merge"
+                    and action.data.get("normalization_plan") == "split"
+                    and action.data.get("side") == expected.side
+                )
+            return action.kind == expected.kind
 
         if unresolved_only:
             for action in state.repair_log:
@@ -925,8 +1117,6 @@ class RepairService:
             if plan is None:
                 continue
 
-            if plan.requires_model and model is None:
-                continue
             if plan.kind == "split":
                 result = RepairService.apply_split(
                     result, ordinal, plan.side, model, cache=cache
@@ -994,9 +1184,13 @@ class RepairService:
         model=None,
         cache: Optional[EmbeddingCache] = None,
     ) -> SplitAttempt:
-        """硬拆分一侧，再用完整覆盖的局部 MDL 重新对齐两侧。
+        """对 N:1 / 1:N 父关系做完整覆盖的局部结构归一化。
 
-        side: 要拆分的一侧 ("src" 或 "tgt")。通常是少行侧。
+        side: 优先引入边界的一侧 ("src" 或 "tgt")。通常是少行侧。
+
+        硬拆分只是可选的边界扩充。若少行侧没有内部硬边界，原始 N:1 / 1:N
+        只存在一条完整无 gap 路径：合并多行侧并自然归一为 1:1。这不是
+        拆分失败的降级处理，也不需要嵌入模型。
 
         局部语法只包含 1:1 / N:1 / 1:N。gap 和一般 N:M 不进入候选图；
         DLD/posterior 决定结构复杂度，同复杂度内由完整拼接路径决定边界。
@@ -1015,13 +1209,17 @@ class RepairService:
         raw_src = [snapshot.src_text(i) for i in s_idx]
         raw_tgt = [snapshot.tgt_text(j) for j in t_idx]
 
-        # 1. 硬分割拆分侧
+        # 1. 硬分割优先侧；边界没有增加时仍可完成唯一的结构归一化。
         if side == "src":
             parts: List[str] = []
             for line in raw_src:
                 sub = UniversalSplitter.hard_split(line)
                 parts.extend(sub if sub else [line])
             if len(parts) <= len(raw_src):
+                if len(raw_src) == 1 and len(raw_tgt) > 1:
+                    return RepairService._normalize_unsplit_relation(
+                        state, ordinal, side
+                    )
                 return SplitAttempt(state, SPLIT_FAILURE_UNSPLITTABLE)
         else:
             parts: List[str] = []
@@ -1029,6 +1227,10 @@ class RepairService:
                 sub = UniversalSplitter.hard_split(line)
                 parts.extend(sub if sub else [line])
             if len(parts) <= len(raw_tgt):
+                if len(raw_src) > 1 and len(raw_tgt) == 1:
+                    return RepairService._normalize_unsplit_relation(
+                        state, ordinal, side
+                    )
                 return SplitAttempt(state, SPLIT_FAILURE_UNSPLITTABLE)
 
         if model is None:
@@ -1082,6 +1284,23 @@ class RepairService:
         )
         return SplitAttempt(state.apply(action))
 
+    @staticmethod
+    def _normalize_unsplit_relation(
+        state: RepairState, ordinal: int, side: str
+    ) -> SplitAttempt:
+        """Materialize the unique gapless path when no new boundary exists."""
+
+        s_idx, t_idx, _score = state.snapshot.original_ops[ordinal]
+        action = state.make_action(
+            "merge",
+            ordinal,
+            sub_count=max(len(s_idx), len(t_idx)),
+            source="auto",
+            normalization_plan="split",
+            side=side,
+        )
+        return SplitAttempt(state.apply(action))
+
     # ── 跨关系操作 ──
 
     @staticmethod
@@ -1125,7 +1344,8 @@ class RepairService:
         Keeping the rule here prevents toolbar and context-menu drift.
         """
 
-        selected = sorted(set(ordinals))
+        visible_selection = sorted(set(ordinals))
+        selected = list(state.current_relation_selection(visible_selection))
         keys = (
             "merge",
             "split",
@@ -1136,14 +1356,11 @@ class RepairService:
             "placeholder",
             "reset",
         )
-        if not selected:
+        if not visible_selection:
             return {key: False for key in keys}
 
-        per_relation = [
-            RepairService.valid_operations(state, ordinal) for ordinal in selected
-        ]
-        if len(selected) == 1:
-            operations = per_relation[0]
+        if len(visible_selection) == 1:
+            operations = RepairService.valid_operations(state, visible_selection[0])
             return {
                 "merge": operations["merge"],
                 "split": operations["split_src"] or operations["split_tgt"],
@@ -1154,6 +1371,10 @@ class RepairService:
                 "placeholder": operations["placeholder"],
                 "reset": operations["reset"],
             }
+
+        per_relation = [
+            RepairService.valid_operations(state, ordinal) for ordinal in selected
+        ]
 
         contiguous = RepairService.selection_is_contiguous(selected)
         return {
@@ -1189,26 +1410,24 @@ class RepairService:
         is_01 = ls == 0 and lt > 0
 
         # 已有操作时，某些操作被覆盖
-        action = state.action_for_relation(snapshot.relation_id(ordinal))
+        relation_id = snapshot.relation_id(ordinal)
+        action = state.action_for_relation(relation_id)
         has_action = action is not None
-
-        ch = state.current
-        g = ch.group(ordinal)
-        is_11_now = g is not None and all(r.cur_type == "1:1" for r in g.rows)
-        marker = g.rows[0].marker if g else ""
-        resolved_to_11 = is_merge(marker) or is_placeholder(marker)
-        is_del = is_deleted(marker)
-        already_ok = is_approved(marker)
-
+        g = state.current.group(ordinal)
+        is_cross_group = len(state.current_relation_ordinals(ordinal)) > 1
         return {
-            "merge": is_non11 and not is_10 and not is_01,
-            "split_src": ls > 1 and lt == 1,
-            "split_tgt": ls == 1 and lt > 1,
+            "merge": is_non11 and not is_10 and not is_01 and not is_cross_group,
+            "split_src": ls > 1 and lt == 1 and not is_cross_group,
+            "split_tgt": ls == 1 and lt > 1 and not is_cross_group,
             "edit": True,
-            "ok": (is_11_now or resolved_to_11 or is_del) and not already_ok,
+            # Approval is an idempotent review decision, not a structural
+            # transition.  Any extant relation can be confirmed—including a
+            # legitimate N:M relation and one already confirmed earlier.
+            # normalize_repair_log de-duplicates repeated OK actions.
+            "ok": g is not None,
             "flag": True,
             "delete": True,
-            "placeholder": is_10 or is_01,
+            "placeholder": (is_10 or is_01) and not is_cross_group,
             "reset": has_action,
         }
 

@@ -9,7 +9,7 @@ import json
 from typing import List, Tuple, Optional
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -20,11 +20,18 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QFileDialog,
     QComboBox,
-    QListWidget,
-    QListWidgetItem,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QCheckBox,
+    QApplication,
     QAbstractItemView,
     QSizePolicy,
 )
+
+REVIEW_UNOPENED = "unopened"
+REVIEW_PENDING = "pending"
+REVIEW_COMPLETE = "complete"
 
 
 class DragDropLineEdit(QLineEdit):
@@ -54,13 +61,96 @@ class FileQueueItem:
         self.src_path = src_path
         self.tgt_path = tgt_path
         self.entry = entry
-        self.aligned = False
+        self.opened = False
+        self._review_known = False
+        self._all_review_counts = (0, 0)
+        self._filtered_review_counts = (0, 0)
+        self._excerpt_signature = None
+        self._source_excerpt = ""
 
     @property
     def display_title(self):
         return (
             Path(self.src_path).name if self.src_path else (self.label or "（未命名）")
         )
+
+    @property
+    def aligned(self) -> bool:
+        """Compatibility alias for callers predating the review-state split."""
+
+        return self.opened
+
+    @aligned.setter
+    def aligned(self, value: bool) -> None:
+        self.opened = bool(value)
+
+    def set_review_counts(
+        self,
+        *,
+        all_subjects: int,
+        all_required: int,
+        filtered_subjects: int,
+        filtered_required: int,
+    ) -> bool:
+        all_counts = (int(all_subjects), int(all_required))
+        filtered_counts = (int(filtered_subjects), int(filtered_required))
+        changed = (
+            not self.opened
+            or not self._review_known
+            or self._all_review_counts != all_counts
+            or self._filtered_review_counts != filtered_counts
+        )
+        self.opened = True
+        self._review_known = True
+        self._all_review_counts = all_counts
+        self._filtered_review_counts = filtered_counts
+        return changed
+
+    def review_counts(self, scope: str = "filtered") -> tuple[int, int]:
+        return (
+            self._all_review_counts if scope == "all" else self._filtered_review_counts
+        )
+
+    def review_state(self, scope: str = "filtered") -> str:
+        if not self.opened:
+            return REVIEW_UNOPENED
+        if not self._review_known:
+            return REVIEW_PENDING
+        _subjects, required = self.review_counts(scope)
+        return REVIEW_COMPLETE if required == 0 else REVIEW_PENDING
+
+    def source_excerpt(self) -> str:
+        """Return the first non-empty source line, cached until the file changes."""
+
+        try:
+            stat = os.stat(self.src_path)
+            signature = (self.src_path, stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            signature = (self.src_path, None, None)
+        if signature == self._excerpt_signature:
+            return self._source_excerpt
+
+        self._excerpt_signature = signature
+        if signature[1] is None:
+            self._source_excerpt = "（无法读取）"
+            return self._source_excerpt
+
+        self._source_excerpt = "（空文档）"
+        try:
+            with open(
+                self.src_path,
+                "r",
+                encoding="utf-8-sig",
+                errors="replace",
+            ) as handle:
+                for line in handle:
+                    text = line.strip()
+                    if text:
+                        self._source_excerpt = text
+                        break
+        except OSError:
+            self._source_excerpt = "（无法读取）"
+        return self._source_excerpt
 
 
 class WorkspacePanel(QWidget):
@@ -151,10 +241,47 @@ class WorkspacePanel(QWidget):
             h.addWidget(b)
         ql.addLayout(h)
 
-        # 列表控件（多选 + 多行）
-        self._qlw = QListWidget()
-        self._qlw.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self._qlw.itemClicked.connect(self._on_item_clicked)
+        filters = QHBoxLayout()
+        filters.setSpacing(4)
+        filters.addWidget(QLabel("状态"))
+        self._status_filter = QComboBox()
+        for label, value in (
+            ("全部", "all"),
+            ("未打开", REVIEW_UNOPENED),
+            ("待确认", REVIEW_PENDING),
+            ("已完成", REVIEW_COMPLETE),
+        ):
+            self._status_filter.addItem(label, value)
+        self._status_filter.currentIndexChanged.connect(lambda _index: self._rebuild())
+        filters.addWidget(self._status_filter)
+        filters.addWidget(QLabel("完成范围"))
+        self._review_scope = QComboBox()
+        self._review_scope.addItem("当前筛选", "filtered")
+        self._review_scope.addItem("全部异常", "all")
+        self._review_scope.currentIndexChanged.connect(lambda _index: self._rebuild())
+        filters.addWidget(self._review_scope)
+        filters.addStretch()
+        ql.addLayout(filters)
+
+        self._qlw = QTableWidget(0, 5)
+        self._qlw.setHorizontalHeaderLabels(
+            ["序号", "状态", "内容节选", "文档 A", "文档 B"]
+        )
+        self._qlw.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._qlw.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._qlw.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._qlw.setShowGrid(False)
+        self._qlw.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self._qlw.verticalHeader().setVisible(False)
+        self._qlw.verticalHeader().setDefaultSectionSize(24)
+        self._qlw.verticalHeader().setMinimumSectionSize(24)
+        header = self._qlw.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self._qlw.cellClicked.connect(self._on_row_clicked)
         self._qlw.setMinimumHeight(28)
         ql.addWidget(self._qlw, 1)
         qg.setMinimumHeight(160)
@@ -216,9 +343,12 @@ class WorkspacePanel(QWidget):
 
     def _select(self, item: FileQueueItem):
         self._selected = item
-        for i in range(self._qlw.count()):
-            if self._qlw.item(i).data(Qt.ItemDataRole.UserRole) is item:
-                self._qlw.setCurrentRow(i)
+        self._qlw.clearSelection()
+        for row in range(self._qlw.rowCount()):
+            cell = self._qlw.item(row, 0)
+            if cell is not None and cell.data(Qt.ItemDataRole.UserRole) is item:
+                self._qlw.setCurrentCell(row, 0)
+                self._qlw.selectRow(row)
                 break
 
     def selected_item(self):
@@ -229,37 +359,100 @@ class WorkspacePanel(QWidget):
 
         return list(self._queue)
 
-    def _rebuild(self):
-        """重建文件列表，每项显示两行：标题 + 路径概要。
+    def _scope(self) -> str:
+        return str(self._review_scope.currentData() or "filtered")
 
-        重建后自动恢复 _selected 的高亮。
-        """
+    def _visible_queue(self) -> list[tuple[int, FileQueueItem]]:
+        selected_state = str(self._status_filter.currentData() or "all")
+        scope = self._scope()
+        return [
+            (index, item)
+            for index, item in enumerate(self._queue)
+            if selected_state == "all" or item.review_state(scope) == selected_state
+        ]
+
+    @staticmethod
+    def _status_tooltip(item: FileQueueItem, scope: str) -> str:
+        state = item.review_state(scope)
+        if state == REVIEW_UNOPENED:
+            return "本次会话尚未打开"
+        if not item._review_known:
+            return "已打开，正在读取或建立审校状态"
+        subjects, required = item.review_counts(scope)
+        completed = subjects - required
+        scope_label = "全部异常" if scope == "all" else "当前筛选"
+        return f"{scope_label}：已人工确认 {completed}/{subjects}，待确认 {required}"
+
+    def _status_widget(self, item: FileQueueItem, scope: str) -> QWidget:
+        wrapper = QWidget()
+        layout = QHBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        checkbox = QCheckBox()
+        checkbox.setTristate(True)
+        state = item.review_state(scope)
+        check_state = {
+            REVIEW_UNOPENED: Qt.CheckState.Unchecked,
+            REVIEW_PENDING: Qt.CheckState.PartiallyChecked,
+            REVIEW_COMPLETE: Qt.CheckState.Checked,
+        }[state]
+        checkbox.setCheckState(check_state)
+        checkbox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        checkbox.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        tooltip = self._status_tooltip(item, scope)
+        checkbox.setToolTip(tooltip)
+        wrapper.setToolTip(tooltip)
+        wrapper.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout.addStretch()
+        layout.addWidget(checkbox)
+        layout.addStretch()
+        return wrapper
+
+    def _copy_button(self, path: str, side: str) -> QWidget:
+        wrapper = QWidget()
+        layout = QHBoxLayout(wrapper)
+        layout.setContentsMargins(1, 1, 1, 1)
+        button = QPushButton("复制")
+        button.setFixedSize(42, 20)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.setToolTip(path or f"文档 {side} 路径为空")
+        button.setEnabled(bool(path))
+        button.clicked.connect(lambda _checked=False, p=path: self._copy_path(p))
+        layout.addWidget(button)
+        return wrapper
+
+    @staticmethod
+    def _copy_path(path: str) -> None:
+        if not path:
+            return
+        QApplication.clipboard().setText(path)
+
+    def _rebuild(self):
+        """按当前状态范围和筛选条件重建文件对表格。"""
         self._qlw.blockSignals(True)
-        self._qlw.clear()
-        for it in self._queue:
-            lines = [it.display_title]
-            if it.src_path or it.tgt_path:
-                paths = []
-                if it.src_path:
-                    paths.append(f"A: {Path(it.src_path).name}")
-                if it.tgt_path:
-                    paths.append(f"B: {Path(it.tgt_path).name}")
-                lines.append("  " + "  ".join(paths))
-            text = "\n".join(lines)
-            if it.aligned:
-                text += "  ✓"
-            item = QListWidgetItem(text)
-            item.setData(Qt.ItemDataRole.UserRole, it)
-            item.setSizeHint(QSize(0, 36))
-            self._qlw.addItem(item)
+        self._qlw.clearContents()
+        visible = self._visible_queue()
+        self._qlw.setRowCount(len(visible))
+        scope = self._scope()
+        for row, (index, item) in enumerate(visible):
+            ordinal = QTableWidgetItem(str(index))
+            ordinal.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            ordinal.setData(Qt.ItemDataRole.UserRole, item)
+            self._qlw.setItem(row, 0, ordinal)
+            status_cell = QTableWidgetItem("")
+            status_cell.setToolTip(self._status_tooltip(item, scope))
+            self._qlw.setItem(row, 1, status_cell)
+            self._qlw.setCellWidget(row, 1, self._status_widget(item, scope))
+            excerpt = item.source_excerpt()
+            excerpt_cell = QTableWidgetItem(excerpt)
+            excerpt_cell.setToolTip(excerpt)
+            self._qlw.setItem(row, 2, excerpt_cell)
+            self._qlw.setCellWidget(row, 3, self._copy_button(item.src_path, "A"))
+            self._qlw.setCellWidget(row, 4, self._copy_button(item.tgt_path, "B"))
+            self._qlw.setRowHeight(row, 24)
         self._qlw.blockSignals(False)
         self._qc.setText(f"文件 ({len(self._queue)})")
-        # 重建后恢复选中高亮
         if self._selected:
-            for i in range(self._qlw.count()):
-                if self._qlw.item(i).data(Qt.ItemDataRole.UserRole) is self._selected:
-                    self._qlw.setCurrentRow(i)
-                    break
+            self._select(self._selected)
 
     def _on_prev_chapter(self):
         self.chapter_nav_requested.emit(-1)
@@ -270,9 +463,10 @@ class WorkspacePanel(QWidget):
     def _on_remove_selected(self):
         self.remove_selected()
 
-    def _on_item_clicked(self, item):
-        it = item.data(Qt.ItemDataRole.UserRole)
-        if it is not None and item.isSelected():
+    def _on_row_clicked(self, row: int, _column: int):
+        cell = self._qlw.item(row, 0)
+        it = cell.data(Qt.ItemDataRole.UserRole) if cell is not None else None
+        if it is not None:
             self._selected = it
             self.pair_selected.emit(it)
 
@@ -359,9 +553,11 @@ class WorkspacePanel(QWidget):
     def remove_selected(self):
         target = self._selected
         if target is None:
-            selected = self._qlw.selectedItems()
+            selected = self._qlw.selectionModel().selectedRows(0)
             if selected:
-                target = selected[0].data(Qt.ItemDataRole.UserRole)
+                target = self._qlw.item(selected[0].row(), 0).data(
+                    Qt.ItemDataRole.UserRole
+                )
         if target is not None and target in self._queue:
             self._queue.remove(target)
             self._selected = None
@@ -377,33 +573,57 @@ class WorkspacePanel(QWidget):
         if fd is None:
             fd = FileQueueItem(label=lb, src_path=s, tgt_path=t)
             self._queue.append(fd)
-        fd.aligned = True
+        fd.opened = True
         fd.label = lb
         self._select(fd)
         self._rebuild()
         self._add_to_recent(lb, s, t)
 
+    def update_review_status(
+        self,
+        src_path: str,
+        tgt_path: str,
+        *,
+        all_subjects: int,
+        all_required: int,
+        filtered_subjects: int,
+        filtered_required: int,
+    ) -> None:
+        for item in self._queue:
+            if item.src_path == src_path and item.tgt_path == tgt_path:
+                changed = item.set_review_counts(
+                    all_subjects=all_subjects,
+                    all_required=all_required,
+                    filtered_subjects=filtered_subjects,
+                    filtered_required=filtered_required,
+                )
+                if changed:
+                    self._rebuild()
+                return
+
     def _nav_prev(self):
-        if not self._queue or not self._selected:
+        visible = [item for _index, item in self._visible_queue()]
+        if not visible or not self._selected:
             return
-        idx = next((i for i, q in enumerate(self._queue) if q is self._selected), -1)
+        idx = next((i for i, q in enumerate(visible) if q is self._selected), -1)
         if idx > 0:
-            nxt = self._queue[idx - 1]
+            nxt = visible[idx - 1]
         elif idx == 0:
-            nxt = self._queue[-1]
+            nxt = visible[-1]
         else:
             return
         self._select(nxt)
         self.pair_selected.emit(nxt)
 
     def _nav_next(self):
-        if not self._queue:
+        visible = [item for _index, item in self._visible_queue()]
+        if not visible:
             return
         if self._selected is None:
-            self._select(self._queue[0])
-            self.pair_selected.emit(self._queue[0])
+            self._select(visible[0])
+            self.pair_selected.emit(visible[0])
             return
-        idx = next((i for i, q in enumerate(self._queue) if q is self._selected), -1)
-        nxt = idx + 1 if idx + 1 < len(self._queue) else 0
-        self._select(self._queue[nxt])
-        self.pair_selected.emit(self._queue[nxt])
+        idx = next((i for i, q in enumerate(visible) if q is self._selected), -1)
+        next_index = idx + 1 if idx + 1 < len(visible) else 0
+        self._select(visible[next_index])
+        self.pair_selected.emit(visible[next_index])

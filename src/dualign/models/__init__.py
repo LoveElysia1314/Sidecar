@@ -26,12 +26,14 @@ from dualign.models.relation_status import (
     RelationReviewInfo,
     project_relation_statuses,
     relation_status_to_info,
-    APPROVAL_NONE,
-    APPROVAL_PROPOSED,
-    APPROVAL_AGENT,
-    APPROVAL_USER,
-    ALL_APPROVAL_STATES,
-    APPROVAL_LABELS,
+)
+from dualign.models.source import (
+    ALL_EFFECTIVE_SOURCES,
+    SOURCE_AI,
+    SOURCE_AUTO,
+    SOURCE_LABELS,
+    SOURCE_NONE,
+    SOURCE_USER,
 )
 
 __all__ = [
@@ -56,10 +58,10 @@ __all__ = [
     "RelationReviewInfo",
     "project_relation_statuses",
     "relation_status_to_info",
-    "APPROVAL_NONE",
-    "APPROVAL_PROPOSED",
-    "APPROVAL_AGENT",
-    "APPROVAL_USER",
-    "ALL_APPROVAL_STATES",
-    "APPROVAL_LABELS",
+    "SOURCE_NONE",
+    "SOURCE_AUTO",
+    "SOURCE_AI",
+    "SOURCE_USER",
+    "ALL_EFFECTIVE_SOURCES",
+    "SOURCE_LABELS",
 ]

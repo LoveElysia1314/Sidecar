@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import tempfile
 import uuid
@@ -11,17 +12,18 @@ from pathlib import Path
 
 from dualign.common import file_bytes_sha256, file_identity_changed
 from dualign.config import get_cache_root
-from dualign.models.action import canonicalize_action_payload
 from dualign.models.pair_editing import PairEditingState
-from dualign.models.relation_identity import rebase_relation_ids
-from dualign.models.score_cache import RelationScoreCache
 from dualign.models.state import MISSING
 from dualign.services.alignment_io import document_sha256, document_sha256_from_text
+from dualign.services.cancellation import CancellationError
 from dualign.services.report_io import (
     build_report,
-    relation_ids_from_report,
 )
 from dualign.services.realignment import RebuiltAlignment, rebuild_alignment
+from dualign.services.state_reconciliation import (
+    reconcile_relation_state,
+    relation_fingerprints,
+)
 
 
 class PairSaveError(RuntimeError):
@@ -148,109 +150,6 @@ def recover_pending_pair_saves(transaction_dir: str | Path | None = None) -> lis
     return messages
 
 
-def _reanchor_proposal_action(
-    raw_action: object,
-    source_relation_ids: tuple[str, ...],
-    final_relation_ids: tuple[str, ...],
-    changed_relation_ids: frozenset[str],
-) -> dict | None:
-    if not isinstance(raw_action, dict):
-        return None
-    try:
-        action = canonicalize_action_payload(raw_action, source_relation_ids)
-    except ValueError:
-        return None
-    target_ids = tuple(action["relation_ids"])
-    if not target_ids or set(target_ids) & changed_relation_ids:
-        return None
-    final_ids = set(final_relation_ids)
-    for relation_id in target_ids:
-        if relation_id not in final_ids:
-            return None
-    return action
-
-
-def _rebase_pending_ai_proposals(
-    raw_store: object,
-    source_relation_ids: tuple[str, ...],
-    final_relation_ids: tuple[str, ...],
-    changed_relation_ids: frozenset[str],
-) -> dict:
-    """Keep only still-actionable pending proposals after solidification."""
-
-    if not isinstance(raw_store, dict):
-        return {}
-    rebased: dict[str, list[dict]] = {}
-    for proposals in raw_store.values():
-        if not isinstance(proposals, list):
-            continue
-        for raw_proposal in proposals:
-            if (
-                not isinstance(raw_proposal, dict)
-                or raw_proposal.get("status", "pending") != "pending"
-            ):
-                continue
-            action = _reanchor_proposal_action(
-                raw_proposal.get("action"),
-                source_relation_ids,
-                final_relation_ids,
-                changed_relation_ids,
-            )
-            if action is None:
-                continue
-            proposal = dict(raw_proposal)
-            proposal["action"] = action
-            target_ids = action.get("relation_ids") or ()
-            key = str(target_ids[0])
-            rebased.setdefault(key, []).append(proposal)
-    return rebased
-
-
-def _operation_fingerprint(operation, lines_a, lines_b):
-    source, target, _score = operation
-    return (
-        tuple(lines_a[index] for index in source),
-        tuple(lines_b[index] for index in target),
-    )
-
-
-def _exact_relation_map(old_operations, new_operations, lines_a, lines_b):
-    """Map only relations whose exact two-sided content is uniquely preserved."""
-
-    old_by_fingerprint: dict[tuple, list[int]] = {}
-    new_by_fingerprint: dict[tuple, list[int]] = {}
-    for index, operation in enumerate(old_operations):
-        old_by_fingerprint.setdefault(
-            _operation_fingerprint(operation, lines_a, lines_b), []
-        ).append(index)
-    for index, operation in enumerate(new_operations):
-        new_by_fingerprint.setdefault(
-            _operation_fingerprint(operation, lines_a, lines_b), []
-        ).append(index)
-
-    result: list[int | None] = [None] * len(old_operations)
-    for fingerprint, old_indices in old_by_fingerprint.items():
-        new_indices = new_by_fingerprint.get(fingerprint, ())
-        if len(old_indices) == 1 and len(new_indices) == 1:
-            result[old_indices[0]] = new_indices[0]
-    return tuple(result)
-
-
-def _rebase_repair_log(raw_actions, source_relation_ids, final_relation_ids):
-    result = []
-    for raw_action in raw_actions:
-        action = raw_action.to_dict() if hasattr(raw_action, "to_dict") else raw_action
-        rebased = _reanchor_proposal_action(
-            action,
-            source_relation_ids,
-            final_relation_ids,
-            frozenset(),
-        )
-        if rebased is not None:
-            result.append(rebased)
-    return result
-
-
 def save_pair_transaction(
     state: PairEditingState,
     *,
@@ -266,6 +165,8 @@ def save_pair_transaction(
     applied_repairs=(),
     changed_relation_ids=(),
     alignment_runner=None,
+    cancellation_token=None,
+    progress_callback=None,
 ) -> PairSaveResult:
     """Save two documents and their rebased report as one transaction.
 
@@ -274,6 +175,15 @@ def save_pair_transaction(
     relation identities; positional indices are never treated as identity.
     """
 
+    token = cancellation_token
+
+    def checkpoint(message: str, *, cancellable: bool = True) -> None:
+        if progress_callback is not None:
+            progress_callback(message, cancellable)
+        if cancellable and token is not None:
+            token.raise_if_cancelled()
+
+    checkpoint("正在核对文件状态…")
     path_a = Path(document_a_path).resolve()
     path_b = Path(document_b_path).resolve()
     report_target = Path(report_path).resolve()
@@ -323,21 +233,65 @@ def save_pair_transaction(
     relation_map: tuple[int | None, ...] | None = None
     rebuilt: RebuiltAlignment | None = None
     if solidification_policy is not None:
-        runner = alignment_runner or rebuild_alignment
+        checkpoint("正在重新对齐固化后的文本…")
         try:
-            rebuilt = runner(
-                list(state.document_a.blocks), list(state.document_b.blocks)
-            )
+            if alignment_runner is None:
+                supports_cancellation = (
+                    "cancellation_token"
+                    in inspect.signature(rebuild_alignment).parameters
+                )
+                if token is None or not supports_cancellation:
+                    rebuilt = rebuild_alignment(
+                        list(state.document_a.blocks),
+                        list(state.document_b.blocks),
+                    )
+                else:
+                    rebuilt = rebuild_alignment(
+                        list(state.document_a.blocks),
+                        list(state.document_b.blocks),
+                        cancellation_token=token,
+                    )
+            else:
+                rebuilt = alignment_runner(
+                    list(state.document_a.blocks), list(state.document_b.blocks)
+                )
+            checkpoint("正在协调可复用的校订状态…")
             operations = list(rebuilt.operations)
-            relation_map = _exact_relation_map(
-                intermediate_operations,
+            from dualign.services.anomaly_detection import baseline_anomaly_types
+            from dualign.services.report_io import anomaly_detection_config_from_report
+
+            baseline_anomalies = baseline_anomaly_types(
                 operations,
-                state.document_a.blocks,
                 state.document_b.blocks,
+                anomaly_detection_config_from_report(report),
             )
-            relation_ids = rebase_relation_ids(
-                intermediate_relation_ids, relation_map, len(operations)
+
+            reconciliation = reconcile_relation_state(
+                source_operations=intermediate_operations,
+                source_relation_ids=intermediate_relation_ids,
+                source_fingerprints=relation_fingerprints(
+                    intermediate_operations,
+                    state.document_a.blocks,
+                    state.document_b.blocks,
+                ),
+                target_operations=operations,
+                target_fingerprints=relation_fingerprints(
+                    operations, state.document_a.blocks, state.document_b.blocks
+                ),
+                repair_log=remaining_repair_log,
+                ai_proposals=report.get("ai_proposals"),
+                scores=report.get("scores"),
+                invalidated_relation_ids=changed,
+                pending_ai_only=True,
+                review_required_target_indices={
+                    index for index, labels in enumerate(baseline_anomalies) if labels
+                },
+                cause="selective-solidification",
             )
+            relation_map = reconciliation.relation_map
+            relation_ids = reconciliation.relation_ids
+        except CancellationError:
+            raise
         except Exception as exc:
             raise PairSaveError(f"固化后的文本重新对齐失败: {exc}") from exc
     else:
@@ -366,23 +320,10 @@ def save_pair_transaction(
     # views to the rebuilt operation list; invalidate everything derived from a
     # relation that was actually solidified.
     if solidification_policy is not None and relation_map is not None:
-        original_relation_ids = relation_ids_from_report(previous)
-        previous["ai_proposals"] = _rebase_pending_ai_proposals(
-            previous.get("ai_proposals"),
-            original_relation_ids,
-            relation_ids,
-            changed,
-        )
-        previous["scores"] = (
-            RelationScoreCache.from_dict(previous.get("scores"), original_relation_ids)
-            .retain(set(relation_ids), excluding=changed)
-            .to_dict()
-        )
-        remaining_repair_log = _rebase_repair_log(
-            remaining_repair_log,
-            intermediate_relation_ids,
-            relation_ids,
-        )
+        previous["ai_proposals"] = reconciliation.ai_proposals
+        previous["scores"] = reconciliation.scores
+        remaining_repair_log = reconciliation.repair_log
+        history[-1]["reconciliation"] = dict(reconciliation.audit)
     else:
         previous["ai_proposals"] = {}
         previous["scores"] = {}
@@ -436,9 +377,12 @@ def save_pair_transaction(
         previous=previous,
         document_a_sha256_value=hash_a,
         document_b_sha256_value=hash_b,
+        document_a_lines=state.document_a.blocks,
+        document_b_lines=state.document_b.blocks,
     )
     report_text = json.dumps(rebased_report, ensure_ascii=False, indent=2) + "\n"
 
+    checkpoint("正在准备原子写入…")
     transaction_id = uuid.uuid4().hex
     root = Path(transaction_dir or Path(get_cache_root()) / "transactions")
     journal_path = root / f"pair-save-{transaction_id}.json"
@@ -464,6 +408,9 @@ def save_pair_transaction(
         journal = {"version": 1, "id": transaction_id, "targets": targets}
         _write_journal(journal_path, journal)
 
+        # From this point cancellation is deliberately deferred. Interrupting
+        # a three-file install is less safe than finishing it or rolling it back.
+        checkpoint("正在原子写入正文与报告；当前阶段不可中断…", cancellable=False)
         for item in targets:
             target = Path(item["path"])
             temporary = Path(item["temporary"])

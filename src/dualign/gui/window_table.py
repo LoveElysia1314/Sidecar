@@ -36,11 +36,12 @@ from dualign.models.marker import (
     needs_zero_score,
     format_anomaly_line,
 )
-from dualign.models.relation_status import RelationAnomaly
+from dualign.models.relation_status import RelationAnomaly, manual_review_counts
 from dualign.gui.base_table import (
     CHANGED_FLAG_ROLE,
     type_cl,
     marker_cl,
+    source_cl,
     anomaly_cl,
     priority_anomaly_type,
     compute_text_colors,
@@ -59,6 +60,7 @@ COLUMN_HEADERS = [
     "关系",
     "初始类型",
     "初始评分",
+    "来源",
     "当前状态",
     "当前评分",
     "文档 A",
@@ -73,6 +75,149 @@ COLUMN_HEADERS = [
 
 class WindowTableMixin:
     """WindowTableMixin — 通过多重继承为 DualignWindow 提供方法。"""
+
+    def _create_find_bar(self):
+        """Build the compact, native text-search bar used by Ctrl+F."""
+
+        from PySide6.QtGui import QKeySequence, QShortcut
+        from PySide6.QtWidgets import (
+            QFrame,
+            QHBoxLayout,
+            QLabel,
+            QLineEdit,
+            QToolButton,
+        )
+
+        bar = QFrame()
+        bar.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(6, 3, 6, 3)
+        layout.setSpacing(4)
+
+        layout.addWidget(QLabel("查找"))
+        self._find_edit = QLineEdit()
+        self._find_edit.setClearButtonEnabled(True)
+        self._find_edit.setPlaceholderText("在当前文本中搜索…")
+        self._find_edit.setToolTip("搜索整章当前文本，不受异常筛选限制")
+        self._find_edit.textChanged.connect(self._on_find_text_changed)
+        self._find_edit.returnPressed.connect(self._find_next)
+        layout.addWidget(self._find_edit, 1)
+
+        self._find_count = QLabel("0 / 0")
+        self._find_count.setMinimumWidth(48)
+        self._find_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._find_count)
+
+        for label, tooltip, handler in (
+            ("↑", "上一个 (Shift+F3)", self._find_previous),
+            ("↓", "下一个 (F3)", self._find_next),
+            ("×", "关闭 (Esc)", self._close_find_bar),
+        ):
+            button = QToolButton()
+            button.setText(label)
+            button.setToolTip(tooltip)
+            button.setAutoRaise(True)
+            button.clicked.connect(handler)
+            layout.addWidget(button)
+
+        self._find_matches = ()
+        self._find_match_index = -1
+        self._search_force_show_ordinals = set()
+        escape = QShortcut(QKeySequence("Escape"), bar)
+        escape.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        escape.activated.connect(self._close_find_bar)
+        self._find_escape_shortcut = escape
+        bar.setVisible(False)
+        self._find_bar = bar
+        return bar
+
+    def _show_find_bar(self):
+        """Show Ctrl+F search, using the editable relation projection."""
+
+        if self._repair_state is None:
+            self._safe_status("当前没有可搜索的校订文本")
+            return
+        if getattr(self, "_preview_active", False):
+            self._status_bar.set_view_mode(False)
+            self._on_view_mode_toggled(False)
+        self._find_bar.setVisible(True)
+        self._find_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self._find_edit.selectAll()
+
+    def _close_find_bar(self):
+        """Close search and restore the unmodified filter projection."""
+
+        if not hasattr(self, "_find_bar"):
+            return
+        self._find_bar.setVisible(False)
+        self._find_matches = ()
+        self._find_match_index = -1
+        self._search_force_show_ordinals = set()
+        self._find_count.setText("0 / 0")
+        if self._repair_state is not None and not self._preview_active:
+            self._apply_filter()
+        self.table.setFocus(Qt.FocusReason.ShortcutFocusReason)
+
+    def _on_find_text_changed(self, query: str):
+        """Recompute full-chapter matches without changing user filters."""
+
+        from dualign.services.text_search import find_current_text
+
+        if self._repair_state is None:
+            self._find_matches = ()
+        else:
+            self._find_matches = find_current_text(self._repair_state, query)
+        self._find_match_index = 0 if self._find_matches else -1
+        if self._find_match_index >= 0:
+            self._activate_find_match()
+        else:
+            self._search_force_show_ordinals = set()
+            self._find_count.setText("0 / 0")
+            if self._repair_state is not None and not self._preview_active:
+                self._apply_filter()
+
+    def _find_next(self):
+        if not getattr(self, "_find_bar", None) or not self._find_bar.isVisible():
+            self._show_find_bar()
+            return
+        if not self._find_matches:
+            return
+        self._find_match_index = (self._find_match_index + 1) % len(self._find_matches)
+        self._activate_find_match()
+
+    def _find_previous(self):
+        if not getattr(self, "_find_bar", None) or not self._find_bar.isVisible():
+            self._show_find_bar()
+            return
+        if not self._find_matches:
+            return
+        self._find_match_index = (self._find_match_index - 1) % len(self._find_matches)
+        self._activate_find_match()
+
+    def _activate_find_match(self):
+        """Reveal one match across filters, select it and center its cell."""
+
+        if not self._find_matches or self._find_match_index < 0:
+            return
+        match = self._find_matches[self._find_match_index]
+        self._find_count.setText(
+            f"{self._find_match_index + 1} / {len(self._find_matches)}"
+        )
+        self._search_force_show_ordinals = {match.ordinal}
+        self._apply_filter()
+        self._focus.go_to_ordinal(match.ordinal, source="search")
+
+        column = 6 if match.side == "src" else 7
+        for table_row, row in enumerate(getattr(self, "_render_cache_rows", ())):
+            if row.ordinal != match.ordinal or row.sub != match.sub:
+                continue
+            item = self.table.item(table_row, column)
+            if item is not None:
+                self.table.setCurrentItem(item)
+                self.table.scrollToItem(
+                    item, QAbstractItemView.ScrollHint.PositionAtCenter
+                )
+            break
 
     @property
     def selected_ordinals(self) -> Set[int]:
@@ -300,7 +445,7 @@ class WindowTableMixin:
             return
 
         col = item.column()
-        if col not in (5, 6):
+        if col not in (6, 7):
             self._hover_cancel()
             return
 
@@ -352,23 +497,17 @@ class WindowTableMixin:
             self._hover_cancel()
             return
 
-        # 聚合该关系该侧所有子行的初始文本
+        # 聚合当前可见关系组的完整初始文本。跨关系编辑/合并只显示一个
+        # 锚点 ordinal，但悬浮参考不能因此退化为锚点的单条基线。
         initial_text = ""
         cell_rect = None
         if self._repair_state is not None:
             snapshot = self._repair_state.snapshot
             if 0 <= ordinal < len(snapshot.original_ops):
-                s_idx, t_idx, _ = snapshot.original_ops[ordinal]
-                if col == 5:
-                    if s_idx:
-                        initial_text = "\n".join(snapshot.src_text(i) for i in s_idx)
-                    else:
-                        initial_text = "（初始为空）"
-                elif col == 6:
-                    if t_idx:
-                        initial_text = "\n".join(snapshot.tgt_text(j) for j in t_idx)
-                    else:
-                        initial_text = "（初始为空）"
+                scope = self._repair_state.current_relation_ordinals(ordinal)
+                side = "src" if col == 6 else "tgt"
+                lines = self._repair_state.original_text_lines(scope, side)
+                initial_text = "\n".join(lines) if lines else "（初始为空）"
 
         if not initial_text:
             self._hover_cancel()
@@ -564,17 +703,36 @@ class WindowTableMixin:
         for r in view.rows:
             cur_rows.setdefault(r.ordinal, []).append(r)
 
+        # A bundled current group is addressed by its anchor in the table, but
+        # copied metadata must describe every baseline relation it represents.
+        scopes: list[tuple[int, tuple[int, ...]]] = []
+        seen_anchors: set[int] = set()
+        for ordinal in ordinals:
+            if ordinal >= len(snapshot.original_ops):
+                continue
+            scope = self._repair_state.current_relation_ordinals(ordinal)
+            anchor = scope[0]
+            if anchor not in seen_anchors:
+                scopes.append((anchor, scope))
+                seen_anchors.add(anchor)
+
+        def scope_metadata(scope: tuple[int, ...]) -> tuple[str, str, float]:
+            types = []
+            scores = []
+            for value in scope:
+                source_indices, target_indices, score = snapshot.original_ops[value]
+                types.append(f"{len(source_indices)}:{len(target_indices)}")
+                scores.append(float(score))
+            relation_label = "/".join(str(value) for value in scope)
+            return relation_label, "+".join(types), sum(scores) / len(scores)
+
         if fmt == "markdown":
             # ── 统一单张 Markdown 表格 ──
             md_lines: List[str] = []
             md_lines.append("| 关系 | 类型 | 标记 | 文档 A | 文档 B |")
             md_lines.append("|---|---|---|---|---|")
-            for ordinal in ordinals:
-                if ordinal >= len(snapshot.original_ops):
-                    continue
-                s_idx, t_idx, sc = snapshot.original_ops[ordinal]
-                ls, lt = len(s_idx), len(t_idx)
-                init_type = f"{ls}:{lt}"
+            for ordinal, scope in scopes:
+                relation_text, init_type, _score = scope_metadata(scope)
                 rows = cur_rows.get(ordinal, [])
                 r0 = rows[0] if rows else None
                 marker = r0.marker if r0 else ""
@@ -584,7 +742,7 @@ class WindowTableMixin:
                 for k in range(cnt):
                     s = cur_src_lines[k] if k < len(cur_src_lines) else ""
                     t = cur_tgt_lines[k] if k < len(cur_tgt_lines) else ""
-                    relation_label = str(ordinal) if k == 0 else ""
+                    relation_label = relation_text if k == 0 else ""
                     type_label = init_type if k == 0 else ""
                     marker_label = marker if (k == 0 and marker) else ""
                     # 转义管道符和换行
@@ -598,12 +756,8 @@ class WindowTableMixin:
 
         # ── TSV 格式 ──
         lines: List[str] = []
-        for ordinal in ordinals:
-            if ordinal >= len(snapshot.original_ops):
-                continue
-            s_idx, t_idx, sc = snapshot.original_ops[ordinal]
-            ls, lt = len(s_idx), len(t_idx)
-            init_type = f"{ls}:{lt}"
+        for ordinal, scope in scopes:
+            relation_text, init_type, sc = scope_metadata(scope)
             rows = cur_rows.get(ordinal, [])
             r0 = rows[0] if rows else None
             cur_type = r0.cur_type if r0 else init_type
@@ -614,7 +768,7 @@ class WindowTableMixin:
 
             marker_s = f" [{marker}]" if marker else ""
             lines.append(
-                f"relation[{ordinal}]\tinit={init_type}\tscore={sc:.1%}"
+                f"relation[{relation_text}]\tinit={init_type}\tscore={sc:.1%}"
                 f"\tcur={cur_type}\tscore={cur_score:.1%}{marker_s}"
             )
             cnt = max(len(cur_src_lines), len(cur_tgt_lines))
@@ -637,6 +791,14 @@ class WindowTableMixin:
             if hasattr(self, "_preview_async_scores"):
                 self._preview_async_scores = None
         self._apply_filter()
+        if (
+            getattr(self, "_find_bar", None) is not None
+            and self._find_bar.isVisible()
+            and self._find_edit.text()
+        ):
+            # A repair can replace or regroup the cells being searched.  Keep
+            # navigation coordinates synchronized with the new projection.
+            self._on_find_text_changed(self._find_edit.text())
         self._update_doc_summary()
         self._update_status_bar()
         self._sync_undo_redo()
@@ -730,12 +892,12 @@ class WindowTableMixin:
         )
         for row_idx, row in enumerate(getattr(self, "_render_cache_rows", [])):
             if row.ordinal == ordinal and row.sub == sub:
-                cell = self.table.item(row_idx, 4)
+                cell = self.table.item(row_idx, 5)
                 if cell:
                     from dualign.gui.base_table import make_score_cell
 
                     new_cell = make_score_cell(new_score, show_scores, precision=1)
-                    self.table.setItem(row_idx, 4, new_cell)
+                    self.table.setItem(row_idx, 5, new_cell)
                 break
 
     def _on_preview_flat_ready(self, batch_id: int, scores):
@@ -811,7 +973,9 @@ class WindowTableMixin:
         state = self._repair_state
         ch = state.current
 
-        relation_statuses = project_relation_statuses(state, k=3.0 if k is None else k)
+        # LOW_SCORE belongs to the immutable alignment report baseline.  GUI
+        # preferences affect the next alignment, never an already-open report.
+        relation_statuses = project_relation_statuses(state)
 
         # 记录所有含异常类型的关系（不受筛选影响），供筛选判断“纯 1:1”。
         self._all_anomaly_ordinals = {
@@ -828,6 +992,7 @@ class WindowTableMixin:
         if fp is None:
             self._anomalies = []
             self._review.set_anomalies([])
+            self._sync_workspace_review_status(relation_statuses)
             return
 
         sf = fp.relation_filter
@@ -852,24 +1017,31 @@ class WindowTableMixin:
             atypes = (
                 st.current_anomaly_types if fp.ref_current else st.initial_anomaly_types
             )
+            selected_origins = fp.active_origin_keys
             origin_match = (
                 any(k in atypes for k in fp.active_origin_keys if k != "FLAGGED")
                 or ("FLAGGED" in fp.active_origin_keys and st.is_flagged)
-                if fp.active_origin_keys
+                if selected_origins
                 else False
             )
 
-            # ── 处理状态匹配（同组 OR）──
-            state_match = (
-                st.approval in fp.active_state_keys if fp.active_state_keys else False
-            )
+            # ── 有效来源匹配（同组 OR）──
+            selected_sources = fp.active_source_keys
+            source_match = st.effective_source in selected_sources
 
             # ── 跨组逻辑：AND 或 OR ──
             if sf.cross_group_op == "AND":
-                if not origin_match or not state_match:
+                if (selected_origins and not origin_match) or (
+                    selected_sources and not source_match
+                ):
                     continue
             else:  # OR
-                if not origin_match and not state_match:
+                active_matches = []
+                if selected_origins:
+                    active_matches.append(origin_match)
+                if selected_sources:
+                    active_matches.append(source_match)
+                if active_matches and not any(active_matches):
                     continue
 
             # 无任何异常特征且无操作 → 跳过
@@ -897,15 +1069,45 @@ class WindowTableMixin:
                     marker=r0.marker,
                     resolution=resolution,
                     note=flag_action.data.get("note", "") if flag_action else "",
-                    approval=st.approval,
+                    effective_source=st.effective_source,
+                    is_user_approved=st.is_user_approved,
                     signals=tuple(st.signals),
                     anomaly_types=tuple(st.initial_anomaly_types),
                 )
             )
-            # 构建当前文本异常映射（col 3 Layer 2 用）
+            # 构建当前文本异常映射（col 4 Layer 2 用）
             self._current_atypes_map[si] = set(st.current_anomaly_types)
 
         self._review.set_anomalies(self._anomalies)
+        self._sync_workspace_review_status(relation_statuses)
+
+    def _sync_workspace_review_status(self, relation_statuses) -> None:
+        """Project current human-review progress onto the active file-pair row."""
+
+        workspace = getattr(self, "_workspace", None)
+        src_path = getattr(self, "_src_path", "")
+        tgt_path = getattr(self, "_tgt_path", "")
+        if workspace is None or not src_path or not tgt_path:
+            return
+
+        all_counts = manual_review_counts(relation_statuses)
+        filtered_ordinals = {
+            ordinal
+            for anomaly in self._anomalies
+            for ordinal in anomaly.ordinals
+            if 0 <= ordinal < len(relation_statuses)
+        }
+        filtered_counts = manual_review_counts(
+            [relation_statuses[ordinal] for ordinal in sorted(filtered_ordinals)]
+        )
+        workspace.update_review_status(
+            src_path,
+            tgt_path,
+            all_subjects=all_counts.subjects,
+            all_required=all_counts.required,
+            filtered_subjects=filtered_counts.subjects,
+            filtered_required=filtered_counts.required,
+        )
 
     def _apply_filter(self):
         """筛选 + 渲染表格。先重建异常列表以反映最新质量控制勾选。
@@ -957,7 +1159,7 @@ class WindowTableMixin:
         self._row_op_map = {}
         force_show = (
             self._focus.force_show_ordinals if hasattr(self, "_focus") else set()
-        )
+        ) | set(getattr(self, "_search_force_show_ordinals", set()))
         for row in all_rows:
             is_anomaly = row.ordinal in anomaly_ordinals
             is_context = row.ordinal in context_ordinals and not is_anomaly
@@ -1047,7 +1249,7 @@ class WindowTableMixin:
                     smart_join_lines([r.tgt_text for r in g.rows if r.tgt_text])
                 )
             else:
-                # [E]/[S]/[P]/[OK]/[F]/无标记: 取子行文本，跳过空串
+                # [E]/[S]/[P]/[F]/无标记: 取子行文本，跳过空串
                 for r in g.rows:
                     if r.src_text:
                         src_out.append(r.src_text)
@@ -1228,7 +1430,7 @@ class WindowTableMixin:
     def _compute_cur_type_text(
         row: RelationRow, cur_atypes: Set[str], show_cur: bool
     ) -> str:
-        """计算当前状态列文本（col 3, 两层: 标记 + 异常标签）。"""
+        """计算当前状态列文本（col 4, 两层: 标记 + 异常标签）。"""
         if not show_cur:
             return ""
         l1 = row.marker if row.marker else ""
@@ -1277,16 +1479,17 @@ class WindowTableMixin:
         anomaly_signals: Dict[int, List[str]],
         context_ordinals: Set[int],
     ):
-        """渲染 7 列表格。每格颜色在创建时即确定，无后置覆盖。
+        """渲染 8 列表格。每格颜色在创建时即确定，无后置覆盖。
 
         着色规则:
           col 0 (关系):       #888 灰色
           col 1 (init_type):  type_cl(init_type) — 1:1 灰 / N:M 金 / 1:0 红
           col 2 (init_score): score_to_color(orig) — 连续渐变
           col 3 (cur_type):    marker_cl > type_cl(cur_type) — 有标记则优先
-          col 4 (cur_score):  score_to_color(cur) — 连续渐变
-          col 5 (src):        [D] → 暗红+删除线 / 上下文 → 灰斜体 / 异常 → anomaly_cl / 默认 TEXT_CL_NORMAL
-          col 6 (tgt):        同上
+          col 4 (source):     none / auto / ai / user
+          col 5 (cur_score):  score_to_color(cur) — 连续渐变
+          col 6 (src):        [D] → 暗红+删除线 / 上下文 → 灰斜体 / 异常 → anomaly_cl / 默认 TEXT_CL_NORMAL
+          col 7 (tgt):        同上
         """
         self._render_cache_rows = rows
         self._render_in_progress = True
@@ -1310,7 +1513,7 @@ class WindowTableMixin:
             if sr < len(rows) and rs > 1:
                 table.setSpan(sr, col, rs, cs)
 
-        covered_cur_rows = set(projection.covered_rows(3))
+        covered_cur_rows = set(projection.covered_rows(4))
 
         # ── 单元格级分隔虚线 ──
         self._divider_delegate.set_divider_cells(set(projection.divider_cells))
@@ -1330,7 +1533,7 @@ class WindowTableMixin:
         # 评分列：明细→数字，紧凑→6px 色带
         hdr = table.horizontalHeader()
         # 评分列切换 56px（明细）或 6px（紧凑色带）
-        for col in (2, 4):
+        for col in (2, 5):
             table.setColumnHidden(col, False)
             hdr.resizeSection(col, 60 if show_scores else 6)
             table.horizontalHeaderItem(col).setText(
@@ -1349,7 +1552,7 @@ class WindowTableMixin:
             is_del = is_deleted(row.marker)
             show_cur = i not in covered_cur_rows
             atypes = anomaly_ordinals.get(row.ordinal, set())
-            # col 3 Layer 2 始终基于当前文本结构，直接读取 _rebuild_anomalies 构建的映射
+            # col 4 Layer 2 始终基于当前文本结构，直接读取 _rebuild_anomalies 构建的映射
             cur_atypes = self._current_atypes_map.get(row.ordinal, set())
             if is_ctx:
                 ctx_rows.add(i)
@@ -1364,7 +1567,7 @@ class WindowTableMixin:
             # ── 初始类型 (col 1) ──
             init_display = self._compute_init_type_display(row)
 
-            # col 3: 两层显示（标记 + 异常标签）
+            # col 4: 两层显示（标记 + 异常标签）
             cur_text = self._compute_cur_type_text(row, cur_atypes, show_cur)
 
             # ── 预计算每格颜色 ──
@@ -1384,29 +1587,45 @@ class WindowTableMixin:
                 None,  # col 0: 关系 — 默认色
                 type_cl(row.init_type),  # col 1: 初始类型色
                 None,  # col 2: 评分色（由 make_score_cell 自行处理）
+                source_cl(row.effective_source),  # col 3: 有效来源类别色
                 (
-                    marker_cl(row.marker)
+                    marker_cl(row.marker, row.effective_source)
                     if row.marker
                     else (
                         anomaly_cl(priority_anomaly_type(cur_atypes))
                         if cur_atypes
                         else _color_table.TYPE_CL_11
                     )
-                ),  # col 3: Layer1 标记色 / Layer2 异常色 / 灰
-                None,  # col 4: 当前评分色（由 make_score_cell 自行处理）
+                ),  # col 4: Layer1 标记色 / Layer2 异常色 / 灰
+                None,  # col 5: 当前评分色（由 make_score_cell 自行处理）
                 text_color_for_side(
-                    True, src_changed, tgt_changed, is_del, is_ctx, row.marker, atypes
-                ),  # col 5: src
+                    True,
+                    src_changed,
+                    tgt_changed,
+                    is_del,
+                    is_ctx,
+                    row.marker,
+                    atypes,
+                    row.effective_source,
+                ),  # col 6: src
                 text_color_for_side(
-                    False, src_changed, tgt_changed, is_del, is_ctx, row.marker, atypes
-                ),  # col 6: tgt
+                    False,
+                    src_changed,
+                    tgt_changed,
+                    is_del,
+                    is_ctx,
+                    row.marker,
+                    atypes,
+                    row.effective_source,
+                ),  # col 7: tgt
             ]
             texts = [
                 relation_display,
                 init_display,
                 "",  # col 2: 初始评分（由 make_score_cell 填充）
+                row.effective_source,
                 cur_text,
-                "",  # col 4: 当前评分（由 make_score_cell 填充）
+                "",  # col 5: 当前评分（由 make_score_cell 填充）
                 src_text,
                 tgt_text,
             ]
@@ -1419,7 +1638,7 @@ class WindowTableMixin:
                     it = make_score_cell(row.orig_score, show_scores)
                     if show_scores and row.init_score_text:
                         it.setText(row.init_score_text)
-                elif ci == 4:
+                elif ci == 5:
                     if (i, ci) in spanned_cells:
                         # Qt 不显示被 span 覆盖的格，也不应为它创建无意义的评分请求。
                         it = QTableWidgetItem("")
@@ -1463,14 +1682,14 @@ class WindowTableMixin:
             if flag_note:
                 tooltip = f"标记注释：{flag_note}"
                 items[0].setToolTip(tooltip)
-                items[3].setToolTip(tooltip)
-            if si in changed_src and len(items) > 5:
-                items[5].setData(CHANGED_FLAG_ROLE, True)
-            if si in changed_tgt and len(items) > 6:
+                items[4].setToolTip(tooltip)
+            if si in changed_src and len(items) > 6:
                 items[6].setData(CHANGED_FLAG_ROLE, True)
+            if si in changed_tgt and len(items) > 7:
+                items[7].setData(CHANGED_FLAG_ROLE, True)
 
-            # 对齐：col 0-4 居中，col 5-6 左对齐
-            for ci in range(5):
+            # 对齐：col 0-5 居中，col 6-7 左对齐
+            for ci in range(6):
                 items[ci].setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
             # 删除行：全列加删除线 + 暗前景
@@ -1499,13 +1718,13 @@ class WindowTableMixin:
 
         # ── 行高：自计算 + deficit-fill 均摊 ──
         # 基线排除所有跨行 span 锚点格，仅用非 span 列确定每行最小高度。
-        # 然后对所有跨行列（col 1-6）做 deficit-fill。
+        # 然后对所有跨行列（col 1-7）做 deficit-fill。
         table.setWordWrap(True)
         table.setTextElideMode(Qt.TextElideMode.ElideNone)
         table.setUpdatesEnabled(True)
 
         font = table.font()
-        col_widths = [table.columnWidth(c) for c in range(7)]
+        col_widths = [table.columnWidth(c) for c in range(8)]
         PAD = 4
 
         def _cell_px(row_i: int, col_i: int) -> int:
@@ -1536,12 +1755,12 @@ class WindowTableMixin:
         # 基线：仅取非 span 锚点格的原生高度
         base = [0] * len(rows)
         for i in range(len(rows)):
-            for ci in range(7):
+            for ci in range(8):
                 if (i, ci) in anchor_coords or (i, ci) in spanned_cells:
                     continue
                 base[i] = max(base[i], _cell_px(i, ci))
 
-        # 对每个跨行 span（col 1-6）做 deficit-fill
+        # 对每个跨行 span（col 1-7）做 deficit-fill
         for (sr, col), (rs, _) in sorted(spans.items()):
             if rs <= 1 or col == 0:
                 continue

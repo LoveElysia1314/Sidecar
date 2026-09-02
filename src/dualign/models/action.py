@@ -12,21 +12,21 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
+from dualign.models.marker import combine as _combine_markers
 from dualign.models.marker import from_kind as _marker_from_kind
-
-# ── 有效操作类型 ──
-_VALID_KINDS = frozenset(
-    {
-        "merge",
-        "split",
-        "edit",
-        "delete",
-        "flag",
-        "ok",
-        "placeholder_src",
-        "placeholder_tgt",
-    }
+from dualign.models.source import (
+    SOURCE_AUTO,
+    SOURCE_NONE,
+    canonical_source,
+    highest_source,
 )
+
+# ── 操作语义轴（内容决策 / 审阅状态）──
+CONTENT_ACTION_KINDS = frozenset(
+    {"merge", "split", "edit", "delete", "placeholder_src", "placeholder_tgt"}
+)
+REVIEW_ACTION_KINDS = frozenset({"flag", "ok"})
+_VALID_KINDS = CONTENT_ACTION_KINDS | REVIEW_ACTION_KINDS
 
 
 def canonicalize_action_payload(
@@ -97,8 +97,18 @@ class RepairAction:
             raise ValueError(f"未知操作类型: {self.kind}")
         if not self.timestamp:
             self.timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
-        if not self.source:
-            self.source = "auto"
+        self.source = canonical_source(self.source, default=SOURCE_AUTO)
+        legacy_review_source = self.data.pop("review_source", "")
+        legacy_review_state = self.data.pop("review_state", "")
+        if legacy_review_state == "ok" and legacy_review_source:
+            reviewed_by = self.data.get("reviewed_by", [])
+            if isinstance(reviewed_by, str):
+                reviewed_by = [reviewed_by]
+            self.data["reviewed_by"] = list(
+                dict.fromkeys([*reviewed_by, legacy_review_source])
+            )
+            if canonical_source(legacy_review_source) == "user":
+                self.data["user_approved"] = True
         normalized_ids = tuple(str(value).strip() for value in self.relation_ids)
         if not normalized_ids or any(not value for value in normalized_ids):
             raise ValueError("关系 ID 不能为空")
@@ -108,16 +118,83 @@ class RepairAction:
 
     @property
     def marker(self) -> str:
-        """返回带来源前缀的 marker 字符串。
+        """Return only the effective operation/flag marker.
 
-        委托给 marker.py 的 from_kind() 统一管理。
+        Provenance is projected separately as ``effective_source``.  A pure AI
+        or user ``ok`` remains visible because there is no operation marker to
+        carry the decision.  Only explicit user approval stacks with an
+        existing M/S/E/D/P operation.
         """
-        return _marker_from_kind(self.kind, self.source)
+        marker = _marker_from_kind(self.kind)
+        if self.kind == "ok":
+            return "[OK]" if self.source in {"ai", "user"} else ""
+        if self.data.get("user_approved"):
+            return _combine_markers(marker, "[OK]")
+        return marker
 
     @property
     def is_merge(self) -> bool:
         """是否为合并操作。"""
         return self.kind == "merge"
+
+    @property
+    def reviewers(self) -> tuple[str, ...]:
+        """Explicit reviewers, independent from the action's creator."""
+
+        values = self.data.get("reviewed_by", [])
+        if isinstance(values, str):
+            values = [values]
+        return tuple(
+            dict.fromkeys(
+                canonical_source(value, default=SOURCE_AUTO)
+                for value in values
+                if value
+            )
+        )
+
+    @property
+    def decision_sources(self) -> frozenset[str]:
+        """Actors responsible for creating or explicitly reviewing a decision."""
+
+        return frozenset((self.source, *self.reviewers))
+
+    @property
+    def effective_source(self) -> str:
+        """Source responsible for this decision; flags never replace it."""
+
+        if self.kind == "flag":
+            return SOURCE_NONE
+        return highest_source(self.decision_sources, default=SOURCE_AUTO)
+
+    @property
+    def is_user_approved(self) -> bool:
+        """Whether a person explicitly confirmed the current result."""
+
+        return bool(
+            self.data.get("user_approved")
+            or (self.kind == "ok" and self.source == "user")
+        )
+
+    def with_source(self, source: str) -> RepairAction:
+        """Return the same decision with a different responsible source."""
+
+        copied = RepairAction.from_dict(self.to_dict())
+        copied.source = canonical_source(source, default=SOURCE_AUTO)
+        return copied
+
+    def with_reviewer(self, reviewer: str) -> RepairAction:
+        """Record a reviewer without changing who created the content."""
+
+        copied = RepairAction.from_dict(self.to_dict())
+        copied.data["reviewed_by"] = list(dict.fromkeys([*copied.reviewers, reviewer]))
+        return copied
+
+    def adopted_by(self, source: str) -> RepairAction:
+        """Create the effective decision made by someone accepting a proposal."""
+
+        adopted = self.with_source(source)
+        adopted.timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+        return adopted
 
     # ── Factory methods ──
 
@@ -360,6 +437,26 @@ class AiProposalStore:
     def reset(self, relation_id: str) -> None:
         for p in self.proposals.get(relation_id, []):
             p.reset()
+
+    def remove_for_relations(self, relation_ids: Iterable[str]) -> int:
+        """Remove proposals touching any relation in an explicit re-review."""
+
+        targets = {str(value).strip() for value in relation_ids if str(value).strip()}
+        if not targets:
+            return 0
+        removed = 0
+        for key in tuple(self.proposals):
+            kept = []
+            for proposal in self.proposals[key]:
+                if targets.intersection(proposal.action.relation_ids):
+                    removed += 1
+                else:
+                    kept.append(proposal)
+            if kept:
+                self.proposals[key] = kept
+            else:
+                del self.proposals[key]
+        return removed
 
     def get_status(self, action: RepairAction) -> str | None:
         proposal = self._find(self.proposals.get(self._relation_id(action), []), action)

@@ -14,6 +14,7 @@ from dualign.core import (
 )
 from dualign.core.calibration import resolve_alignment_calibration
 from dualign.services.cached_encoder import CachedEncoder
+from dualign.services.cancellation import CancellationToken
 from dualign.services.embedding import _try_lazy_load_model
 from dualign.services.embedding_cache import EmbeddingCache
 
@@ -34,10 +35,14 @@ def rebuild_alignment(
     document_b: list[str],
     *,
     config: AlignConfig | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> RebuiltAlignment:
     """Run the production aligner over future document contents without I/O."""
 
     cfg = config or AlignConfig()
+    token = cancellation_token
+    if token is not None:
+        token.raise_if_cancelled()
     model = _try_lazy_load_model()
     if model is None:
         raise RuntimeError("无法加载嵌入模型，不能重建固化后的对齐关系")
@@ -46,11 +51,33 @@ def rebuild_alignment(
     if document_a and document_b:
         with EmbeddingCache(get_embedding_cache_path()) as cache:
             encoder = CachedEncoder(model, cache)
+            try:
+                source_embeddings = encoder.encode(
+                    document_a,
+                    stop_event=token.event if token is not None else None,
+                )
+            except Exception:
+                if token is not None:
+                    token.raise_if_cancelled()
+                raise
+            if token is not None:
+                token.raise_if_cancelled()
+            try:
+                target_embeddings = encoder.encode(
+                    document_b,
+                    stop_event=token.event if token is not None else None,
+                )
+            except Exception:
+                if token is not None:
+                    token.raise_if_cancelled()
+                raise
+            if token is not None:
+                token.raise_if_cancelled()
             result = align(
                 document_a,
                 document_b,
-                encoder.encode(document_a),
-                encoder.encode(document_b),
+                source_embeddings,
+                target_embeddings,
                 cfg,
                 encode_fn=encoder.encode,
                 calibration=resolved.calibration if resolved is not None else None,
@@ -68,6 +95,9 @@ def rebuild_alignment(
         )
         operations = tuple(result.all_ops)
         stats = dict(result.stats or {})
+
+    if token is not None:
+        token.raise_if_cancelled()
 
     if result.status == "rejected":
         raise RuntimeError(f"新文本对齐被拒绝: {result.reason}")

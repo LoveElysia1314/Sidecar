@@ -3,7 +3,7 @@ Dualign — 筛选面板
 
 两组独立筛选，并行展示：
   - 异常类型: 非1:1, 语言杂糅, 低分, 标记待查
-  - 处理状态: 未处理, 拟修复, AI 审校, 用户审校
+  - 有效来源: none, auto, ai, user
 
 同组内 OR，跨组 AND，空组=全部通过。
 """
@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from dualign.gui.theme import disabled_fg
 from dualign.gui.base_table import _ANOMALY_COLORS
+from dualign.models.source import SOURCE_LABELS
 
 # ═══════════════════════════════════════════════════════════════
 # RelationFilter — 筛选条件数据类
@@ -49,10 +50,10 @@ class RelationFilter:
     LOW_SCORE: Optional[bool] = None
     FLAGGED: Optional[bool] = None
 
-    # 处理状态
+    # 当前有效结果来源
     none: Optional[bool] = None
     auto: Optional[bool] = None
-    agent: Optional[bool] = None
+    ai: Optional[bool] = None
     user: Optional[bool] = None
 
     # 跨组逻辑
@@ -67,13 +68,7 @@ _ORIGIN_LABELS = {
     "FLAGGED": "标记待查",
 }
 
-_STATE_LABELS = {
-    "none": "未处理",
-    # key 保留 auto 以兼容旧报告与 QSettings，用户语义是未审核的拟修复。
-    "auto": "拟修复",
-    "agent": "AI 审校",
-    "user": "用户审校",
-}
+_SOURCE_LABELS = SOURCE_LABELS
 
 
 class FilterPanel(QWidget):
@@ -81,7 +76,7 @@ class FilterPanel(QWidget):
 
     两组独立筛选，并行展示：
       - 异常类型: 非1:1, 语言杂糅, 低分, 标记待查
-      - 处理状态: 未处理, 拟修复, AI 审校, 用户审校
+      - 有效来源: none, auto, ai, user
 
     同组 OR，跨组 AND。未勾选的组=全部通过。
     """
@@ -91,7 +86,7 @@ class FilterPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._origin_checks: dict[str, QCheckBox] = {}
-        self._state_checks: dict[str, QCheckBox] = {}
+        self._source_checks: dict[str, QCheckBox] = {}
         self._build_ui()
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
@@ -110,7 +105,7 @@ class FilterPanel(QWidget):
     def _build_ui(self):
         # 先初始化 checkbox 字典，再构建 UI
         self._init_origin_checks()
-        self._init_state_checks()
+        self._init_source_checks()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -177,28 +172,28 @@ class FilterPanel(QWidget):
         op_grid.addWidget(self._ref_mode_combo, 0, 3)
         filter_layout.addLayout(op_grid)
 
-        # ── 处理状态（header 行 4 列等距网格）──
-        state_grid0 = QGridLayout()
-        state_grid0.setSpacing(2)
-        state_label = QLabel("▾ 处理状态")
-        state_label.setStyleSheet("font-weight:600;font-size:11px;")
-        state_grid0.addWidget(state_label, 0, 0)
-        self._sel_state_toggle = self._disabled_cb("全选")
-        self._sel_state_toggle.clicked.connect(self._on_toggle_state)
-        state_grid0.addWidget(self._sel_state_toggle, 0, 2)
-        self._state_invert_btn = QPushButton("反选")
-        self._state_invert_btn.clicked.connect(self._on_invert_state)
-        state_grid0.addWidget(self._state_invert_btn, 0, 3)
+        # ── 有效来源（header 行 4 列等距网格）──
+        source_grid0 = QGridLayout()
+        source_grid0.setSpacing(2)
+        source_label = QLabel("▾ 来源")
+        source_label.setStyleSheet("font-weight:600;font-size:11px;")
+        source_grid0.addWidget(source_label, 0, 0)
+        self._sel_source_toggle = self._disabled_cb("全选")
+        self._sel_source_toggle.clicked.connect(self._on_toggle_source)
+        source_grid0.addWidget(self._sel_source_toggle, 0, 2)
+        self._source_invert_btn = QPushButton("反选")
+        self._source_invert_btn.clicked.connect(self._on_invert_source)
+        source_grid0.addWidget(self._source_invert_btn, 0, 3)
         for _ci in range(4):
-            state_grid0.setColumnStretch(_ci, 1)
-        filter_layout.addLayout(state_grid0)
+            source_grid0.setColumnStretch(_ci, 1)
+        filter_layout.addLayout(source_grid0)
 
-        state_grid = QGridLayout()
-        state_grid.setSpacing(2)
-        state_list = list(self._state_checks.items())
-        for ci, (k, cb) in enumerate(state_list):
-            state_grid.addWidget(cb, 0, ci)
-        filter_layout.addLayout(state_grid)
+        source_grid = QGridLayout()
+        source_grid.setSpacing(2)
+        source_list = list(self._source_checks.items())
+        for ci, (k, cb) in enumerate(source_list):
+            source_grid.addWidget(cb, 0, ci)
+        filter_layout.addLayout(source_grid)
 
         layout.addWidget(filter_group)
         self._sync_all_toggles()
@@ -260,14 +255,14 @@ class FilterPanel(QWidget):
             cb.stateChanged.connect(lambda _s, k=key: self._on_individual_changed(k))
             self._origin_checks[key] = cb
 
-    def _init_state_checks(self):
-        """创建处理状态 checkbox（禁用灰显）。"""
-        self._state_checks = {}
-        for key, label in _STATE_LABELS.items():
+    def _init_source_checks(self):
+        """创建有效来源 checkbox（禁用灰显）。"""
+        self._source_checks = {}
+        for key, label in _SOURCE_LABELS.items():
             cb = self._disabled_cb(label)
             cb.setChecked(True)
             cb.stateChanged.connect(lambda _s, k=key: self._on_individual_changed(k))
-            self._state_checks[key] = cb
+            self._source_checks[key] = cb
 
     # ── 公开属性 ──
 
@@ -277,9 +272,9 @@ class FilterPanel(QWidget):
         return {k for k, cb in self._origin_checks.items() if cb.isChecked()}
 
     @property
-    def active_state_keys(self) -> set[str]:
-        """已勾选的处理状态 key 集合。"""
-        return {k for k, cb in self._state_checks.items() if cb.isChecked()}
+    def active_source_keys(self) -> set[str]:
+        """已勾选的有效来源 key 集合。"""
+        return {k for k, cb in self._source_checks.items() if cb.isChecked()}
 
     @property
     def relation_filter(self) -> RelationFilter:
@@ -288,7 +283,7 @@ class FilterPanel(QWidget):
         sf = RelationFilter(cross_group_op="AND" if _op_text == "交集" else "OR")
         for k in self.active_origin_keys:
             setattr(sf, k, True)
-        for k in self.active_state_keys:
+        for k in self.active_source_keys:
             setattr(sf, k, True)
         return sf
 
@@ -332,7 +327,7 @@ class FilterPanel(QWidget):
     def _sync_all_toggles(self):
         """同步两组「全选/取消全选」按钮文本。"""
         self._refresh_toggle_text(self._origin_checks, self._sel_origin_toggle)
-        self._refresh_toggle_text(self._state_checks, self._sel_state_toggle)
+        self._refresh_toggle_text(self._source_checks, self._sel_source_toggle)
 
     @staticmethod
     def _refresh_toggle_text(checks: dict, toggle: QCheckBox):
@@ -365,21 +360,21 @@ class FilterPanel(QWidget):
         self._sync_all_toggles()
         self.filter_changed.emit()
 
-    def _on_toggle_state(self):
-        """全选/取消全选处理状态。"""
-        n_checked = sum(1 for cb in self._state_checks.values() if cb.isChecked())
-        n_total = len(self._state_checks)
+    def _on_toggle_source(self):
+        """全选/取消全选有效来源。"""
+        n_checked = sum(1 for cb in self._source_checks.values() if cb.isChecked())
+        n_total = len(self._source_checks)
         should_check = n_checked < n_total
-        for cb in self._state_checks.values():
+        for cb in self._source_checks.values():
             cb.blockSignals(True)
             cb.setChecked(should_check)
             cb.blockSignals(False)
         self._sync_all_toggles()
         self.filter_changed.emit()
 
-    def _on_invert_state(self):
-        """反选处理状态。"""
-        for cb in self._state_checks.values():
+    def _on_invert_source(self):
+        """反选有效来源。"""
+        for cb in self._source_checks.values():
             cb.blockSignals(True)
             cb.setChecked(not cb.isChecked())
             cb.blockSignals(False)

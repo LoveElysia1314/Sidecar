@@ -20,10 +20,10 @@ from dualign.services.repair_policy import (
         ((1, 2), "minimal", AutoRepairPlan("merge")),
         ((1, 0), "src", AutoRepairPlan("placeholder_tgt")),
         ((1, 0), "tgt", AutoRepairPlan("delete")),
-        ((1, 0), "minimal", AutoRepairPlan("delete")),
+        ((1, 0), "minimal", AutoRepairPlan("placeholder_tgt")),
         ((0, 1), "src", AutoRepairPlan("delete")),
         ((0, 1), "tgt", AutoRepairPlan("placeholder_src")),
-        ((0, 1), "minimal", AutoRepairPlan("delete")),
+        ((0, 1), "minimal", AutoRepairPlan("placeholder_src")),
         ((1, 1), "src", None),
         ((2, 2), "src", None),
         ((2, 2), "tgt", None),
@@ -38,12 +38,33 @@ def test_unknown_strategy_is_not_silently_treated_as_src():
         choose_auto_repair(2, 1, "typo")
 
 
-def test_minimal_intentionally_maps_to_src_for_ai_review_only():
-    assert strategy_for_ai_review("minimal") == "src"
+def test_ai_review_preserves_the_selected_minimal_strategy():
+    assert strategy_for_ai_review("minimal") == "minimal"
     assert choose_auto_repair(2, 1, "minimal") == AutoRepairPlan("merge")
     assert choose_auto_repair(
         2, 1, strategy_for_ai_review("minimal")
-    ) == AutoRepairPlan("split", "tgt")
+    ) == AutoRepairPlan("merge")
+
+
+def test_minimal_keeps_unmatched_text_with_placeholders_and_merges_without_loss():
+    snapshot = AlignmentSnapshot.from_alignment(
+        [((0, 1), (0,), 0.5), ((2,), (), 0.0), ((), (1,), 0.0)],
+        ["A1", "A2", "needs translation"],
+        ["B1", "extra target"],
+    )
+
+    repaired = RepairService.auto_repair(
+        RepairState(snapshot),
+        strategy="minimal",
+    )
+
+    assert [action.kind for action in repaired.repair_log] == [
+        "merge",
+        "placeholder_tgt",
+        "placeholder_src",
+    ]
+    assert repaired.current.group(1) is not None
+    assert repaired.current.group(2) is not None
 
 
 def test_missing_split_capability_preserves_relation_instead_of_merging_it():

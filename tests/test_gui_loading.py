@@ -200,14 +200,14 @@ def test_cancel_retains_a_worker_that_has_not_stopped_yet():
     assert not harness._retired_load_threads
 
 
-def test_cancel_releases_a_worker_that_stops_during_the_grace_period():
+def test_cancel_never_waits_for_a_worker_on_the_gui_thread():
     thread = _LoadThread(finishes_while_waiting=True)
     harness = _CancellationHarness(thread)
 
-    assert harness._cancel_current_load() is True
+    assert harness._cancel_current_load() is False
     assert thread.stop_calls == 1
-    assert thread.wait_calls == [15000]
-    assert not harness._retired_load_threads
+    assert thread.wait_calls == []
+    assert thread in harness._retired_load_threads
 
 
 def test_report_can_store_identity_anchored_action_without_materialized_files(tmp_path):

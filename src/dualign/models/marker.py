@@ -1,27 +1,22 @@
-"""
-Dualign — MarkerHelper: marker 字符串纯函数工具类
+"""Marker construction and legacy parsing.
 
-统一管理 marker 的构造、解析和语义查询。
+Canonical markers express only repair/attention operations:
 
-Marker 格式:
-  `[来源前缀][操作标记]`，多个标记以空格分隔。
-  例如: `[M]`, `[AI][M]`, `[M] [OK]`, `[AI][S]`, `[OK]`
-
-  来源前缀（可选）: 无 / [AI]
-    - 无前缀 = 自动修复 或 用户手动操作
-    - [AI]   = AI Agent 校订
-  操作标记:
     [M]   — 合并（merge）
     [S]   — 拆分（split）
     [E]   — 校订（edit）
     [D]   — 删除（delete）
     [P]   — 占位（placeholder）
     [F]   — 标记异常（flag）
-    [OK]  — 审核通过
+
+The current effective source lives in its own ``none/auto/ai/user`` field.
+Parsing helpers continue to understand historical ``[AI]`` and ``[OK]``
+forms so old data can be projected without making those strings domain truth.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Dict
 
 # ═══════════════════════════════════════════════════════════════
@@ -34,20 +29,28 @@ KIND_MAP: Dict[str, str] = {
     "edit": "[E]",
     "delete": "[D]",
     "flag": "[F]",
-    "ok": "[OK]",
+    "ok": "",
     "placeholder_src": "[P]",
     "placeholder_tgt": "[P]",
 }
 
 
-# ── 使 marker 逻辑变为 1:1 的操作标记（影响 n_src/n_tgt / cur_type）──
-_RESOLVE_TO_11_TAGS = frozenset({"[M]", "[S]", "[P]", "[OK]"})
+# ── marker 的三个正交语义轴 ──
+CONTENT_TAGS = frozenset({"[M]", "[S]", "[E]", "[D]", "[P]"})
+REVIEW_TAGS = frozenset({"[OK]", "[F]"})
+PROVENANCE_TAGS = frozenset({"[AI]"})
+
+# ── 使 marker 逻辑变为 1:1 的内容操作（审批本身不改变结构）──
+_RESOLVE_TO_11_TAGS = frozenset({"[M]", "[S]", "[P]"})
 
 # ── 需要 score=0 的操作标记 ──
 _ZERO_SCORE_TAGS = frozenset({"[D]", "[P]"})
 
 # 来源前缀
 AI_PREFIX = "[AI]"
+_MARKER_ATOM_RE = re.compile(
+    r"(?:\[AI\]\[(?:OK|M|S|E|D|P|F)\]|\[(?:OK|M|S|E|D|P|F|AI)\])"
+)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -55,20 +58,10 @@ AI_PREFIX = "[AI]"
 # ═══════════════════════════════════════════════════════════════
 
 
-def from_kind(kind: str, source: str = "") -> str:
-    """kind + source → marker 字符串。
+def from_kind(kind: str) -> str:
+    """Return the canonical operation marker for one action kind."""
 
-    Args:
-        kind:   操作类型（merge/split/edit/delete/flag/ok/placeholder_src/placeholder_tgt）
-        source: 来源（"" / "ai"）
-
-    Returns:
-        marker 字符串，如 `[AI][M]`, `[M]`, `[OK]`
-    """
-    base = KIND_MAP.get(kind, "")
-    if source == "ai":
-        return f"{AI_PREFIX}{base}"
-    return base
+    return KIND_MAP.get(kind, "")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -76,12 +69,56 @@ def from_kind(kind: str, source: str = "") -> str:
 # ═══════════════════════════════════════════════════════════════
 
 
+def marker_atoms(marker: str) -> tuple[str, ...]:
+    """Parse source-qualified marker atoms, including compact legacy strings."""
+
+    return tuple(_MARKER_ATOM_RE.findall(marker or ""))
+
+
+def _base_tag(atom: str) -> str:
+    """Strip a compact AI creator prefix without erasing standalone provenance."""
+
+    if atom == AI_PREFIX:
+        return atom
+    return atom[len(AI_PREFIX) :] if atom.startswith(AI_PREFIX) else atom
+
+
+def marker_tags(marker: str) -> tuple[str, ...]:
+    """Return semantic tags without their optional source prefix."""
+
+    return tuple(_base_tag(atom) for atom in marker_atoms(marker))
+
+
+def tag_axis(tag: str) -> str:
+    """Return the semantic axis occupied by one base tag."""
+
+    if tag in CONTENT_TAGS:
+        return "content"
+    if tag in REVIEW_TAGS:
+        return "review"
+    if tag in PROVENANCE_TAGS:
+        return "provenance"
+    return ""
+
+
+def without_source_prefixes(marker: str) -> str:
+    """Render only semantic tags while retaining their axis structure."""
+
+    return " ".join(tag for tag in marker_tags(marker) if tag != AI_PREFIX)
+
+
+def mark_ai_reviewed(marker: str) -> str:
+    """Attach AI review provenance without inventing a second OK decision."""
+
+    return combine(marker, AI_PREFIX)
+
+
 def has_tag(marker: str, tag: str) -> bool:
     """检查 marker 是否包含指定标记。
 
     替代 `"[M]" in marker`、`"[OK]" in marker` 等各处散落的匹配。
     """
-    return tag in marker if marker else False
+    return tag in marker_tags(marker)
 
 
 def is_merge(marker: str) -> bool:
@@ -127,20 +164,21 @@ def is_approved(marker: str) -> bool:
 def is_resolved_to_11(marker: str) -> bool:
     """操作是否使文本对逻辑上变为 1:1。
 
-    [M]/[S]/[P]/[OK] 都会使 cur_type → 1:1，n_src/n_tgt 调整。
+    [M]/[S]/[P] 会使 cur_type → 1:1，n_src/n_tgt 调整；[OK]
+    只表达审阅结论，不改变内容结构。
 
     替代 `any(t in marker for t in ("[M]", "[S]", "[P]", "[OK]"))`。
     """
     if not marker:
         return False
-    return any(t in marker for t in _RESOLVE_TO_11_TAGS)
+    return bool(set(marker_tags(marker)) & _RESOLVE_TO_11_TAGS)
 
 
 def needs_zero_score(marker: str) -> bool:
     """操作是否需要将 score 设为 0。"""
     if not marker:
         return False
-    return any(t in marker for t in _ZERO_SCORE_TAGS)
+    return bool(set(marker_tags(marker)) & _ZERO_SCORE_TAGS)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -149,26 +187,31 @@ def needs_zero_score(marker: str) -> bool:
 
 
 def combine(existing: str, new_tag: str) -> str:
-    """向现有 marker 叠加标记，保留每个标记自身的来源前缀。
+    """Combine marker atoms by replacing the decision on the same axis.
 
-    规则:
-      - [OK] 与 [F] 互斥：叠加 [OK] 时移除 [F]，叠加 [F] 时移除 [OK]
-      - 去重：如果 existing 中已有相同的标记，先移除旧的
-      - 叠加：追加到末尾，空格分隔
+    A relation has at most one effective content decision, one review state,
+    and one independent review-provenance tag.  The optional compact ``[AI]``
+    prefix still belongs to the operation atom for AI-created decisions.  This
+    covers content replacement, [OK]/[F] mutual exclusion, de-duplication, and
+    compact legacy marker normalization.
     """
-    if not existing:
-        return new_tag
-    is_ok = is_approved(new_tag)
-    is_flag = is_flagged(new_tag)
-    base = "[OK]" if is_ok else "[F]" if is_flag else new_tag
-    tags_to_remove = {base}
-    if is_ok:
-        tags_to_remove.add("[F]")
-    elif is_flag:
-        tags_to_remove.add("[OK]")
-    parts = [p for p in existing.split(" ") if not any(t in p for t in tags_to_remove)]
-    clean = " ".join(p for p in parts if p).strip()
-    return f"{clean} {new_tag}" if clean else new_tag
+
+    result = list(marker_atoms(existing))
+    for atom in marker_atoms(new_tag):
+        base = _base_tag(atom)
+        axis = tag_axis(base)
+        replaced_axes = {axis}
+        if axis in {"content", "review"}:
+            # Standalone [AI] describes who confirmed the current decision;
+            # replacing that decision/review invalidates the old confirmation.
+            replaced_axes.add("provenance")
+        result = [
+            current
+            for current in result
+            if tag_axis(_base_tag(current)) not in replaced_axes
+        ]
+        result.append(atom)
+    return " ".join(result)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -199,8 +242,9 @@ def resolve_hex_color(marker: str) -> str:
     """
     if not marker:
         return "#B0B0B0"
+    tags = set(marker_tags(marker))
     for tag in _COLOR_PRIORITY:
-        if tag in marker:
+        if tag in tags:
             return MARKER_COLORS[tag]
     return "#B0B0B0"
 

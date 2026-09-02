@@ -94,6 +94,13 @@ def test_partial_edit_solidification_keeps_other_side_as_rebased_action():
     assert len(plan.remaining_actions) == 1
     assert "new_src_lines" in plan.remaining_actions[0].data
     assert "new_tgt_lines" not in plan.remaining_actions[0].data
+    assert len(plan.changes) == 1
+    change = plan.changes[0]
+    assert change.kind == "edit"
+    assert change.effects == ("edit_b",)
+    assert change.document_a_before == change.document_a_after == ("甲",)
+    assert change.document_b_before == ("A",)
+    assert change.document_b_after == ("A edited",)
 
 
 def test_partial_edit_does_not_promote_score_for_the_uncommitted_full_edit(
@@ -287,7 +294,9 @@ def test_resolved_flag_does_not_reappear_after_content_solidification(
 
     assert result is not None
     remaining = load_report(report_path)["repair_log"]
-    assert [item["kind"] for item in remaining] == ["ok"]
+    # The edit and its approval are now part of the new baseline.  Their full
+    # audit trail remains in history, but a clean baseline has no current OK.
+    assert remaining == []
 
 
 def test_delete_is_solidified_but_review_markers_remain_in_history(tmp_path: Path):
@@ -316,6 +325,10 @@ def test_delete_is_solidified_but_review_markers_remain_in_history(tmp_path: Pat
     assert path_b.read_text(encoding="utf-8") == "keep\n"
     saved = load_report(report_path)
     assert saved["repair_log"] == []
+    assert plan.changes[0].document_a_before == ("多余",)
+    assert plan.changes[0].document_a_after == ()
+    assert plan.changes[0].document_b_before == ("extra",)
+    assert plan.changes[0].document_b_after == ()
     assert [item["kind"] for item in saved["history"][-1]["repair_log"]] == [
         "delete",
         "flag",
@@ -487,6 +500,49 @@ def test_batch_plan_and_apply_share_the_exact_previewed_transactions(tmp_path: P
     assert result.failed == ()
     assert first[1].read_text(encoding="utf-8") == "A1\n"
     assert second[1].read_text(encoding="utf-8") == "B\n"
+
+
+def test_batch_cancellation_stops_between_recoverable_transactions(tmp_path: Path):
+    from dualign.services.cancellation import CancellationToken
+
+    cases = []
+    for label, source, target in (("first", "甲\n", "A\n"), ("second", "乙\n", "B\n")):
+        folder = tmp_path / label
+        folder.mkdir()
+        cases.append(
+            _report_case(
+                folder,
+                source,
+                target,
+                [((0,), (0,), 0.9)],
+                [
+                    RepairAction.make_edit(
+                        "L000001", source="user", new_tgt_lines=[f"{target.strip()}1"]
+                    )
+                ],
+            )
+        )
+    batch = plan_batch_solidification(
+        [
+            SolidifyTarget(label, *(str(path) for path in case))
+            for label, case in zip(("first", "second"), cases)
+        ],
+        SolidifyPolicy(frozenset({"edit_b"})),
+    )
+    token = CancellationToken()
+
+    def progress(current, _total, _target, phase, _cancellable):
+        if current == 2 and phase == "prepare":
+            token.cancel()
+
+    result = apply_batch_solidification(
+        batch, cancellation_token=token, progress_callback=progress
+    )
+
+    assert result.cancelled
+    assert [target.label for target in result.succeeded] == ["first"]
+    assert cases[0][1].read_text(encoding="utf-8") == "A1\n"
+    assert cases[1][1].read_text(encoding="utf-8") == "B\n"
 
 
 def test_batch_cli_uses_the_gui_manifest_and_is_preview_only_by_default(
