@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import time
 import logging
+import sys
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import Qt, Signal, QSize, Slot
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -54,6 +55,11 @@ LEVEL_SHORT = {
 }
 
 DEFAULT_LEVEL = "INFO"  # 默认显示 INFO 及以上
+
+
+def _escape_html(value: str) -> str:
+    """Escape the HTML metacharacters used in log messages."""
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 class LogPanel(QWidget):
@@ -149,7 +155,7 @@ class LogPanel(QWidget):
         """
         ts = time.strftime("%H:%M:%S")
         color = self._ROLE_COLORS.get(role, "#B0BEC5")
-        safe = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        safe = _escape_html(message)
         html = f'<span style="color:{color}">[{ts}]</span> {safe}'
         self._append(html, level=logging.INFO if role == "info" else logging.WARNING)
         self.message_logged.emit(html, role)
@@ -168,9 +174,7 @@ class LogPanel(QWidget):
         ts = time.strftime("%H:%M:%S")
         color = LEVEL_COLORS.get(level, "#B0BEC5")
         short = LEVEL_SHORT.get(level, "???")
-        safe_msg = (
-            str(message).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        )
+        safe_msg = _escape_html(str(message))
         html = (
             f'<span style="color:{T.FG_MUTED}">[{ts}]</span> '
             f'<span style="color:{color};font-weight:bold">[{short}]</span> '
@@ -239,8 +243,6 @@ class LogPanel(QWidget):
         self._title_lbl.setText(f"📋 运行日志 ({n}/{len(self._lines)})")
 
     def sizeHint(self):
-        from PySide6.QtCore import QSize
-
         return QSize(100, 160)
 
 
@@ -248,7 +250,7 @@ class LogPanel(QWidget):
 # DualignLogHandler — logging → GUI LogPanel 桥接
 # ═══════════════════════════════════════════════════════════════
 
-_gui_panel: Optional[object] = None  # LogPanel 实例
+_gui_panel: Optional[LogPanel] = None
 
 
 def set_gui_panel(panel):
@@ -274,8 +276,6 @@ class DualignLogHandler(logging.Handler):
 
             # ── 终端输出 ──
             if record.levelno >= logging.WARNING:
-                import sys
-
                 print(msg, file=sys.stderr)
             else:
                 print(msg)
@@ -304,10 +304,6 @@ def configure_root_logging():
     root.setLevel(logging.DEBUG)
 
     # 移除已有的 handler（避免重复）
-    for h in list(root.handlers):
-        root.removeHandler(h)
-
-    # 移除已有 StreamHandler（basicConfig 添加的）
     for h in list(root.handlers):
         root.removeHandler(h)
 

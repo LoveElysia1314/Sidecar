@@ -21,9 +21,9 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Callable
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional
 
 from dualign.models.action import RepairAction
 from dualign.models.state import AlignmentSnapshot
@@ -101,7 +101,7 @@ class ChapterContext:
         return None
 
     @property
-    def reviewable_infos(self):
+    def reviewable_infos(self) -> List[SnapInfo]:
         """返回需要审校的 SnapInfo 列表。"""
         return [si for si in self.snap_infos if si.is_reviewable]
 
@@ -269,10 +269,10 @@ def _get_prompts_dir() -> str:
     )
 
 
-_tools_cache: tuple | None = None
+_tools_cache: tuple[list[dict], str] | None = None
 
 
-def _load_tools():
+def _load_tools() -> tuple[list[dict], str]:
     """从 tools.json 加载工具定义，返回 (TOOLS_OPENAI, TOOLS_TEXT_DESCRIPTION)。
 
     懒加载：首次调用时解析 prompts 目录。
@@ -284,17 +284,15 @@ def _load_tools():
     with open(tools_path, "r", encoding="utf-8") as f:
         tools = json.load(f)
 
-    # OpenAI Function Calling 格式
+    # OpenAI Responses API 格式（扁平：name/description/parameters 直接挂在工具对象上）
     openai_tools = []
     for t in tools:
         openai_tools.append(
             {
                 "type": "function",
-                "function": {
-                    "name": t["name"],
-                    "description": t["description"],
-                    "parameters": t["parameters"],
-                },
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["parameters"],
             }
         )
 
@@ -313,7 +311,7 @@ def _load_tools():
     return result
 
 
-def _get_tools_openai():
+def _get_tools_openai() -> list[dict]:
     """懒加载 TOOLS_OPENAI。"""
     return _load_tools()[0]
 
@@ -370,6 +368,13 @@ class LLMBackend(ABC):
 
 
 class DeepSeekNativeBackend(LLMBackend):
+    """DeepSeek Responses API 后端（兼容本地 Ollama /v1/responses）。
+
+    协议层：内部将 chat/completions 格式的 messages 转换为 responses API 的
+    input items（message / function_call / function_call_output），
+    上层 AiRepairAgent 无需感知格式差异。
+    """
+
     def __init__(
         self,
         temperature: float = 0.0,
@@ -377,81 +382,193 @@ class DeepSeekNativeBackend(LLMBackend):
         model: str = "deepseek-v4-flash",
         base_url: str = "https://api.deepseek.com",
         api_key: str = "",
+        reasoning_effort: str = "low",
+        request_timeout: float = 240.0,
     ):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.MODEL = model
         self.BASE_URL = base_url
-        # 优先使用传入的 api_key，回退到环境变量
+        self.reasoning_effort = reasoning_effort
+        self.request_timeout = request_timeout
         self._api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
+        # Ollama 本地后端：api_key 用占位符，reasoning_effort 强制 none
+        self._is_ollama = "localhost" in base_url or "127.0.0.1" in base_url
+        if self._is_ollama and not self._api_key:
+            self._api_key = "ollama"
 
-    def chat(self, messages, thinking=True, tools=None):
+    @staticmethod
+    def _to_responses_input(messages: list) -> list:
+        """chat/completions 格式 messages -> responses API input items。"""
+        items: list = []
+        for m in messages:
+            role = m.get("role")
+            content = m.get("content", "") or ""
+            if role in ("system", "developer"):
+                items.append({"type": "message", "role": "system", "content": content})
+            elif role == "user":
+                items.append({"type": "message", "role": "user", "content": content})
+            elif role == "assistant":
+                items.append(
+                    {"type": "message", "role": "assistant", "content": content}
+                )
+                for tc in m.get("tool_calls", []) or []:
+                    fn = tc.get("function", {})
+                    items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": tc.get("id") or "",
+                            "name": fn.get("name", ""),
+                            "arguments": fn.get("arguments", "{}"),
+                        }
+                    )
+            elif role == "tool":
+                items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": m.get("tool_call_id", ""),
+                        "output": content,
+                    }
+                )
+        return items
+
+    @staticmethod
+    def _normalize_tools(tools: list) -> list:
+        """统一 tools 为 responses API 扁平格式。
+
+        兼容两种输入：
+          - chat/completions 嵌套: {"type":"function","function":{name,...}}
+          - responses 扁平:       {"type":"function","name",...}
+        """
+        out = []
+        for t in tools or []:
+            fn = t.get("function") if isinstance(t, dict) else None
+            if isinstance(fn, dict):
+                # 嵌套格式 → 扁平
+                out.append(
+                    {
+                        "type": "function",
+                        "name": fn.get("name", ""),
+                        "description": fn.get("description", ""),
+                        "parameters": fn.get("parameters", {}),
+                    }
+                )
+            else:
+                out.append(t)
+        return out
+
+    def _chat_once(self, client, **kwargs):
+        """带总时长上限的 API 调用（watchdog）。"""
+        import threading
+
+        result_box: dict = {}
+        error_box: dict = {}
+
+        def _call():
+            try:
+                result_box["value"] = client.responses.create(**kwargs)
+            except Exception as e:  # noqa: BLE001
+                error_box["error"] = e
+
+        t = threading.Thread(target=_call, daemon=True)
+        t.start()
+        t.join(timeout=self.request_timeout)
+        if "error" in error_box:
+            raise error_box["error"]
+        if "value" in result_box:
+            return result_box["value"]
+        raise TimeoutError(f"DeepSeek API 调用超过 {self.request_timeout:.0f}s 未完成")
+
+    def chat(self, messages, thinking=True, tools=None) -> LLMResponse:
         try:
             from openai import OpenAI
         except ImportError:
             raise ImportError("openai 库未安装，无法使用 DeepSeek 后端")
-        api_key = self._api_key
-        if not api_key:
+        if not self._api_key:
             raise ValueError(
-                "API Key 未设置\n"
-                "   请在设置面板中配置 API Key，或设置环境变量 DEEPSEEK_API_KEY"
+                "API Key 未设置"
+                + chr(10)
+                + "   请在设置面板中配置 API Key，或设置环境变量 DEEPSEEK_API_KEY"
             )
-        client = OpenAI(api_key=api_key, base_url=self.BASE_URL)
+        client = OpenAI(api_key=self._api_key, base_url=self.BASE_URL, max_retries=0)
         kwargs = {
             "model": self.MODEL,
-            "messages": messages,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "input": self._to_responses_input(messages),
+            "reasoning": {
+                "effort": (
+                    self.reasoning_effort
+                    if thinking and not self._is_ollama
+                    else "none"
+                ),
+            },
+            "max_output_tokens": self.max_tokens,
         }
         if tools is not None:
-            kwargs["tools"] = tools
-        if thinking:
-            kwargs["extra_body"] = {
-                "thinking": {"type": "enabled"},
-                "reasoning_effort": "high",
-            }
+            kwargs["tools"] = self._normalize_tools(tools)
+        if not thinking or self._is_ollama:
+            kwargs["temperature"] = self.temperature
         try:
-            resp = client.chat.completions.create(**kwargs)
+            resp = self._chat_once(client, **kwargs)
         except Exception as e:
             logger.warning("DeepSeek API 调用失败: %s", e)
             return LLMResponse(content="", usage={"error": str(e)})
 
-        msg = resp.choices[0].message
+        # ── Responses 响应解析 ──
         usage_raw = resp.usage
+        input_tokens = getattr(usage_raw, "input_tokens", 0) if usage_raw else 0
+        output_tokens = getattr(usage_raw, "output_tokens", 0) if usage_raw else 0
         usage = {
-            "prompt_tokens": usage_raw.prompt_tokens if usage_raw else 0,
-            "completion_tokens": usage_raw.completion_tokens if usage_raw else 0,
-            "total_tokens": usage_raw.total_tokens if usage_raw else 0,
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
         }
-        if usage_raw and hasattr(usage_raw, "prompt_tokens_details"):
-            details = usage_raw.prompt_tokens_details
+        if usage_raw and hasattr(usage_raw, "input_tokens_details"):
+            details = usage_raw.input_tokens_details
             if details and hasattr(details, "cached_tokens"):
                 usage["cached_tokens"] = details.cached_tokens
+
         tool_calls = []
-        if msg.tool_calls:
-            for tc in msg.tool_calls:
+        content_parts: list = []
+        reasoning_text = ""
+        for item in resp.output or []:
+            itype = getattr(item, "type", "")
+            if itype == "function_call":
                 try:
-                    args = json.loads(tc.function.arguments)
+                    args = json.loads(item.arguments) if item.arguments else {}
                 except json.JSONDecodeError:
                     args = {}
                 tool_calls.append(
-                    ToolCall(id=tc.id, name=tc.function.name, arguments=args)
+                    ToolCall(id=item.call_id or "", name=item.name, arguments=args)
                 )
-        reasoning = getattr(msg, "reasoning_content", "") or ""
+            elif itype == "message":
+                for c in getattr(item, "content", []) or []:
+                    text = getattr(c, "text", "") or ""
+                    if text:
+                        content_parts.append(text)
+            elif itype == "reasoning":
+                for c in getattr(item, "summary", []) or []:
+                    t = getattr(c, "text", "") or ""
+                    if t:
+                        reasoning_text += t + chr(10)
         return LLMResponse(
-            content=msg.content or "",
+            content="".join(content_parts),
             tool_calls=tool_calls,
+            reasoning_content=reasoning_text.strip(),
             usage=usage,
-            reasoning_content=reasoning,
         )
 
 
-# ═══════════════════════════════════════════════════════════════
-# 5. Tool 执行器
-# ═══════════════════════════════════════════════════════════════
+def _coerce_target(v) -> str:
+    """归一化 target 参数为字符串（兼容模型传 int / str）。"""
+    if isinstance(v, bool):
+        raise ValueError(f"target 不能是布尔值: {v!r}")
+    return str(v).strip()
 
 
-def _parse_pair_spec(spec: str) -> List[int]:
+def _parse_pair_spec(spec) -> List[int]:
+    if isinstance(spec, bool):
+        raise ValueError(f"无法解析编号: {spec!r}")
+    spec = str(spec).strip()
     indices: set[int] = set()
     for part in (p.strip() for p in spec.split(",")):
         if not part:
@@ -470,8 +587,9 @@ def _parse_pair_spec(spec: str) -> List[int]:
     return sorted(indices)
 
 
-def _parse_op_index(op_index: str) -> tuple[List[int], bool]:
-    """解析 snap_range 字符串: "3" → [3], "10-13" → [10,11,12,13]"""
+def _parse_op_index(op_index) -> tuple[List[int], bool]:
+    """解析 target 字符串: "3" → ([3], False), "10-13" → ([10..13], True)"""
+    op_index = _coerce_target(op_index)
     if op_index.isdigit():
         return [int(op_index)], False
     if re.match(r"^\d+-\d+$", op_index):
@@ -480,7 +598,7 @@ def _parse_op_index(op_index: str) -> tuple[List[int], bool]:
         if start > end:
             raise ValueError(f"范围起止颠倒: {op_index}")
         return list(range(start, end + 1)), True
-    raise ValueError(f"无效 snap_range: {op_index!r}")
+    raise ValueError(f"无效 target: {op_index!r}")
 
 
 def compute_auto_action_kind(snap_state, strategy: str) -> Optional[str]:
@@ -516,7 +634,7 @@ class ToolExecutor:
         self._model = model
         self._state = initial_state
         self._strategy = strategy
-        self.reviewed_ids: set = set()
+        self.reviewed_ids: set[int] = set()
         self.reviewed_actions: Dict[int, RepairAction] = {}
 
     def execute(self, tool_call: ToolCall) -> str:
@@ -529,7 +647,6 @@ class ToolExecutor:
             "flag": self._handle_flag,
             "append": self._handle_append,
             "done": self._handle_done,
-            "force_done": self._handle_force_done,
         }
         handler = handlers.get(tool_call.name)
         if handler is None:
@@ -546,6 +663,17 @@ class ToolExecutor:
         except Exception as e:
             return json.dumps({"error": f"工具执行异常: {e}"}, ensure_ascii=False)
 
+    @staticmethod
+    def _get_target(args: dict) -> object | None:
+        """Read snap targeting param; fall back to legacy names."""
+        v = args.get("target")
+        if v is None:
+            for old in ("snap_range", "snap_id", "pair_spec"):
+                if old in args and args[old] is not None:
+                    v = args[old]
+                    break
+        return v
+
     def _progress(self) -> str:
         total = len(self.ctx.reviewable_ids)
         done = len(self.reviewed_ids)
@@ -561,19 +689,27 @@ class ToolExecutor:
             else f"**进度**: {done}/{total} ✅ 全部完成"
         )
 
-    def _record_review(self, snap_list: List[int], action: RepairAction):
+    def _record_review(self, snap_list: List[int], action: RepairAction) -> None:
         for si in snap_list:
             self.reviewed_ids.add(si)
             self.reviewed_actions[si] = action
 
+    def _replay_reviewed_actions(self):
+        """Apply reviewed actions to the initial state in insertion order."""
+        state = self._state
+        for action in self.reviewed_actions.values():
+            if action is not None:
+                state = state.apply(action)
+        return state
+
     def _handle_view(self, args: dict) -> str:
-        spec = args.get("pair_spec", "")
-        if not spec:
-            return "❌ 请提供 pair_spec"
+        tgt = self._get_target(args)
+        if tgt is None:
+            return "❌ view 缺少必填参数 target (如 '1-3,5,11')。请重试。"
         try:
-            snap_ids = _parse_pair_spec(spec)
+            snap_ids = _parse_pair_spec(tgt)
         except ValueError as e:
-            return f"❌ {e}"
+            return f"❌ view 无法解析 target: {e}"
 
         # 用最新状态构建 snap_infos
         snap_infos = self._build_current_snap_infos()
@@ -586,15 +722,12 @@ class ToolExecutor:
         ]
         return "\n".join(lines)
 
-    def _build_current_snap_infos(self):
+    def _build_current_snap_infos(self) -> List[SnapInfo]:
         """如果有 initial_state，通过重放已审校操作构建最新 SnapInfo 列表。"""
         if self._state is None:
             return self.ctx.snap_infos
-        s = self._state
-        for a in self.reviewed_actions.values():
-            if a is not None:
-                s = s.apply(a)
-        fresh_ctx = ChapterContext.from_repair_state(s)
+        state = self._replay_reviewed_actions()
+        fresh_ctx = ChapterContext.from_repair_state(state)
         return fresh_ctx.snap_infos
 
     def _get_current_snap_action(self, snap_id: int) -> Optional[RepairAction]:
@@ -605,19 +738,24 @@ class ToolExecutor:
         """
         if self._state is None:
             return None
-        s = self._state
-        for a in self.reviewed_actions.values():
-            if a is not None:
-                s = s.apply(a)
+        state = self._replay_reviewed_actions()
         META_KINDS = {"ok", "flag"}
-        for a in reversed(s._repair_log):
+        for a in reversed(state._repair_log):
             if a.op_index == snap_id and a.kind not in META_KINDS:
                 return a
         return None
 
     def _handle_ok(self, args: dict) -> str:
-        snap_id = args["snap_id"]
-        snap_list = [snap_id]
+        tgt = self._get_target(args)
+        if tgt is None:
+            return "❌ ok 缺少必填参数 target (如 '7')。请重试。"
+        try:
+            snap_list, is_range = _parse_op_index(tgt)
+        except ValueError as e:
+            return f"❌ ok 无法解析 target: {e}"
+        if is_range or len(snap_list) != 1:
+            return "❌ ok 只接受单个 snap，请用 target='7' 指定一个编号。"
+        snap_id = snap_list[0]
         anchor = snap_list[0]
 
         # 统一语义：若 snap 已有修复操作，AI 的 ok 等同于认可该操作
@@ -638,7 +776,13 @@ class ToolExecutor:
         return f"### ✅ 确认 — snap {snap_list}\n\n{self._progress()}"
 
     def _handle_edit(self, args: dict) -> str:
-        snap_list, is_range = _parse_op_index(args["snap_range"])
+        tgt = self._get_target(args)
+        if tgt is None:
+            return "❌ edit 缺少必填参数 target (如 '7' 或 '10-13')。请重试。"
+        try:
+            snap_list, is_range = _parse_op_index(tgt)
+        except ValueError as e:
+            return f"❌ edit 无法解析 target: {e}"
         already = [si for si in snap_list if si in self.reviewed_ids]
         new_src = args.get("new_src", [])
         new_tgt = args.get("new_tgt", [])
@@ -646,6 +790,22 @@ class ToolExecutor:
             new_src = [new_src]
         if isinstance(new_tgt, str):
             new_tgt = [new_tgt]
+
+        # ── 范围编辑行数校验：范围含 N 个 snap 时，任一侧行数必须等于 N ──
+        if is_range and (new_src or new_tgt):
+            n = len(snap_list)
+            if new_src and len(new_src) != n:
+                return (
+                    f"❌ **edit 拒绝**: 范围 {tgt} 含 {n} 个 snap，"
+                    f"但 new_src 提供了 {len(new_src)} 行。\n\n"
+                    f"请为范围内每个 snap 提供一行（或改为单个 target 编辑一个 snap）。"
+                )
+            if new_tgt and len(new_tgt) != n:
+                return (
+                    f"❌ **edit 拒绝**: 范围 {tgt} 含 {n} 个 snap，"
+                    f"但 new_tgt 提供了 {len(new_tgt)} 行。\n\n"
+                    f"请为范围内每个 snap 提供一行（或改为单个 target 编辑一个 snap）。"
+                )
 
         # ── 行数校验：当 AI 同时传入两侧时，长度必须相等 ──
         if new_src and new_tgt and len(new_src) != len(new_tgt):
@@ -718,7 +878,13 @@ class ToolExecutor:
         return f"### ✏️ 编辑 — snap {snap_list}{suffix}\n\n{self._progress()}"
 
     def _handle_merge(self, args: dict) -> str:
-        snap_list, _ = _parse_op_index(args["snap_range"])
+        tgt = self._get_target(args)
+        if tgt is None:
+            return "❌ merge 缺少必填参数 target (如 '7' 或 '10-13')。请重试。"
+        try:
+            snap_list, _ = _parse_op_index(tgt)
+        except ValueError as e:
+            return f"❌ merge 无法解析 target: {e}"
         already = [si for si in snap_list if si in self.reviewed_ids]
         anchor = snap_list[0]
         if len(snap_list) > 1:
@@ -737,7 +903,13 @@ class ToolExecutor:
         return f"### 🔗 合并 — snap {snap_list}{suffix}\n\n{self._progress()}"
 
     def _handle_delete(self, args: dict) -> str:
-        snap_list, _ = _parse_op_index(args["snap_range"])
+        tgt = self._get_target(args)
+        if tgt is None:
+            return "❌ delete 缺少必填参数 target (如 '7' 或 '10-13')。请重试。"
+        try:
+            snap_list, _ = _parse_op_index(tgt)
+        except ValueError as e:
+            return f"❌ delete 无法解析 target: {e}"
         already = [si for si in snap_list if si in self.reviewed_ids]
         anchor = snap_list[0]
         if len(snap_list) > 1:
@@ -756,8 +928,15 @@ class ToolExecutor:
         return f"### 🗑️ 删除 — snap {snap_list}{suffix}\n\n{self._progress()}"
 
     def _handle_flag(self, args: dict) -> str:
-        snap_id = args["snap_id"]
-        snap_list = [snap_id]
+        tgt = self._get_target(args)
+        if tgt is None:
+            return "❌ flag 缺少必填参数 target (如 '7')。请重试。"
+        try:
+            snap_list, is_range = _parse_op_index(tgt)
+        except ValueError as e:
+            return f"❌ flag 无法解析 target: {e}"
+        if is_range or len(snap_list) != 1:
+            return "❌ flag 只接受单个 snap，请用 target='7' 指定一个编号。"
         already = [si for si in snap_list if si in self.reviewed_ids]
         note = args.get("note", "")
         ra = RepairAction.make_flag(snap_list[0], note=note)
@@ -767,9 +946,16 @@ class ToolExecutor:
         return f"### 🚩 标记 — snap {snap_list}{suffix}\n\n{self._progress()}"
 
     def _handle_append(self, args: dict) -> str:
-        snap_id = int(args.get("snap_id", -1))
-        if snap_id < 0:
-            return "❌ **追加失败**: snap_id 无效"
+        tgt = self._get_target(args)
+        if tgt is None:
+            return "❌ append 缺少必填参数 target (如 '7')。请重试。"
+        try:
+            snap_list, is_range = _parse_op_index(tgt)
+        except ValueError as e:
+            return f"❌ append 无法解析 target: {e}"
+        if is_range or len(snap_list) != 1:
+            return "❌ append 只接受单个 snap，请用 target='7' 指定一个编号。"
+        snap_id = snap_list[0]
         ok = self.ctx.append_reviewable(snap_id)
         if ok:
             info = self.ctx.get_snap_info(snap_id)
@@ -778,20 +964,22 @@ class ToolExecutor:
 
     def _handle_done(self, args: dict) -> str:
         remaining = [i for i in self.ctx.reviewable_ids if i not in self.reviewed_ids]
-        if remaining:
+        _f = args.get("force", False)
+        force = (
+            _f.strip().lower() in ("true", "1", "yes")
+            if isinstance(_f, str)
+            else bool(_f)
+        )
+        note = args.get("note", "")
+        if remaining and not force:
             return (
                 f"❌ **done 拒绝**: 仍有 {len(remaining)} 个待审 snap 未处理: "
                 f"{remaining[:15]}{'...' if len(remaining) > 15 else ''}\n\n"
                 f"请逐一审查这些 snap 后再调用 done。"
-                f"如确有合理原因需要跳过，请使用 `force_done` 并说明理由。"
+                f"如确有合理原因需要跳过，请改用 `done` 并设置 force=true，说明理由。"
             )
-        return "✅ done" + (f": {args.get('note', '')}" if args.get("note") else "")
-
-    def _handle_force_done(self, args: dict) -> str:
-        remaining = [i for i in self.ctx.reviewable_ids if i not in self.reviewed_ids]
-        skipped = f"（跳过 {len(remaining)} 项）" if remaining else ""
-        note = args.get("note", "")
-        return f"✅ force_done{skipped}" + (f": {note}" if note else "")
+        suffix = " (force)" if (force and remaining) else ""
+        return f"✅ done{suffix}" + (f": {note}" if note else "")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -800,15 +988,14 @@ class ToolExecutor:
 
 
 class MaxTurnsExceeded(Exception):
-    pass
+    """Raised when an agent exceeds its configured turn limit."""
 
 
 class AiRepairAgent:
     """Tool-Calling AI 校订代理 (v2)。
 
     工具: ok / edit / merge / delete / flag / view / append / done
-    使用 DeepSeek (OpenAI 兼容) 后端，支持工具调用。
-    已移除 Ollama 后端（仅嵌入服务使用 Ollama）。
+    使用 Responses API 后端，支持 DeepSeek 与本地 Ollama 工具调用。
     """
 
     def __init__(
@@ -823,6 +1010,7 @@ class AiRepairAgent:
         model_name: str = "deepseek-v4-flash",
         base_url: str = "https://api.deepseek.com",
         api_key: str = "",
+        reasoning_effort: str = "low",
     ):
         self.max_turns = max_turns
         self.verbose = verbose
@@ -835,6 +1023,7 @@ class AiRepairAgent:
             model=model_name,
             base_url=base_url,
             api_key=api_key,
+            reasoning_effort=reasoning_effort,
         )
         self._idle_turns = 0
 
@@ -850,7 +1039,6 @@ class AiRepairAgent:
         )
         messages = self._build_initial_messages(ctx)
         turn_log: List[dict] = []
-        all_actions: List[RepairAction] = []
 
         def _emit(evt_type, **kw):
             if on_event:
@@ -871,13 +1059,13 @@ class AiRepairAgent:
             remaining = [
                 i for i in ctx.reviewable_ids if i not in executor.reviewed_ids
             ]
-            # ── 替换最后一条 user 消息而非追加，避免历史累积冗余 ──
+            # ── 更新/追加进度消息（用显式标记识别，避免脆弱的字符串匹配）──
             if remaining:
                 _new_progress = f"### 待审进度: {len(executor.reviewed_ids)}/{len(ctx.reviewable_ids)}"
                 f" | 剩余: {remaining}\n继续审校剩余 snap。完成后调用 done。"
             else:
                 _new_progress = "### ✅ 待审列表已清空\n\n检查是否有遗漏的异常 snap——若有，用 `append` 追加后继续审校。确认无遗漏后，调用 `done` 结束。"
-            if messages[-1]["role"] == "user" and "进度" in messages[-1]["content"]:
+            if messages[-1]["role"] == "user" and "### 待审" in messages[-1]["content"]:
                 messages[-1] = {"role": "user", "content": _new_progress}
             else:
                 messages.append({"role": "user", "content": _new_progress})
@@ -953,7 +1141,7 @@ class AiRepairAgent:
                         )
                     return all_actions
 
-                # 空闲提示：第 1 轮温和提醒，第 2 轮强调 force_done 选项
+                # 空闲提示：第 1 轮温和提醒，第 2 轮强调 done(force=true) 选项
                 if remaining:
                     if self._idle_turns >= 2:
                         _idle_prompt = (
@@ -961,7 +1149,7 @@ class AiRepairAgent:
                             f"**进度**: {len(executor.reviewed_ids)}/{len(ctx.reviewable_ids)}\n"
                             f"剩余 {len(remaining)} 个: {remaining[:10]}\n\n"
                             f"你已经连续 {self._idle_turns} 轮没有操作。"
-                            f"请继续审查，或使用 `force_done` 跳过剩余项（需说明理由）。"
+                            f"请继续审查，或调用 `done` 并设置 force=true 跳过剩余项（需说明理由）。"
                         )
                     else:
                         _idle_prompt = (
@@ -975,7 +1163,10 @@ class AiRepairAgent:
                         "检查是否有遗漏的异常 snap——若有，用 `append` 追加后继续审校。"
                         "确认无遗漏后，调用 `done` 结束。"
                     )
-                if messages[-1]["role"] == "user" and "进度" in messages[-1]["content"]:
+                if (
+                    messages[-1]["role"] == "user"
+                    and "### 待审" in messages[-1]["content"]
+                ):
                     messages[-1] = {"role": "user", "content": _idle_prompt}
                 else:
                     messages.append({"role": "user", "content": _idle_prompt})
@@ -1003,6 +1194,7 @@ class AiRepairAgent:
                 tc_msg["reasoning_content"] = response.reasoning_content
             messages.append(tc_msg)
 
+            done_result = None
             for tc in response.tool_calls:
                 _emit(
                     "tool_start", turn=turn, tool_name=tc.name, tool_args=tc.arguments
@@ -1024,10 +1216,22 @@ class AiRepairAgent:
                 messages.append(
                     {"role": "tool", "tool_call_id": tc.id, "content": result}
                 )
+                if tc.name == "done":
+                    done_result = result
 
-            # ── 显式 done 检查：所有工具执行完后，若 AI 调用了 done 则退出 ──
-            has_done = any(tc.name == "done" for tc in response.tool_calls)
-            if has_done:
+            # ── 显式 done 检查：done 被接受才退出；被拒绝则继续让模型修复剩余 snap ──
+            if done_result is not None:
+                if done_result.startswith("❌"):
+                    if self.verbose:
+                        n_remain = len(
+                            [
+                                i
+                                for i in ctx.reviewable_ids
+                                if i not in executor.reviewed_ids
+                            ]
+                        )
+                        logger.info("done 被拒绝（剩余 %d 个待审），继续审校", n_remain)
+                    continue
                 if self.verbose:
                     logger.info("AI 调用 done，审校完成于 Turn %d", turn)
                 all_actions = list(executor.reviewed_actions.values())
@@ -1213,8 +1417,6 @@ def dump_agent_debug(
         elapsed: 耗时（秒）
         extra_info: 额外信息（如标准答案命中率），附加在文件头
     """
-    import json as _json
-
     lines: list[str] = []
 
     # ── 文件头统计 ──
@@ -1267,7 +1469,7 @@ def dump_agent_debug(
         for tc in resp.get("tool_calls", []):
             args_str = tc.get("arguments", "")
             if isinstance(args_str, dict):
-                args_str = _json.dumps(args_str, ensure_ascii=False)
+                args_str = json.dumps(args_str, ensure_ascii=False)
             name = tc.get("name", "?")
             lines.append(f"**Tool:** `{name}({args_str})`\n")
 
@@ -1293,7 +1495,9 @@ def dump_agent_debug(
         lines.append("（无操作）")
     lines.append("")
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    parent_dir = os.path.dirname(path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
@@ -1324,8 +1528,6 @@ def dump_agent_raw(
         "turn_log": [...]    // 包含完整的 request_messages + response + tool_results
     }
     """
-    import json as _json
-
     data = {
         "chapter_id": ctx.chapter_id,
         "strategy": getattr(ctx, "_strategy", ""),
@@ -1345,6 +1547,8 @@ def dump_agent_raw(
         "turn_log": turn_log,
     }
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    parent_dir = os.path.dirname(path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        _json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        json.dump(data, f, ensure_ascii=False, indent=2, default=str)

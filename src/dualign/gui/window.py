@@ -114,14 +114,10 @@ COLUMN_HEADERS = [
     "译文",
 ]
 
-# 各列拖拽最小宽度（px），低于此值自动回弹
-_COL_MIN_WIDTHS = {0: 40, 1: 60, 2: 60, 3: 60, 4: 60}
-
 # 底部面板吸附比例（折叠后展开到 25%，拖拽可到 25%/30%/35%/40%/45%/50%，5% 粒度）
 _BOTTOM_RATIOS = [0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
 _COLLAPSE_RATIO = 0.15  # 展开→折叠: 底栏低于总高此比例则折叠
 _EXPAND_RATIO = 0.22  # 折叠→展开: 底栏高于此比例则展开至 25%
-_RATIO_HYSTERESIS = 0.02  # 档位切换滞回死区 (±2%)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2015,11 +2011,10 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         return cfg
 
     def _debounce_save_history(self):
-        if hasattr(self, "_history_timer"):
-            self._history_timer.stop()
-        self._history_timer = QTimer(self)
-        self._history_timer.setSingleShot(True)
-        self._history_timer.timeout.connect(self._save_history)
+        if not hasattr(self, "_history_timer"):
+            self._history_timer = QTimer(self)
+            self._history_timer.setSingleShot(True)
+            self._history_timer.timeout.connect(self._save_history)
         self._history_timer.start(500)
 
     def _save_history(self):

@@ -608,14 +608,12 @@ class WindowTableMixin:
         if self._repair_state is None:
             return
         self._score_mgr.set_text_provider(self._get_subrow_text_for_score)
-        n_loaded = 0
         for g in self._repair_state.current.groups:
             for r in g.rows:
                 key = f"{g.snap_i}_{r.sub}"
                 score = getattr(self, "_score_cache", {}).get(key)
                 if score is not None:
                     self._score_mgr.set_ready_score(g.snap_i, r.sub, score)
-                    n_loaded += 1
                 else:
                     # 无持久化分数→留 pending，_poll 异步重算
                     self._score_mgr.set_ready_score(g.snap_i, r.sub, r.score)

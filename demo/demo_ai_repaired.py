@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """Dualign — AI Repair Agent Demo
 
@@ -193,10 +193,12 @@ def _print_tool(evt):
                 detail = f" → {new[0][:50]}"
         elif name == "flag":
             detail = f" note={args.get('note', '')[:40]}"
-        target = args.get("snap_range", args.get("snap_id", "?"))
+        target = args.get("target", args.get("snap_range", args.get("snap_id", "?")))
         print(f"    {icon} {name}({target}){detail}")
     elif name == "view":
-        print(f"    {icon} view(pair_spec={args.get('pair_spec', '?')})")
+        print(
+            f"    {icon} view(target={args.get('target', args.get('pair_spec', '?'))})"
+        )
     else:
         print(f"    ? {name}({args})")
 

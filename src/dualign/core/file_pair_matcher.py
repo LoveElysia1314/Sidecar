@@ -20,15 +20,13 @@ Dualign — FilePairMatcher: 批量文件对发现与匹配引擎
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
-import fnmatch
-from pathlib import Path
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
-
-if TYPE_CHECKING:
-    from dualign.common import FilePair  # noqa: F401
+from pathlib import Path
+from typing import Literal
 
 # ═══════════════════════════════════════════════════════════════
 # 数据结构
@@ -152,11 +150,11 @@ class FilePairMatcher:
     @staticmethod
     def _collect_files(directory: Path) -> list[Path]:
         """递归收集目录下所有文本文件。"""
-        files = []
-        for p in directory.rglob("*"):
-            if p.is_file() and p.suffix.lower() in {".md", ".txt", ".text"}:
-                files.append(p)
-        return sorted(files)
+        return sorted(
+            path
+            for path in directory.rglob("*")
+            if path.is_file() and path.suffix.lower() in {".md", ".txt", ".text"}
+        )
 
     # ── 按规则匹配 ──
 
@@ -169,9 +167,9 @@ class FilePairMatcher:
         """按单条规则匹配文件对。"""
         if rule.type == "glob":
             return FilePairMatcher._match_by_glob(src_files, tgt_files, rule)
-        elif rule.type == "prefix":
+        if rule.type == "prefix":
             return FilePairMatcher._match_by_prefix(src_files, tgt_files, rule)
-        elif rule.type == "regex":
+        if rule.type == "regex":
             return FilePairMatcher._match_by_regex(src_files, tgt_files, rule)
         return []
 
@@ -193,10 +191,10 @@ class FilePairMatcher:
             return []
 
         # 按 natural 排序后配对
-        src_sorted = FilePairMatcher._natural_sort(matched_src)
-        tgt_sorted = FilePairMatcher._natural_sort(matched_tgt)
-
-        return FilePairMatcher._zip_pairs(src_sorted, tgt_sorted)
+        return FilePairMatcher._zip_pairs(
+            FilePairMatcher._natural_sort(matched_src),
+            FilePairMatcher._natural_sort(matched_tgt),
+        )
 
     @staticmethod
     def _match_by_prefix(
@@ -252,19 +250,17 @@ class FilePairMatcher:
         src_pat = re.compile(rule.src_pattern)
         tgt_pat = re.compile(rule.tgt_pattern)
 
-        src_map: dict[str, Path] = {}
-        for f in src_files:
-            m = src_pat.match(f.name)
-            if m:
-                g = m.group(rule.id_group)
-                src_map[g] = f
+        def _build_id_map(
+            files: list[Path], pattern: re.Pattern[str]
+        ) -> dict[str, Path]:
+            id_map: dict[str, Path] = {}
+            for path in files:
+                if match := pattern.match(path.name):
+                    id_map[match.group(rule.id_group)] = path
+            return id_map
 
-        tgt_map: dict[str, Path] = {}
-        for f in tgt_files:
-            m = tgt_pat.match(f.name)
-            if m:
-                g = m.group(rule.id_group)
-                tgt_map[g] = f
+        src_map = _build_id_map(src_files, src_pat)
+        tgt_map = _build_id_map(tgt_files, tgt_pat)
 
         pairs: list[MatchedPair] = []
         common_ids = set(src_map) & set(tgt_map)
@@ -301,7 +297,12 @@ class FilePairMatcher:
             return []
 
         pairs: list[MatchedPair] = []
-        raw_pairs = data.get("pairs", data if isinstance(data, list) else [])
+        if isinstance(data, dict):
+            raw_pairs = data.get("pairs", [])
+        elif isinstance(data, list):
+            raw_pairs = data
+        else:
+            return []
         for item in raw_pairs:
             if isinstance(item, dict):
                 src = item.get("src", "")
@@ -345,27 +346,21 @@ class FilePairMatcher:
         tgt_sorted: list[Path],
     ) -> list[MatchedPair]:
         """等长配对。"""
-        n = min(len(src_sorted), len(tgt_sorted))
-        pairs: list[MatchedPair] = []
-        for i in range(n):
-            sf = src_sorted[i]
-            tf = tgt_sorted[i]
-            label = sf.stem
-            pairs.append(
-                MatchedPair(
-                    entry_id=label,
-                    label=label,
-                    src_path=str(sf.resolve()),
-                    tgt_path=str(tf.resolve()),
-                )
+        return [
+            MatchedPair(
+                entry_id=src_path.stem,
+                label=src_path.stem,
+                src_path=str(src_path.resolve()),
+                tgt_path=str(tgt_path.resolve()),
             )
-        return pairs
+            for src_path, tgt_path in zip(src_sorted, tgt_sorted)
+        ]
 
     @staticmethod
-    def _natural_sort(paths: list[Path]) -> list[Path]:
+    def _natural_sort(paths: Iterable[Path]) -> list[Path]:
         """自然排序（human-friendly numeric sorting）。"""
 
-        def _key(p: Path):
+        def _key(p: Path) -> list[int | str]:
             name = p.stem
             parts = re.split(r"(\d+)", name)
             return [int(part) if part.isdigit() else part.lower() for part in parts]

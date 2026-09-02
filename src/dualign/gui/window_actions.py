@@ -59,13 +59,6 @@ COLUMN_HEADERS = [
     "译文",
 ]
 
-# 各列拖拽最小宽度（px），低于此值自动回弹
-# 各列拖拽最小宽度（px），低于此值自动回弹
-# 0=Snap, 1=初始类型, 2=初始评分, 3=当前类型, 4=当前评分
-# 4 个中文字符 ≈ 48px + 两侧 padding ≈ 60px（评分列无 padding 但需容纳百分比值）
-_COL_MIN_WIDTHS = {0: 40, 1: 60, 2: 60, 3: 60, 4: 60}
-
-
 # ═══════════════════════════════════════════════════════════════
 # DualignWindow — 方法实现（被 dualign.gui.window 采纳为方法）
 # ═══════════════════════════════════════════════════════════════
@@ -807,10 +800,12 @@ class WindowActionsMixin:
         ec = EmbeddingCache(
             os.path.join(get_embedding_cache_dir(self._current_entry_id), "vecs.db")
         )
-
-        state = RepairService.apply_split(
-            self._repair_state, snap_i, side, self._model, cache=ec
-        )
+        try:
+            state = RepairService.apply_split(
+                self._repair_state, snap_i, side, self._model, cache=ec
+            )
+        finally:
+            ec.close()
         if state is self._repair_state:
             self._status("拆分失败：文本无法进一步拆分或重对齐失败", "warning")
             return  # 跳过 refresh，保留提示消息

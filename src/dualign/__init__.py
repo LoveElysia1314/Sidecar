@@ -1,11 +1,13 @@
 """
-Dualign 0.7.0 — 双语平行文档对齐与辅助校验工具
+Dualign — 双语平行文档对齐与辅助校验工具
 
 公共 API 导出:
   - 核心: AlignConfig, AlignmentResult, AlignmentSnapshot, RepairState
   - 修复: RepairService, RepairAction
   - AI 审校: AiRepairAgent, ChapterContext, build_chapter_context
 """
+
+from dualign.version import __version__
 
 from dualign.core import (
     AlignConfig,
@@ -39,8 +41,6 @@ from dualign.services.ai_repair_agent import (
     ChapterContext,
     AgentEvent,
 )
-
-__version__ = "0.7.0"
 
 __all__ = [
     "__version__",

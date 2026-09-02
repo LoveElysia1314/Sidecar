@@ -8,7 +8,6 @@ OllamaEncoder.encode()。
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -18,8 +17,6 @@ from dualign.common import instruction_hash as _instruction_hash
 
 if TYPE_CHECKING:
     from dualign.services.embedding_cache import EmbeddingCache
-
-logger = logging.getLogger(__name__)
 
 
 class CachedEncoder:
@@ -87,7 +84,9 @@ class CachedEncoder:
             空输入 → np.zeros((0, dim))
         """
         if not texts:
-            return np.zeros((0, 768), dtype=np.float32)
+            # 维度取编码器实际维度（避免硬编码 768 与低维/高维模型不一致）
+            _dim = getattr(self._encoder, "_dim", None) or 768
+            return np.zeros((0, _dim), dtype=np.float32)
 
         # 缓存键 = 内容哈希 + 模型名 + instruction 哈希
         # 任一变化 → 键不同 → 自然穿透到重新编码
@@ -128,5 +127,5 @@ class CachedEncoder:
 
         return np.stack([cached[h] for h in hashes])
 
-    def __call__(self, texts):
+    def __call__(self, texts) -> np.ndarray:
         return self.encode(texts)

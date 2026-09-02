@@ -1,5 +1,5 @@
 """
-Dualign 0.7.0 — CLI 对齐流水线
+Dualign — CLI 对齐流水线
 
 将 common.py 中与具体业务逻辑相关的对齐流水线提取到此，
 common.py 回归纯工具函数库角色。
@@ -66,11 +66,29 @@ def align_chapter(
         return _handle_empty(sl, tl, entry_id, repaired_dir)
 
     # ── 尝试嵌入缓存（SQLite 行级）──
-    import os as _os
-
-    db_path = _os.path.join(cache_dir, "vecs.db")
+    db_path = os.path.join(cache_dir, "vecs.db")
     ec = EmbeddingCache(db_path)
+    try:
+        return _align_with_cache(
+            ec,
+            sl,
+            tl,
+            cfg,
+            src_path,
+            repaired_dir,
+            output_dir,
+            model,
+            strategy,
+        )
+    finally:
+        # 释放 SQLite 连接（Windows 上不关闭会锁定 vecs.db，句柄泄漏）
+        ec.close()
 
+
+def _align_with_cache(
+    ec, sl, tl, cfg, src_path, repaired_dir, output_dir, model, strategy
+):
+    """align_chapter 主体（嵌入缓存 ec 由调用方负责关闭）。"""
     model = _ensure_model(model)
     if model is None:
         return {"success": False, "error": "模型未加载"}
@@ -84,7 +102,9 @@ def align_chapter(
     tgt_hash = content_hash(tl)
 
     # ── 尝试从 report.json 恢复对齐结果 ──
-    result = _try_load_cached_result(entry_id, repaired_dir, src_hash, tgt_hash)
+    result = _try_load_cached_result(
+        Path(src_path).stem.split(".")[0], repaired_dir, src_hash, tgt_hash
+    )
 
     if result is None:
         result = align(
@@ -103,7 +123,7 @@ def align_chapter(
         tl,
         src_hash,
         tgt_hash,
-        entry_id,
+        Path(src_path).stem.split(".")[0],
         repaired_dir,
         model,
         strategy,
@@ -245,12 +265,9 @@ def _build_report(
         # 从 ops 重新计算统计（缓存命中时 stats 可能为空或为旧格式）
         # 统计参与锚点的去重行数
         anchors_raw = getattr(result, "anchors", []) or []
-        src_anchor_lines = {
-            s for (s,), (t,), _ in anchors_raw if len(s) == 1 and len(t) == 1
-        }
-        tgt_anchor_lines = {
-            t for (s,), (t,), _ in anchors_raw if len(s) == 1 and len(t) == 1
-        }
+        # anchors 元素形如 ((s_tuple), (t_tuple), score)，直接解包 s/t 即可
+        src_anchor_lines = {s for s, t, _ in anchors_raw if len(s) == 1 and len(t) == 1}
+        tgt_anchor_lines = {t for s, t, _ in anchors_raw if len(s) == 1 and len(t) == 1}
         n_anchor_lines = len(src_anchor_lines) + len(tgt_anchor_lines)
         from dualign.core.aligner import _build_stats
 

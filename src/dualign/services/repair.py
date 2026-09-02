@@ -6,15 +6,15 @@ RepairService (纯函数集合) = replay + auto_repair + render_rows
 """
 
 from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from dualign.models.state import AlignmentSnapshot, MISSING
-from dualign.models.action import RepairAction
-from dualign.models.action import AiProposalStore
+from dualign.models.action import AiProposalStore, RepairAction
 from dualign.models.marker import (
     is_merge,
     is_deleted,
@@ -27,17 +27,26 @@ from dualign.models.marker import (
     is_divider,
     AI_PREFIX,
 )
-from dualign.models.state import (
-    AlignedRow,
-    SnapGroup,
-    ChapterState,
-)
+from dualign.models.state import AlignedRow, ChapterState, SnapGroup
 from dualign.core import op_type_str, _smart_join_lines, AlignConfig, align
 from dualign.services.embedding_cache import EmbeddingCache
 
 # ═══════════════════════════════════════════════════════════════
 # 1. 内部纯函数：重放辅助
 # ═══════════════════════════════════════════════════════════════
+
+
+def _expand_text_lines(texts: List[str]) -> List[str]:
+    """Expand embedded newlines while preserving the original text values."""
+    expanded: List[str] = []
+    for text in texts:
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped:
+                expanded.append(line if line != stripped else stripped)
+            else:
+                expanded.append(line)
+    return expanded
 
 
 def _apply_info_free(state: ChapterState, snap_i: int, marker: str) -> ChapterState:
@@ -122,22 +131,8 @@ def _apply_info_full(
             new_tgt = []
 
     # 展开每个元素中的换行符为独立行，1:1 配对
-    expanded_src: List[str] = []
-    expanded_tgt: List[str] = []
-    for s in new_src:
-        for line in s.split("\n"):
-            stripped = line.strip()
-            if stripped:
-                expanded_src.append(line if line != stripped else stripped)
-            else:
-                expanded_src.append(line)
-    for t in new_tgt:
-        for line in t.split("\n"):
-            stripped = line.strip()
-            if stripped:
-                expanded_tgt.append(line if line != stripped else stripped)
-            else:
-                expanded_tgt.append(line)
+    expanded_src = _expand_text_lines(new_src)
+    expanded_tgt = _expand_text_lines(new_tgt)
 
     # 1:1 配对，短侧补空字符串
     n = max(len(expanded_src), len(expanded_tgt))
@@ -350,15 +345,14 @@ def replay(snapshot: AlignmentSnapshot, log: List[RepairAction]) -> ChapterState
                     continue
 
         # info-free: merge, delete, placeholder, flag, ok
-        if act.kind == "merge":
-            state = _apply_info_free(state, snap_i, _marker)
-        elif act.kind == "delete":
-            state = _apply_info_free(state, snap_i, _marker)
-        elif act.kind in ("placeholder_src", "placeholder_tgt"):
-            state = _apply_info_free(state, snap_i, _marker)
-        elif act.kind == "flag":
-            state = _apply_info_free(state, snap_i, _marker)
-        elif act.kind == "ok":
+        if act.kind in (
+            "merge",
+            "delete",
+            "placeholder_src",
+            "placeholder_tgt",
+            "flag",
+            "ok",
+        ):
             state = _apply_info_free(state, snap_i, _marker)
 
         # info-full: split, edit
@@ -777,10 +771,13 @@ class RepairService:
                 from dualign.services.cached_encoder import CachedEncoder
 
                 ec = EmbeddingCache(os.path.join(cache_dir, "vecs.db"))
-                cenc = CachedEncoder(model, ec)
-                # 始终通过 CachedEncoder 查缓存，有则复用，无则编码
-                src_emb = cenc.encode(src_lines)
-                tgt_emb = cenc.encode(tgt_lines)
+                try:
+                    cenc = CachedEncoder(model, ec)
+                    # 始终通过 CachedEncoder 查缓存，有则复用，无则编码
+                    src_emb = cenc.encode(src_lines)
+                    tgt_emb = cenc.encode(tgt_lines)
+                finally:
+                    ec.close()
             except Exception:
                 pass
         result = align(
@@ -830,8 +827,6 @@ class RepairService:
         门控（任一触发即拒绝）：
           - anchor_ratio < 20%（锚点覆盖率不足）
           - max_anchor_gap > 50（大段无引导）
-
-        核心原则: 每种策略保持首选侧不动，修改另一侧。
 
         核心原则: 每种策略保持首选侧不动，修改另一侧。
           - src-first:  保持原文不动 → 修改译文侧
@@ -1236,14 +1231,8 @@ class RepairService:
                 src_out.append(src_line)
                 tgt_out.append(tgt_line)
 
-            elif is_edit(marker) or is_split(marker):
-                # info-full: 取内联文本
-                for row in g.rows:
-                    src_out.append(row.src_text or MISSING)
-                    tgt_out.append(row.tgt_text or MISSING)
-
-            elif is_placeholder(marker):
-                # 占位符
+            elif is_edit(marker) or is_split(marker) or is_placeholder(marker):
+                # info-full / 占位符: 取内联文本，空侧显示 MISSING
                 for row in g.rows:
                     src_out.append(row.src_text or MISSING)
                     tgt_out.append(row.tgt_text or MISSING)

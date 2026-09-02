@@ -7,8 +7,8 @@ Dualign — GUI 配置持久化管理
 
 from __future__ import annotations
 
-import os
 import json
+import os
 from typing import Any, Dict, Optional
 
 # ═══════════════════════════════════════════════════════════════
@@ -66,7 +66,7 @@ class DualignConfig:
     _instance: Optional["DualignConfig"] = None
     _FILE_NAME = "gui_config.json"
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._data: Dict[str, Any] = {}
         self._dirty: bool = False
         self._file_path: str = ""
@@ -102,7 +102,7 @@ class DualignConfig:
         self._dirty = False
         return self._data
 
-    def save(self):
+    def save(self) -> None:
         """保存到磁盘。"""
         if not self._dirty:
             return
@@ -120,14 +120,14 @@ class DualignConfig:
     def get(self, key: str, default: Any = None) -> Any:
         return self._data.get(key, default)
 
-    def set(self, key: str, value: Any):
+    def set(self, key: str, value: Any) -> None:
         self._data[key] = value
         self._dirty = True
 
     # ── 恢复默认 ──
 
     @staticmethod
-    def default_values() -> dict:
+    def default_values() -> Dict[str, Any]:
         """返回所有 GUI 选项的出厂默认值（不含模型/Agent 配置）。"""
 
         return {
@@ -150,7 +150,7 @@ class DualignConfig:
             },
         }
 
-    def clear_all(self):
+    def clear_all(self) -> None:
         """清除所有配置项（保留模型/Agent 配置键）。"""
         # 保留模型配置相关键名
         preserved = {"active_backend", "agent_config", "model_config"}

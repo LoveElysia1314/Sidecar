@@ -1,5 +1,5 @@
 """
-Dualign 0.7.0 — SimilarityScorer: 统一文本对评分器
+Dualign — SimilarityScorer: 统一文本对评分器
 
 职责:
   1. 统一入口：谁要评分都来找我
@@ -23,18 +23,13 @@ Dualign 0.7.0 — SimilarityScorer: 统一文本对评分器
 from __future__ import annotations
 
 import os
-import logging
 from typing import Optional
 
 import numpy as np
 
-from dualign.config import (
-    get_cache_root,
-)
-from dualign.services.embedding_cache import EmbeddingCache
+from dualign.config import get_embedding_cache_dir
 from dualign.services.cached_encoder import CachedEncoder
-
-logger = logging.getLogger(__name__)
+from dualign.services.embedding_cache import EmbeddingCache
 
 
 class SimilarityScorer:
@@ -73,10 +68,7 @@ class SimilarityScorer:
         if self._cache is None:
             cache_dir = self._cache_dir
             if not cache_dir:
-                root = get_cache_root()
-                cache_dir = os.path.join(root, "emb")
-                if self._entry_id:
-                    cache_dir = os.path.join(cache_dir, self._entry_id)
+                cache_dir = get_embedding_cache_dir(self._entry_id)
             os.makedirs(cache_dir, exist_ok=True)
             db_path = os.path.join(cache_dir, "vecs.db")
             self._cache = EmbeddingCache(db_path)

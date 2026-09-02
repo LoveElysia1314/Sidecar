@@ -21,23 +21,49 @@ import pytest
 from dualign.core import AlignConfig
 from dualign.services.cli_pipeline import align_chapter
 
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_embedding_cache():
+    """测试隔离：嵌入缓存指向临时目录。
+
+    避免读取/污染开发机 %LOCALAPPDATA%\\dualign\\cache 下的真实缓存
+    （不同编码器/历史版本可能留下同 key 的旧向量，导致断言不稳定）。
+    """
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["DUALIGN_CACHE_DIR"] = d
+        yield
+        os.environ.pop("DUALIGN_CACHE_DIR", None)
+
+
 # ═══════════════════════════════════════════════════════════════
-# Mock 模型 — 返回确定性随机嵌入
+# Mock 模型 — 确定性对角线对齐嵌入
 # ═══════════════════════════════════════════════════════════════
 
 
 class MockEncoder:
-    """模拟 OllamaEncoder，返回固定维度的随机嵌入。"""
+    """模拟 OllamaEncoder。
 
-    def __init__(self, dim: int = 4, seed: int = 42):
-        self._rng = np.random.RandomState(seed)
+    嵌入为确定性 one-hot 向量：src[i] 与 tgt[i] 高度相似（对角线对齐），
+    保证 3:3 / 5:5 等对齐场景稳定通过质量门控（anchor_density >= 0.60），
+    使测试聚焦于流水线行为而非随机嵌入的偶然对齐质量。
+    """
+
+    # 缓存命名空间：与真实模型名区分，避免与其它编码器/旧缓存串向量
+    _model = "mock-diag-onehot"
+
+    def __init__(self, dim: int = 8, seed: int = 42):
         self._dim = dim
+        self._rng = np.random.RandomState(seed)
 
     def encode(self, texts, normalize_embeddings=True, **kw):
-        """返回固定种子随机向量，保证可复现。"""
+        """返回确定性 one-hot 嵌入（对角相似），可复现。"""
         if isinstance(texts, str):
             texts = [texts]
-        emb = self._rng.randn(len(texts), self._dim).astype(np.float32)
+        emb = np.zeros((len(texts), self._dim), dtype=np.float32)
+        for i in range(len(texts)):
+            emb[i, i % self._dim] = 1.0
+        # 轻微确定性噪声：避免全同向量，同时保持对角相似度远高于非对角
+        emb = emb + 0.05 * self._rng.randn(len(texts), self._dim).astype(np.float32)
         if normalize_embeddings:
             norms = np.linalg.norm(emb, axis=1, keepdims=True)
             norms = np.maximum(norms, 1e-12)

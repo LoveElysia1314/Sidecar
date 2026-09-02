@@ -6,8 +6,8 @@ Dualign — 全局配置与缓存路径
 
 from __future__ import annotations
 
-import os
 import json
+import os
 from typing import Optional
 
 # ═══════════════════════════════════════════════════════════════

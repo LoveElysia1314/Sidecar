@@ -1,5 +1,5 @@
 ﻿"""
-Dualign v0.7.0 — Demo 演示文件
+Dualign — Demo 演示文件
 
 用法:
   python -m demo.demo_cli              # 对齐 + 自动修复管线

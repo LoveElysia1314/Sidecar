@@ -1,4 +1,4 @@
-# Dualign ![version](https://img.shields.io/badge/version-0.7.0-blue)
+# Dualign ![version](https://img.shields.io/badge/version-0.8.0--alpha.1-blue)
 
 > **双语平行文档对齐与 AI 辅助校验工具**
 
@@ -173,8 +173,8 @@ pip install -e .
 
 | 文件                          | 说明                                       | 适合                  |
 | ----------------------------- | ------------------------------------------ | --------------------- |
-| `Dualign_Setup_v0.7.0.exe`    | Inno Setup 安装包，自动注册 `dualign` 命令 | 习惯安装向导的用户    |
-| `Dualign_Portable_v0.7.0.zip` | 便携版 ZIP，解压即用，免安装               | 纯 GUI 用户、U 盘携带 |
+| `Dualign_Setup_v0.8.0-alpha.1.zip`    | Inno Setup 安装包，自动注册 `dualign` 命令 | 习惯安装向导的用户    |
+| `Dualign_Portable_v0.8.0-alpha.1.zip` | 便携版 ZIP，解压即用，免安装               | 纯 GUI 用户、U 盘携带 |
 
 > 打包版本不包含 Python 环境。首次使用仍需安装 Ollama 并拉取默认嵌入模型。
 

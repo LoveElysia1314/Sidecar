@@ -9,16 +9,13 @@ Layer 3: 处理历史 — 随操作追加
 from __future__ import annotations
 
 import json
-import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import List, Optional, Tuple
 
 from dualign.models.state import AlignmentSnapshot, MISSING
 from dualign.models.action import RepairAction
 from dualign.models.marker import is_merge
 from dualign.core import detect_language_mix, _smart_join_lines
-
-logger = logging.getLogger(__name__)
 
 # ── approval 四态管线 ──
 # none → auto → agent → user（递进，flag 不推进管线）
@@ -469,6 +466,19 @@ def _derive_approval(action: Optional[RepairAction]) -> str:
     return APPROVAL_NONE
 
 
+def _action_summary(
+    actions: List[RepairAction],
+) -> tuple[Optional[RepairAction], int, bool]:
+    """Return the latest non-flag action, its count, and current flag state."""
+    last_action = actions[-1] if actions else None
+    non_flag_actions = [action for action in actions if action.kind != "flag"]
+    return (
+        non_flag_actions[-1] if non_flag_actions else None,
+        len(non_flag_actions),
+        last_action is not None and last_action.kind == "flag",
+    )
+
+
 def build_snap_states(
     snapshot: AlignmentSnapshot,
     src_lines: List[str],
@@ -516,10 +526,7 @@ def build_snap_states(
         # Layer 3: flag 仅当是最新操作时才携带 FLAGGED 异常
         # 任何后续非 flag 操作（ok/edit/merge/delete 等）自动清除标记待查
         my_actions = [a for a in log if a.op_index == si]
-        last_act_all = my_actions[-1] if my_actions else None
-        is_flagged = last_act_all is not None and last_act_all.kind == "flag"
-        non_flag_actions = [a for a in my_actions if a.kind != "flag"]
-        last_act = non_flag_actions[-1] if non_flag_actions else None
+        last_act, repair_count, is_flagged = _action_summary(my_actions)
 
         states.append(
             SnapState(
@@ -536,7 +543,7 @@ def build_snap_states(
                 is_deleted=last_act is not None and last_act.kind == "delete",
                 # Layer 3
                 approval=_derive_approval(last_act),
-                repair_count=len(non_flag_actions),
+                repair_count=repair_count,
                 last_source=last_act.source if last_act else "",
                 last_operation=last_act.kind if last_act else "",
                 is_flagged=is_flagged,
@@ -569,22 +576,7 @@ def refresh_snap_states(
     for si in range(total):
         g = ch_state.group(si)
         if g is None:
-            new_states[si] = SnapState(
-                init_type=states[si].init_type,
-                init_score=states[si].init_score,
-                is_low_score=states[si].is_low_score,
-                init_has_language_mix=states[si].init_has_language_mix,
-                n_src=states[si].n_src,
-                n_tgt=states[si].n_tgt,
-                has_missing=states[si].has_missing,
-                has_language_mix=states[si].has_language_mix,
-                is_deleted=True,
-                approval=states[si].approval,
-                repair_count=states[si].repair_count,
-                last_source=states[si].last_source,
-                last_operation=states[si].last_operation,
-                is_flagged=states[si].is_flagged,
-            )
+            new_states[si] = replace(states[si], is_deleted=True)
             continue
 
         src = "\n".join(r.src_text for r in g.rows if r.src_text)
@@ -608,10 +600,7 @@ def refresh_snap_states(
 
         # Layer 3: flag 仅当是最新操作时才携带 FLAGGED
         my_actions = [a for a in repair_log if a.op_index == si]
-        last_act_all = my_actions[-1] if my_actions else None
-        is_flagged = last_act_all is not None and last_act_all.kind == "flag"
-        non_flag_actions = [a for a in my_actions if a.kind != "flag"]
-        last_act = non_flag_actions[-1] if non_flag_actions else None
+        last_act, repair_count, is_flagged = _action_summary(my_actions)
 
         new_states[si] = SnapState(
             init_type=states[si].init_type,
@@ -624,7 +613,7 @@ def refresh_snap_states(
             has_language_mix=has_mix,
             is_deleted=last_act is not None and last_act.kind == "delete",
             approval=_derive_approval(last_act),
-            repair_count=len(non_flag_actions),
+            repair_count=repair_count,
             last_source=last_act.source if last_act else states[si].last_source,
             last_operation=last_act.kind if last_act else states[si].last_operation,
             is_flagged=is_flagged,

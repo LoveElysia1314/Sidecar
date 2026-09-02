@@ -34,6 +34,17 @@ from pathlib import Path
 import re
 import site
 
+
+def _configure_utf8_stdio() -> None:
+    """Keep build output printable on Windows consoles using a legacy code page."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+_configure_utf8_stdio()
+
 # 禁用用户站点包
 site.ENABLE_USER_SITE = False
 
@@ -266,7 +277,7 @@ def clean_build_cache(config: BuildConfig):
 # ═══════════════════════════════════════════════════════════════
 
 
-def run_pyinstaller_build(config: BuildConfig):
+def run_pyinstaller_build(config: BuildConfig, python_exe: Path):
     """执行 PyInstaller 打包 — 委托给 build_exe.py，避免重复维护 spec 逻辑。
 
     支持缓存：源码未变时跳过。
@@ -279,7 +290,7 @@ def run_pyinstaller_build(config: BuildConfig):
 
     build_exe = str(PROJECT_ROOT / "scripts" / "build_exe.py")
     cmd = [
-        sys.executable,
+        str(python_exe),
         build_exe,
         "--outdir",
         str(config.output_dir / "dualign"),
@@ -553,6 +564,7 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
     config = BuildConfig()
+    build_python = Path(sys.executable) if args.skip_venv else config.python_exe
 
     # ── 步骤执行 ──
     try:
@@ -571,7 +583,7 @@ def main():
         ]:
             shutil.rmtree(config.project_root / "build", ignore_errors=True)
 
-        run_pyinstaller_build(config)
+        run_pyinstaller_build(config, build_python)
         copy_resources(config)
 
         if not args.skip_installer:
