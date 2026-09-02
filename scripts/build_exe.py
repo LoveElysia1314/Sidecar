@@ -139,7 +139,6 @@ def build_spec_content(
         "dualign.providers",
         "dualign.core",
         "dualign.core.aligner",
-        "dualign.core.calibration",
         "dualign.core.legacy_anchor_aligner",
         "dualign.core.punctuation",
         "dualign.core.file_pair_matcher",

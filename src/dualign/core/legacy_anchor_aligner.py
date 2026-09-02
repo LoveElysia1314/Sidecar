@@ -95,7 +95,7 @@ class LegacyAnchorConfig:
     allow_merge: bool = True
 
     # ── 双边信任余量锚点参数（默认 = 全局常量，向后兼容）──
-    # 余弦绝对刻度是模型自己的 calibration：0.60 是 harrier-0.6b
+    # 余弦绝对刻度因模型而异：0.60 只属于冻结的 harrier-0.6b 基线。
     # 坐标系上的合适阈值。更换嵌入模型时应通过此处（或 provider 级
     # 配置）覆盖，而不是修改全局常量。
     anchor_min_score: float = ANCHOR_MIN_SCORE

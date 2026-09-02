@@ -12,7 +12,6 @@ from dualign.core import (
     align,
     alignment_payload,
 )
-from dualign.core.calibration import resolve_alignment_calibration
 from dualign.services.cached_encoder import CachedEncoder
 from dualign.services.cancellation import CancellationToken
 from dualign.services.embedding import _try_lazy_load_model
@@ -47,7 +46,6 @@ def rebuild_alignment(
     if model is None:
         raise RuntimeError("无法加载嵌入模型，不能重建固化后的对齐关系")
 
-    resolved = resolve_alignment_calibration(model, calibration_id=cfg.calibration_id)
     if document_a and document_b:
         with EmbeddingCache(get_embedding_cache_path()) as cache:
             encoder = CachedEncoder(model, cache)
@@ -80,7 +78,6 @@ def rebuild_alignment(
                 target_embeddings,
                 cfg,
                 encode_fn=encoder.encode,
-                calibration=resolved.calibration if resolved is not None else None,
                 silent=True,
             )
         operations = tuple(result.all_ops)
@@ -113,11 +110,6 @@ def rebuild_alignment(
         operations=operations,
         stats=stats,
         quality=quality,
-        provenance=_provenance(
-            model, cfg, resolved.calibration_id if resolved is not None else ""
-        ),
-        alignment=alignment_payload(
-            result,
-            calibration_id=resolved.calibration_id if resolved is not None else "",
-        ),
+        provenance=_provenance(model, cfg),
+        alignment=alignment_payload(result),
     )

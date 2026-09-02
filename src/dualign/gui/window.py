@@ -2237,24 +2237,26 @@ class DualignWindow(QMainWindow, WindowActionsMixin, WindowTableMixin):
         avg_sim = stats.get("avg_similarity", 0)
         avg_pct = f"{avg_sim:.1%}" if avg_sim else "—"
 
-        gate = getattr(self, "_alignment_gate", None) or {}
-        monotone_loss = gate.get("monotone_evidence_loss")
-        if monotone_loss is not None:
-            order_text = f"单调损失：{float(monotone_loss):.1%}"
-        else:
-            mutual_pairs = int(gate.get("mutual_pairs", 0) or 0)
-            out_of_chain = int(gate.get("out_of_chain_pairs", 0) or 0)
-            legacy = f"{out_of_chain}/{mutual_pairs}" if mutual_pairs else "—"
-            order_text = f"旧顺序链外：{legacy}"
-        n_scaffold = int(stats.get("n_scaffold", 0) or 0)
+        atomic_seconds = stats.get("atomic_alignment_seconds")
+        composition_seconds = stats.get("composition_processing_seconds")
+        atomic_text = (
+            f"原子对齐：{float(atomic_seconds):.2f} 秒"
+            if atomic_seconds is not None
+            else "原子对齐：—"
+        )
+        composition_text = (
+            f"组合处理：{float(composition_seconds):.2f} 秒"
+            if composition_seconds is not None
+            else "组合处理：—"
+        )
         uncertain = int(stats.get("uncertain_regions", 0) or 0)
 
         self._review.set_summary_cells(
             f"文档 A 块数：{n_src}",
             f"文档 B 块数：{n_tgt}",
             f"关系均分：{avg_pct}",
-            f"单调脚手架：{n_scaffold}",
-            order_text,
+            atomic_text,
+            composition_text,
             f"分歧区：{uncertain}",
         )
 

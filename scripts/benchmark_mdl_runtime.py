@@ -13,7 +13,6 @@ from pathlib import Path
 from dualign.algorithms.mdl import align_mdl_pipeline
 from dualign.common import load_text_lines
 from dualign.config import get_embedding_cache_path
-from dualign.core.calibration import resolve_alignment_calibration
 from dualign.core.legacy_anchor_aligner import align as align_legacy_anchor
 from dualign.services.cached_encoder import CachedEncoder
 from dualign.services.embedding import _try_lazy_load_model
@@ -54,10 +53,6 @@ def main() -> int:
     model = _try_lazy_load_model()
     if model is None:
         raise RuntimeError("无法加载嵌入模型")
-    resolved = resolve_alignment_calibration(model)
-    if args.algorithm == "mdl-v1" and resolved is None:
-        raise RuntimeError("当前嵌入模型没有匹配的对齐校准")
-
     results = []
     started = time.perf_counter()
     with EmbeddingCache(get_embedding_cache_path()) as cache:
@@ -75,7 +70,6 @@ def main() -> int:
                     vectors_a,
                     vectors_b,
                     encoder.encode,
-                    resolved.calibration,
                 )
                 status = result.status
                 alternative_digest = _path_digest(result.alternative_ops)

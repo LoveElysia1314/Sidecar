@@ -15,6 +15,10 @@ from dualign.algorithms.mdl.mdl_aligner import (
     Operation,
     align_evidence_lattice_mdl,
 )
+from dualign.algorithms.mdl.runtime import (
+    atomic_alignment_deadline,
+    check_atomic_alignment_deadline,
+)
 
 Vertex = tuple[int, int]
 
@@ -118,38 +122,43 @@ def align_centered_frontier_mdl(
     maximum_shape = (0, 0)
     frontier_paths = 0
     started = time.perf_counter()
-    for start, end in windows:
-        source_start, target_start = start
-        source_end, target_end = end
-        local_evidence = bits[source_start:source_end, target_start:target_end]
-        local_scores = matrix[source_start:source_end, target_start:target_end]
-        shape = local_evidence.shape
-        window_cells = shape[0] * shape[1]
-        cells += window_cells
-        if window_cells > maximum_cells:
-            maximum_cells = window_cells
-            maximum_shape = shape
+    with atomic_alignment_deadline():
+        local_started = time.perf_counter()
+        for start, end in windows:
+            check_atomic_alignment_deadline("local_candidates")
+            source_start, target_start = start
+            source_end, target_end = end
+            local_evidence = bits[source_start:source_end, target_start:target_end]
+            local_scores = matrix[source_start:source_end, target_start:target_end]
+            shape = local_evidence.shape
+            window_cells = shape[0] * shape[1]
+            cells += window_cells
+            if window_cells > maximum_cells:
+                maximum_cells = window_cells
+                maximum_shape = shape
 
-        local = align_evidence_lattice_mdl(
-            local_evidence,
-            scores_11=local_scores,
-            return_frontier_paths=True,
-        )
-        for complexity, path in local.frontier_paths:
-            frontier_paths += 1
-            cursor = start
-            for operation in _offset_operations(path, source_start, target_start):
-                edge = _semantic_edge(cursor, operation, bits)
-                if edge is not None:
-                    candidates[(edge.source, edge.target)] = edge
-                cursor = (
-                    cursor[0] + len(operation[0]),
-                    cursor[1] + len(operation[1]),
-                )
-            if cursor != end:
-                raise RuntimeError(f"中心窗口路径未完整覆盖: {cursor} != {end}")
-
-    alignment = align_explicit_evidence_mdl(n, m, list(candidates.values()))
+            local = align_evidence_lattice_mdl(
+                local_evidence,
+                scores_11=local_scores,
+                return_frontier_paths=True,
+            )
+            for complexity, path in local.frontier_paths:
+                frontier_paths += 1
+                cursor = start
+                for operation in _offset_operations(path, source_start, target_start):
+                    edge = _semantic_edge(cursor, operation, bits)
+                    if edge is not None:
+                        candidates[(edge.source, edge.target)] = edge
+                    cursor = (
+                        cursor[0] + len(operation[0]),
+                        cursor[1] + len(operation[1]),
+                    )
+                if cursor != end:
+                    raise RuntimeError(f"中心窗口路径未完整覆盖: {cursor} != {end}")
+        local_seconds = time.perf_counter() - local_started
+        global_started = time.perf_counter()
+        alignment = align_explicit_evidence_mdl(n, m, list(candidates.values()))
+        global_seconds = time.perf_counter() - global_started
     composition_stats = {
         "candidate_edges": alignment.candidate_edges,
         "frontier_states": len(alignment.frontier),
@@ -172,6 +181,8 @@ def align_centered_frontier_mdl(
             "maximum_window_cells": maximum_cells,
             "maximum_window_shape": maximum_shape,
             "frontier_paths": frontier_paths,
+            "local_candidate_seconds": round(local_seconds, 6),
+            "global_solver_seconds": round(global_seconds, 6),
             "seconds": round(time.perf_counter() - started, 6),
         },
         composition_stats=composition_stats,

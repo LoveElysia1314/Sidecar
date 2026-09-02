@@ -14,6 +14,7 @@ from dualign.models.relation_status import (
     project_relation_statuses,
 )
 from dualign.models.source import SOURCE_USER
+from dualign.models.score_cache import RelationScoreCache
 from dualign.models.state import AlignmentSnapshot
 from dualign.services.repair import RepairService, RepairState
 
@@ -120,6 +121,55 @@ class _ApplyHarness(WindowActionsMixin):
 
     def _status(self, *_args):
         pass
+
+
+class _ResetScoreManager:
+    def __init__(self):
+        self.invalidated = []
+        self.ready = {}
+
+    def invalidate_ordinals(self, ordinals):
+        self.invalidated.extend(ordinals)
+
+    def set_ready_score(self, ordinal, sub, score):
+        self.ready[(ordinal, sub)] = score
+
+
+class _ResetHarness(WindowActionsMixin):
+    def __init__(self):
+        baseline = RepairState.from_ops([((0,), (0,), 0.82)], ["A"], ["B"])
+        self._repair_state = baseline.apply(
+            RepairAction.make_edit(
+                "L000001", new_src_lines=["A repaired"], new_tgt_lines=["B"]
+            )
+        )
+        self._undo_stack = deque(maxlen=50)
+        self._redo_stack = deque(maxlen=50)
+        self._score_mgr = _ResetScoreManager()
+        self._score_cache = RelationScoreCache.from_dict({"L000001": {"0": 0.31}})
+
+    def _reset_accepted_proposals(self, _ordinals):
+        pass
+
+    def _save_session(self):
+        pass
+
+    def _refresh(self):
+        pass
+
+    def _set_temp_status(self, *_args):
+        pass
+
+
+def test_reset_restores_initial_current_score_without_async_recalculation():
+    window = _ResetHarness()
+
+    window.do_reset(0)
+
+    assert not window._repair_state.repair_log
+    assert window._score_mgr.invalidated == [0]
+    assert window._score_mgr.ready == {(0, 0): 0.82}
+    assert window._score_cache.to_dict() == {}
 
 
 class _InitialFocusHarness:
@@ -671,6 +721,28 @@ def test_copying_a_bundled_group_describes_its_full_scope():
     markdown = WindowTableMixin._format_relations(window, [0], fmt="markdown")
     tsv = WindowTableMixin._format_relations(window, [0], fmt="tsv")
 
-    assert "| 0/1 | 1:0+1:1 |" in markdown
+    assert "| 关系 | 类型 | 标记 | 当前评分 | 文档 A | 文档 B |" in markdown
+    assert "| 0/1 | 1:0+1:1 | [M] | 0.0% |" in markdown
     assert "专长" in markdown and "无特别专长。" in markdown
     assert "relation[0/1]\tinit=1:0+1:1" in tsv
+
+
+def test_markdown_copy_uses_visible_current_score_and_spans_group_rows():
+    snapshot = AlignmentSnapshot.from_alignment(
+        [((0, 1), (0,), 0.8)],
+        ["第一行", "第二行"],
+        ["Only target line."],
+    )
+    state = RepairState(snapshot)
+
+    class ScoreManager:
+        def get_score_state(self, ordinal, sub):
+            assert (ordinal, sub) == (0, 0)
+            return 0.913, "ready"
+
+    window = SimpleNamespace(_repair_state=state, _score_mgr=ScoreManager())
+
+    markdown = WindowTableMixin._format_relations(window, [0], fmt="markdown")
+
+    assert "| 0 | 2:1 |  | 91.3% | 第一行 | Only target line. |" in markdown
+    assert "|  |  |  |  | 第二行 |  |" in markdown

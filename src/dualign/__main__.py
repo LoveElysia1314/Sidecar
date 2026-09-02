@@ -308,6 +308,8 @@ def main():
         "  dualign check                   环境健康检查\n"
         "  dualign models                  列出可用模型\n"
         "  dualign align -a a.md -b b.md     生成可恢复的 JSON 报告\n"
+        "  dualign review-export -a a.md -b b.md -r pair.report.json -o review.json\n"
+        "  dualign review-apply -a a.md -b b.md -r pair.report.json -d decisions.json\n"
         "  dualign solidify -a a.md -b b.md -r a.report.json  预览固化\n"
         "  dualign solidify-batch --entries-file chapters.json  批量预览固化\n"
         "  dualign gui                     启动图形界面",
@@ -356,6 +358,26 @@ def main():
         choices=("mdl-v1", "legacy-anchor-v1"),
         default="mdl-v1",
         help="对齐算法；legacy 仅供显式回归与 benchmark",
+    )
+
+    # ── headless review bridge ──
+    p_review_export = sub.add_parser(
+        "review-export", help="导出包含双方文本和稳定关系 ID 的无头审阅包"
+    )
+    p_review_export.add_argument("-a", "--document-a", required=True)
+    p_review_export.add_argument("-b", "--document-b", required=True)
+    p_review_export.add_argument("-r", "--report", required=True)
+    p_review_export.add_argument("-o", "--output", required=True)
+
+    p_review_apply = sub.add_parser(
+        "review-apply", help="校验并回写哈希绑定的无头审阅决定"
+    )
+    p_review_apply.add_argument("-a", "--document-a", required=True)
+    p_review_apply.add_argument("-b", "--document-b", required=True)
+    p_review_apply.add_argument("-r", "--report", required=True)
+    p_review_apply.add_argument("-d", "--decisions", required=True)
+    p_review_apply.add_argument(
+        "--apply", action="store_true", help="实际回写；省略时只验证"
     )
 
     # ── solidify ──
@@ -477,6 +499,30 @@ def main():
             args.output,
             algorithm=args.algorithm,
         )
+    elif args.command == "review-export":
+        from dualign.services.headless_review import (
+            export_review_bundle,
+            write_review_bundle,
+        )
+
+        target = write_review_bundle(
+            export_review_bundle(args.document_a, args.document_b, args.report),
+            args.output,
+        )
+        print(target)
+    elif args.command == "review-apply":
+        from dualign.services.headless_review import apply_review_decisions
+
+        with open(args.decisions, encoding="utf-8") as stream:
+            decisions = json.load(stream)
+        result = apply_review_decisions(
+            args.document_a,
+            args.document_b,
+            args.report,
+            decisions,
+            apply=args.apply,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.command == "solidify":
         return main_solidify(
             args.document_a,

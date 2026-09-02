@@ -201,7 +201,7 @@ class EncodeThread(QThread):
                         (report.get("alignment") or {}).get("status", "aligned")
                     ),
                     reason=str((report.get("alignment") or {}).get("reason") or ""),
-                    gate=dict((report.get("alignment") or {}).get("gate") or {}),
+                    timing=dict((report.get("alignment") or {}).get("timing") or {}),
                     uncertain_regions=tuple(
                         (
                             (
@@ -296,11 +296,6 @@ class AlignWorker(QThread):
                 cenc = CachedEncoder(model, cache)
                 encode_fn = cenc.encode
 
-        from dualign.core.calibration import resolve_alignment_calibration
-
-        resolved = resolve_alignment_calibration(
-            model, calibration_id=self.config.calibration_id
-        )
         try:
             result = align(
                 self.src_lines,
@@ -309,7 +304,6 @@ class AlignWorker(QThread):
                 self.tgt_emb,
                 self.config,
                 encode_fn=encode_fn,
-                calibration=resolved.calibration if resolved is not None else None,
             )
         finally:
             if _cache_to_close is not None:
@@ -321,7 +315,7 @@ class AlignWorker(QThread):
         else:
             self.status_signal.emit(
                 f"✓ MDL 对齐完成 — {result.status}, {len(result.all_ops)} ops, "
-                f"{s.get('total_seconds', 0.0):.2f}s"
+                f"{s.get('total_processing_seconds', 0.0):.2f}s"
             )
         self.finished_signal.emit(result)
 

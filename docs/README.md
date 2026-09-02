@@ -13,7 +13,7 @@ Dualign 是面向平行文本的双文档对齐与审校工具。当前数据流
 
 - [工作报告架构](architecture.md)
 - [算法说明](algorithm.md)
-- [统计门控稀疏 MDL：详细设计与验证](research-alignment-pipeline.md)
+- [限时稀疏 MDL：详细设计与验证](research-alignment-pipeline.md)
 - [研究与迁移结论归档](research-notes.md)
 - [开发环境](development.md)
 - [AI 审校 Agent](ai-agent-guide.md)

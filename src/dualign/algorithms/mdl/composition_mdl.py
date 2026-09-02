@@ -29,6 +29,7 @@ from dualign.algorithms.mdl.mdl_aligner import (
     _harmonic_number,
     _structure_counts,
 )
+from dualign.algorithms.mdl.runtime import check_atomic_alignment_deadline
 
 Vertex = tuple[int, int]
 
@@ -623,6 +624,7 @@ def align_explicit_evidence_mdl(
     edge_states: list[dict[int, float]] = [{} for _edge in edges]
     predecessors: dict[tuple[int, int], int] = {}
     tree: list[dict[int, tuple[float, int]]] = [{} for _target in range(m + 2)]
+    unchecked_frontier_work = 0
 
     def prune_frontier(frontier: dict[int, tuple[float, int]]) -> None:
         strongest = float("-inf")
@@ -637,6 +639,11 @@ def align_explicit_evidence_mdl(
         destination: dict[int, tuple[float, int]],
         candidate: dict[int, tuple[float, int]],
     ) -> None:
+        nonlocal unchecked_frontier_work
+        unchecked_frontier_work += len(candidate)
+        if unchecked_frontier_work >= 4096:
+            check_atomic_alignment_deadline("global_solver")
+            unchecked_frontier_work = 0
         for relations, state in candidate.items():
             current = destination.get(relations)
             if current is None or state[0] > current[0]:
@@ -668,6 +675,7 @@ def align_explicit_evidence_mdl(
     pending = sorted(range(edge_count), key=lambda item: edges[item].end[0])
     pending_index = 0
     for source_start in range(n + 1):
+        check_atomic_alignment_deadline("global_solver")
         while (
             pending_index < edge_count
             and edges[pending[pending_index]].end[0] <= source_start
@@ -690,6 +698,7 @@ def align_explicit_evidence_mdl(
                 predecessors[(edge_id, end_relations)] = previous_edge
 
     while pending_index < edge_count:
+        check_atomic_alignment_deadline("global_solver")
         edge_id = pending[pending_index]
         tree_update(
             edges[edge_id].end[1],

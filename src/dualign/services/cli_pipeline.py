@@ -14,7 +14,6 @@ from dualign.core import (
     align,
     alignment_payload,
 )
-from dualign.core.calibration import resolve_alignment_calibration
 from dualign.services.cached_encoder import CachedEncoder
 from dualign.services.cancellation import CancellationToken
 from dualign.services.embedding_cache import EmbeddingCache
@@ -48,7 +47,6 @@ def _run_alignment(
     embeddings_b,
     config,
     encode_fn,
-    calibration,
 ) -> AlignmentResult:
     """Keep the archived solver behind the explicit CLI configuration boundary."""
 
@@ -60,7 +58,6 @@ def _run_alignment(
             embeddings_b,
             config,
             encode_fn=encode_fn,
-            calibration=calibration,
         )
 
     from dualign.core.legacy_anchor_aligner import align as legacy_align
@@ -129,18 +126,13 @@ def _review_flags_from_alignment(
     )
 
 
-def _provenance(model, config, calibration_id: str = "") -> dict:
+def _provenance(model, config) -> dict:
     import hashlib
     import json
 
     from dualign import __version__
 
     algorithm_name = _algorithm_name(config)
-    if not calibration_id and algorithm_name == ALGORITHM_MDL_V1:
-        resolved = resolve_alignment_calibration(
-            model, calibration_id=config.calibration_id
-        )
-        calibration_id = resolved.calibration_id if resolved is not None else ""
     if algorithm_name == LEGACY_ALGORITHM:
         from dualign.core.legacy_anchor_aligner import (
             ALIGN_CACHE_REVISION,
@@ -170,7 +162,7 @@ def _provenance(model, config, calibration_id: str = "") -> dict:
                 instruction = INSTRUCTION_TEXT
     except (OSError, ValueError):
         pass
-    config_values = {**vars(config), "resolved_calibration_id": calibration_id}
+    config_values = dict(vars(config))
     config_payload = json.dumps(config_values, sort_keys=True, separators=(",", ":"))
     result = {
         "tool": "dualign",
@@ -191,8 +183,6 @@ def _provenance(model, config, calibration_id: str = "") -> dict:
         result["embedding"]["instruction_sha256"] = hashlib.sha256(
             instruction.encode("utf-8")
         ).hexdigest()
-    if calibration_id:
-        result["algorithm"]["calibration_id"] = calibration_id
     return result
 
 
@@ -341,13 +331,7 @@ def align_documents(
         encoder = _ensure_model(model)
         if encoder is None:
             return {"success": False, "error": "模型未加载"}
-    resolved = None
-    if _algorithm_name(cfg) == ALGORITHM_MDL_V1:
-        resolved = resolve_alignment_calibration(
-            encoder, calibration_id=cfg.calibration_id
-        )
-    calibration_id = resolved.calibration_id if resolved is not None else ""
-    provenance = _provenance(encoder, cfg, calibration_id)
+    provenance = _provenance(encoder, cfg)
 
     existing_report = None
     state_sources = [target]
@@ -465,14 +449,13 @@ def align_documents(
                 embeddings_b,
                 cfg,
                 cached_encoder.encode,
-                resolved.calibration if resolved is not None else None,
             )
             check_cancelled()
     else:
         result = _empty_result(len(lines_a), len(lines_b), cfg)
 
     quality = _quality_diagnostics(result, len(lines_a), len(lines_b))
-    alignment = alignment_payload(result, calibration_id=calibration_id)
+    alignment = alignment_payload(result)
     reconciliation = None
     relation_ids = ()
     previous = None

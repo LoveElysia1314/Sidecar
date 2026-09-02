@@ -81,8 +81,6 @@ uv run dualign align -a a.md -b b.md --algorithm legacy-anchor-v1
 | 脚本 | 用途 |
 | --- | --- |
 | `scripts/audit_production_anomalies.py` | 从仍与正文哈希一致的报告建立只读异常清单 |
-| `scripts/calibrate_alignment_gate.py` | 生成与嵌入模型身份绑定的确定性门控校准 |
-| `scripts/evaluate_mdl_pipeline.py` | 比较历史报告路径与当前生产 MDL 路径 |
 | `scripts/benchmark_mdl_runtime.py` | 重放清单并输出路径摘要和运行时间，检查优化等价性 |
 
 脚本不会把本机语料或实验产物纳入仓库。正式回归仍由 `tests/` 承担；研究脚本不能替代单元

@@ -410,7 +410,7 @@ def test_empty_document_still_produces_a_replayable_report(tmp_path):
     assert load_report(report)["repair_log"][0]["kind"] == "placeholder_src"
 
 
-def test_new_default_abstains_when_embedding_calibration_is_unavailable(tmp_path):
+def test_new_default_reports_plain_alignment_timing(tmp_path):
     source, target = _pair(tmp_path)
     report = tmp_path / "uncalibrated.report.json"
 
@@ -419,9 +419,14 @@ def test_new_default_abstains_when_embedding_calibration_is_unavailable(tmp_path
     )
 
     assert result["success"]
-    assert result["status"] == "rejected"
-    assert result["reason"] == "calibration_unavailable"
-    assert result["ops"] == []
+    assert result["status"] in {"aligned", "needs_review"}
+    assert result["reason"] is None
+    report_data = load_report(report)
+    assert "calibration_id" not in report_data["alignment"]
+    assert "gate" not in report_data["alignment"]
+    timing = report_data["alignment"]["timing"]
+    assert timing["atomic_alignment_seconds"] >= 0.0
+    assert timing["composition_processing_seconds"] >= 0.0
 
 
 def test_review_disagreement_is_persisted_as_annotated_flags(tmp_path, monkeypatch):
