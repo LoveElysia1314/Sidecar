@@ -1,0 +1,64 @@
+{
+  "body_text_in_output": false,
+  "direction_counts": {
+    "en-ja": 240,
+    "en-zh": 378,
+    "ja-en": 240,
+    "ja-zh": 240,
+    "zh-en": 398,
+    "zh-ja": 240
+  },
+  "negative_family_comparisons": {
+    "adjacent_addition": 144,
+    "attribute_counterfactual": 144,
+    "boundary": 128,
+    "boundary_shift": 144,
+    "coverage_completeness": 40,
+    "low_salience_addition": 144,
+    "matched_semantic_corruption_review_candidate": 40,
+    "merge_split_missing_sub_event": 144,
+    "middle_omission": 144,
+    "omission": 128,
+    "omission_head": 144,
+    "omission_tail": 144,
+    "order_perturbation": 144,
+    "same_topic_mismatch": 144,
+    "semantic_near_miss_wrong_alignment": 40,
+    "unrelated": 1440
+  },
+  "schema": "dualign-observer-bakeoff-validation/v1",
+  "sources": {
+    "counts": {
+      "internal_reader_natural": 256,
+      "internal_v1_k3": 40,
+      "validation_v4_development": 1440
+    },
+    "internal_v1_role_counts": {
+      "dev": 8,
+      "diagnostic_holdout": 8,
+      "train": 24
+    },
+    "natural_cases": {
+      "bytes": 311397,
+      "path": "${HISTORICAL_LAB_V2}\\data\\local\\internal-source-heldout-v1\\cases.jsonl",
+      "sha256": "0190ba27e753f3a8bf68c30dd3087f09287e344d1aadbe1ef959fc3d3cde19e5"
+    },
+    "private_groups": {
+      "bytes": 189713,
+      "path": "${EXPERIMENT_PRIVATE}\\internal-zh-en-construction-v1\\candidate-groups.private.jsonl",
+      "sha256": "30a6bbcf4ed9625d39e04c8064aba0a23261fa1207527b148cbe2d1db800f348"
+    },
+    "private_split": {
+      "bytes": 3495,
+      "path": "${HISTORICAL_V4}\\internal-lineage\\internal-zh-en-construction-v1.split.json",
+      "sha256": "8ab5ca4cb85055c0cc4b5a4bce42c4b73bc10be3ee2e17311747696281ba9ee3"
+    },
+    "total_cases": 1736,
+    "total_pairs": 4992,
+    "validation_development": {
+      "bytes": 2433734,
+      "path": "${HISTORICAL_LAB_V2}\\data\\local\\validation-corpus-v4\\cases\\development.cases.jsonl",
+      "sha256": "c5a5c66a8696165cef1ea4d8f9bcc74a825ecbf20729f543bd3e983f9bd556f3"
+    }
+  }
+}

@@ -21,6 +21,8 @@ from typing import Optional
 
 import numpy as np
 
+from dualign.algorithms.mdl.runtime import check_atomic_alignment_deadline
+
 IndexTuple = tuple[int, ...]
 Operation = tuple[IndexTuple, IndexTuple, float]
 _Backtrace = tuple[str, int]
@@ -184,6 +186,7 @@ def _semantic_frontier_trace(
                 strongest = semantic
 
     for i in range(n + 1):
+        check_atomic_alignment_deadline("local_candidates")
         if previous is not None:
             source_start = i - 1
             for j in range(1, m + 1):
@@ -323,6 +326,7 @@ def _structure_counts(n: int, m: int, max_complexity: int) -> dict[int, int]:
 
     counts: dict[int, int] = {}
     for complexity in range(abs(n - m), min(max_complexity, n + m) + 1):
+        check_atomic_alignment_deadline("structure_code")
         relation_numerator = n + m - complexity
         if relation_numerator % 2:
             continue
@@ -333,6 +337,7 @@ def _structure_counts(n: int, m: int, max_complexity: int) -> dict[int, int]:
         maximum_target_excess = m - relations
         count = 0
         for source_excess in range(maximum_source_excess + 1):
+            check_atomic_alignment_deadline("structure_code")
             source_gaps = maximum_source_excess - source_excess
             for target_excess in range(maximum_target_excess + 1):
                 target_gaps = maximum_target_excess - target_excess

@@ -29,7 +29,10 @@ from dualign.services.repair import (
     current_score_texts,
 )
 from dualign.models.state import RelationRow
-from dualign.services.table_projection import project_table_cells
+from dualign.services.table_projection import (
+    current_relation_is_group_scoped,
+    project_table_cells,
+)
 from dualign.models.marker import (
     is_deleted,
     is_merge,
@@ -726,16 +729,30 @@ class WindowTableMixin:
             relation_label = "/".join(str(value) for value in scope)
             return relation_label, "+".join(types), sum(scores) / len(scores)
 
+        def current_score_text(row: RelationRow) -> str:
+            """Return the same current-score value/state shown by the table."""
+
+            if needs_zero_score(row.marker):
+                return "0.0%"
+            score_manager = getattr(self, "_score_mgr", None)
+            if score_manager is not None:
+                score, state = score_manager.get_score_state(row.ordinal, row.sub)
+                if state == "ready":
+                    return f"{float(score):.1%}" if score is not None else "—"
+                return {"pending": "—", "loading": "…", "failed": "✗"}.get(state, "—")
+            return f"{float(row.score):.1%}"
+
         if fmt == "markdown":
             # ── 统一单张 Markdown 表格 ──
             md_lines: List[str] = []
-            md_lines.append("| 关系 | 类型 | 标记 | 文档 A | 文档 B |")
-            md_lines.append("|---|---|---|---|---|")
+            md_lines.append("| 关系 | 类型 | 标记 | 当前评分 | 文档 A | 文档 B |")
+            md_lines.append("|---|---|---|---|---|---|")
             for ordinal, scope in scopes:
                 relation_text, init_type, _score = scope_metadata(scope)
                 rows = cur_rows.get(ordinal, [])
                 r0 = rows[0] if rows else None
                 marker = r0.marker if r0 else ""
+                group_scoped_score = current_relation_is_group_scoped(rows)
                 cur_src_lines = [r.src_text for r in rows]
                 cur_tgt_lines = [r.tgt_text for r in rows]
                 cnt = max(len(cur_src_lines), len(cur_tgt_lines))
@@ -745,11 +762,17 @@ class WindowTableMixin:
                     relation_label = relation_text if k == 0 else ""
                     type_label = init_type if k == 0 else ""
                     marker_label = marker if (k == 0 and marker) else ""
+                    score_label = (
+                        current_score_text(rows[k])
+                        if k < len(rows) and (k == 0 or not group_scoped_score)
+                        else ""
+                    )
                     # 转义管道符和换行
                     s = s.replace("|", "\\|").replace("\n", " ")
                     t = t.replace("|", "\\|").replace("\n", " ")
                     md_lines.append(
-                        f"| {relation_label} | {type_label} | {marker_label} | {s} | {t} |"
+                        f"| {relation_label} | {type_label} | {marker_label} | "
+                        f"{score_label} | {s} | {t} |"
                     )
             md_lines.append("")
             return "\n".join(md_lines)

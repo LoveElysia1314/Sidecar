@@ -1,0 +1,129 @@
+{
+  "baseline": {
+    "by_gold_position": {
+      "A": {
+        "accuracy": 0.734094616639478,
+        "correct": 450,
+        "questions": 613
+      },
+      "B": {
+        "accuracy": 0.9899328859060402,
+        "correct": 590,
+        "questions": 596
+      },
+      "C": {
+        "accuracy": 0.9902723735408561,
+        "correct": 509,
+        "questions": 514
+      },
+      "D": {
+        "accuracy": 0.9230769230769231,
+        "correct": 12,
+        "questions": 13
+      }
+    },
+    "predicted_position_counts": {
+      "A": 453,
+      "B": 687,
+      "C": 581,
+      "D": 15
+    }
+  },
+  "baseline_file": {
+    "bytes": 1378538,
+    "path": "${EXPERIMENT_PRIVATE}\\observer-mcq-v1\\qwen3.5-4b.answers.jsonl",
+    "sha256": "95b29a92bafd6c2842b4bb9a699339357f4e35a8ef2bf5ca5b8e62e46bd63e43"
+  },
+  "body_text_in_output": false,
+  "candidate": {
+    "by_gold_position": {
+      "A": {
+        "accuracy": 0.9102773246329527,
+        "correct": 558,
+        "questions": 613
+      },
+      "B": {
+        "accuracy": 0.9916107382550335,
+        "correct": 591,
+        "questions": 596
+      },
+      "C": {
+        "accuracy": 0.9863813229571985,
+        "correct": 507,
+        "questions": 514
+      },
+      "D": {
+        "accuracy": 0.8461538461538461,
+        "correct": 11,
+        "questions": 13
+      }
+    },
+    "predicted_position_counts": {
+      "A": 566,
+      "B": 622,
+      "C": 535,
+      "D": 13
+    }
+  },
+  "candidate_file": {
+    "bytes": 1588533,
+    "path": "${EXPERIMENT_PRIVATE}\\observer-architecture-prompt-v1\\qwen3.5-4b.answers.jsonl",
+    "sha256": "4d55297df85bdceb35cd11fb3cb9729135fdb0365f5445e9c3df076db1d8fac6"
+  },
+  "created_at_unix": 1788202671.9675229,
+  "gold_position_counts": {
+    "A": 613,
+    "B": 596,
+    "C": 514,
+    "D": 13
+  },
+  "interpretation": "The fixed-permutation paired gain may include reduced option-symbol bias. A separate re-permutation audit is required before claiming position invariance.",
+  "paired_by_gold_position": {
+    "A": {
+      "both_correct": 448,
+      "both_wrong": 53,
+      "first_only_correct": 2,
+      "mcnemar_exact_two_sided_p": 2.437842123605363e-30,
+      "net_second_minus_first_correct": 108,
+      "prediction_agreement_rate": 0.8123980424143556,
+      "questions": 613,
+      "same_prediction": 498,
+      "second_only_correct": 110
+    },
+    "B": {
+      "both_correct": 588,
+      "both_wrong": 3,
+      "first_only_correct": 2,
+      "mcnemar_exact_two_sided_p": 1.0,
+      "net_second_minus_first_correct": 1,
+      "prediction_agreement_rate": 0.9916107382550335,
+      "questions": 596,
+      "same_prediction": 591,
+      "second_only_correct": 3
+    },
+    "C": {
+      "both_correct": 504,
+      "both_wrong": 2,
+      "first_only_correct": 5,
+      "mcnemar_exact_two_sided_p": 0.7265625,
+      "net_second_minus_first_correct": -2,
+      "prediction_agreement_rate": 0.9844357976653697,
+      "questions": 514,
+      "same_prediction": 506,
+      "second_only_correct": 3
+    },
+    "D": {
+      "both_correct": 11,
+      "both_wrong": 1,
+      "first_only_correct": 1,
+      "mcnemar_exact_two_sided_p": 1.0,
+      "net_second_minus_first_correct": -1,
+      "prediction_agreement_rate": 0.9230769230769231,
+      "questions": 13,
+      "same_prediction": 12,
+      "second_only_correct": 0
+    }
+  },
+  "same_permutation_used_for_both_prompts": true,
+  "schema": "dualign-observer-option-position-audit/v1"
+}

@@ -1,0 +1,584 @@
+{
+  "schema": "dualign-experiment-migration/v1",
+  "created_date": "2026-09-01",
+  "target": "experiments/alignment-judge",
+  "status": "imported_and_source_retained",
+  "source_commits": {
+    "dualign_before_migration": "4f47223a98498e40eea4aa173ff06be079ccbd20",
+    "dualign_embedding_lab_v2": "6b2caa41cba9e43d5117ed44a4477e33eafea2ca",
+    "dualign_embedding_lab_v4": null
+  },
+  "scope": {
+    "included": [
+      "observer MCQ benchmark",
+      "embedding versus reranker observer bake-off",
+      "4B prompt ablation and forced-choice prompt selection",
+      "deterministic option-permutation audit",
+      "private question packets, source cases, answers, and local run outputs",
+      "Dualign solidification integrity audit"
+    ],
+    "excluded": [
+      "embedding training governance and public-corpus research",
+      "LoRA adapters and checkpoints",
+      "downloaded model weights and caches",
+      "rolling-shadow, confirmation, and source-final assets"
+    ]
+  },
+  "privacy": {
+    "private_root": "experiments/alignment-judge/private",
+    "gitignored": true,
+    "tracked_files_contain_body_text": false
+  },
+  "tracked_imports": [
+    {
+      "source": "OBSERVER-ARCHITECTURE-PROMPT-POSITION-AUDIT.json",
+      "destination": "experiments/alignment-judge/evidence/OBSERVER-ARCHITECTURE-PROMPT-POSITION-AUDIT.json",
+      "source_sha256": "570ea61a52bc26b341ad0946a7f1cf40939fb492e4e35ff885186aaa8bb607e7",
+      "destination_sha256": "27ee79db8cae8dd89c2c1efb32107dd17bfee50d3397e56665306e20fad1f6fb",
+      "bytes": 3430
+    },
+    {
+      "source": "OBSERVER-BAKEOFF-ASSET-VALIDATION.json",
+      "destination": "experiments/alignment-judge/evidence/OBSERVER-BAKEOFF-ASSET-VALIDATION.json",
+      "source_sha256": "190b84da6227c1223e1b7735033be299dfd2942d6e54eb1d4751d2e1424b4ad4",
+      "destination_sha256": "e88f65132cc09db19c85100c33d123d9bf9651c5efa3bf4f11ba491d4dcd779d",
+      "bytes": 2028
+    },
+    {
+      "source": "OBSERVER-EXPERT-PROMPT-STYLES-SUMMARY.json",
+      "destination": "experiments/alignment-judge/evidence/OBSERVER-EXPERT-PROMPT-STYLES-SUMMARY.json",
+      "source_sha256": "b2315aab064f1ce5ce858fef8e6c752eff015aa780788e3262685c217929af63",
+      "destination_sha256": "4a07dd2640b8eddfa25f0ce35d059986606adf641c42f603738ebd7021da16f2",
+      "bytes": 9137
+    },
+    {
+      "source": "OBSERVER-ARCHITECTURE-PROMPT-PROTOCOL.md",
+      "destination": "experiments/alignment-judge/protocols/OBSERVER-ARCHITECTURE-PROMPT-PROTOCOL.md",
+      "source_sha256": "9fab6612e66a2f419dc8771af943922ae2f1de64ac881c2e6d25367fad14dd73",
+      "destination_sha256": "9fab6612e66a2f419dc8771af943922ae2f1de64ac881c2e6d25367fad14dd73",
+      "bytes": 2529
+    },
+    {
+      "source": "OBSERVER-BAKEOFF-PROTOCOL.md",
+      "destination": "experiments/alignment-judge/protocols/OBSERVER-BAKEOFF-PROTOCOL.md",
+      "source_sha256": "a99ef3e866163bbc205d0312380f76e52f249ff3ae7666151e745dad05fd0ca1",
+      "destination_sha256": "1cfe27b9587d626e66990d7ca10004953bd011abc8c9591f59a49859d712e476",
+      "bytes": 2909
+    },
+    {
+      "source": "OBSERVER-EXPERT-PROMPT-STYLES-PROTOCOL.md",
+      "destination": "experiments/alignment-judge/protocols/OBSERVER-EXPERT-PROMPT-STYLES-PROTOCOL.md",
+      "source_sha256": "e7d8f6a15d61a0cd41a5ef274194bdb7d5135d8184eb845a54f0de6d2a58119e",
+      "destination_sha256": "e7d8f6a15d61a0cd41a5ef274194bdb7d5135d8184eb845a54f0de6d2a58119e",
+      "bytes": 2561
+    },
+    {
+      "source": "OBSERVER-MCQ-PROTOCOL.md",
+      "destination": "experiments/alignment-judge/protocols/OBSERVER-MCQ-PROTOCOL.md",
+      "source_sha256": "11415650fc4b22c7671aa94ee4dab83d2003dfd0c30668a72a8f95804f2b91cc",
+      "destination_sha256": "11415650fc4b22c7671aa94ee4dab83d2003dfd0c30668a72a8f95804f2b91cc",
+      "bytes": 3046
+    },
+    {
+      "source": "OBSERVER-PROMPT-ABLATION-PROTOCOL.md",
+      "destination": "experiments/alignment-judge/protocols/OBSERVER-PROMPT-ABLATION-PROTOCOL.md",
+      "source_sha256": "a847cefc4f096277e101c307f3e4cda1e3eb6b9f9c892c26c2d057d5fa44a50a",
+      "destination_sha256": "a847cefc4f096277e101c307f3e4cda1e3eb6b9f9c892c26c2d057d5fa44a50a",
+      "bytes": 2902
+    },
+    {
+      "source": "OBSERVER-ARCHITECTURE-PROMPT-REPORT.md",
+      "destination": "experiments/alignment-judge/reports/OBSERVER-ARCHITECTURE-PROMPT-REPORT.md",
+      "source_sha256": "10aa0237380f98322960890f3f99e851d9408fe412d07c54cd26999e20b2f076",
+      "destination_sha256": "f274c346ebc567422e1db4dec1d5505b4854f5f3869df2acc304fae3719a97f6",
+      "bytes": 6471
+    },
+    {
+      "source": "OBSERVER-BAKEOFF-REPORT.md",
+      "destination": "experiments/alignment-judge/reports/OBSERVER-BAKEOFF-REPORT.md",
+      "source_sha256": "d96fb3eef2f73fd787698174c478bad6f6cc1f7f77ee45f931fba2c3e3601357",
+      "destination_sha256": "70fd204026cab56832ddd64b36f6e80af7ee117aaca6ed82d80713e2a20367a1",
+      "bytes": 8507
+    },
+    {
+      "source": "OBSERVER-EXPERT-PROMPT-STYLES-REPORT.md",
+      "destination": "experiments/alignment-judge/reports/OBSERVER-EXPERT-PROMPT-STYLES-REPORT.md",
+      "source_sha256": "72997ac2207d21668e9133052728cd8dd8490aa4cc7d87ed24b0725764d70779",
+      "destination_sha256": "d50b3001f73a7dc0b008b805113304a4216d02e2d8b470b5bca7c430e0d38887",
+      "bytes": 2682
+    },
+    {
+      "source": "OBSERVER-MCQ-REPORT.md",
+      "destination": "experiments/alignment-judge/reports/OBSERVER-MCQ-REPORT.md",
+      "source_sha256": "c00782aa066b28b60cfea6562a61105da35113069c418f5dc06c2c4f1b08cb2a",
+      "destination_sha256": "61b56d7e9af1964d68a73b4201ce15a7545f423ae636554eb8effa9ec2151298",
+      "bytes": 5484
+    },
+    {
+      "source": "OBSERVER-PROMPT-ABLATION-REPORT.md",
+      "destination": "experiments/alignment-judge/reports/OBSERVER-PROMPT-ABLATION-REPORT.md",
+      "source_sha256": "e4b4c56c84924e2d0b35224b46fc158d8dd6a25b80bc43f31996a56d5de64f03",
+      "destination_sha256": "bd3273bbc156ab4fe4622d80d63ee4117f32da9bcfe71a0e961e85957bd651b1",
+      "bytes": 5677
+    },
+    {
+      "source": "v4-public/tests/test_audit_observer_architecture_prompt.py",
+      "destination": "experiments/alignment-judge/tests/test_audit_observer_architecture_prompt.py",
+      "sha256": "bc1bf071aba09febb0fa6705b3f12818eebaec5786ac92aab9ca77abe526574f",
+      "bytes": 988
+    },
+    {
+      "source": "v4-public/tests/test_observer_architecture_prompt.py",
+      "destination": "experiments/alignment-judge/tests/test_observer_architecture_prompt.py",
+      "sha256": "bf249030544abd5e773dc85e84d39260cae9f7e1be0500c1fd114314468db690",
+      "bytes": 1578
+    },
+    {
+      "source": "v4-public/tests/test_observer_bakeoff.py",
+      "destination": "experiments/alignment-judge/tests/test_observer_bakeoff.py",
+      "sha256": "bf5e388ed0214e1d126d4660c4479033ce0d5e2cb34f1484655c7e8acffb7cff",
+      "bytes": 2277
+    },
+    {
+      "source": "v4-public/tests/test_observer_expert_prompt_style.py",
+      "destination": "experiments/alignment-judge/tests/test_observer_expert_prompt_style.py",
+      "sha256": "95bc3811a099e71e21b1b77527fc3c0789d0c634c659c1062e56a2d0da7f5077",
+      "bytes": 1779
+    },
+    {
+      "source": "v4-public/tests/test_observer_mcq.py",
+      "destination": "experiments/alignment-judge/tests/test_observer_mcq.py",
+      "sha256": "d34881dd86a68e580d0b978f5afa2b2c5cc68d46ed29aee1bed22cd7af19b881",
+      "bytes": 3783
+    },
+    {
+      "source": "v4-public/tests/test_observer_permutation_audit.py",
+      "destination": "experiments/alignment-judge/tests/test_observer_permutation_audit.py",
+      "sha256": "c7e63d4816e56ba6d6b82d17acadde1e409b55ef1575598442c0c584c0d05d91",
+      "bytes": 1147
+    },
+    {
+      "source": "v4-public/tests/test_observer_prompt_ablation.py",
+      "destination": "experiments/alignment-judge/tests/test_observer_prompt_ablation.py",
+      "sha256": "0949c73618e34d278d6f1a822f7050a48816b75ad1cda1e20d1b03cd61fda52d",
+      "bytes": 818
+    },
+    {
+      "source": "v4-public/tests/test_observer_wrong_union.py",
+      "destination": "experiments/alignment-judge/tests/test_observer_wrong_union.py",
+      "sha256": "9a1fc0f1e86d21fe9b268bb687315aa17254535dcc4b561005c2a1e98d7a589c",
+      "bytes": 1289
+    },
+    {
+      "source": "v4-public/tests/test_summarize_observer_prompt_ablation.py",
+      "destination": "experiments/alignment-judge/tests/test_summarize_observer_prompt_ablation.py",
+      "sha256": "6b52f28db79ac75720d87bd557635841f624392bd5ad77864235cea7a5fc1553",
+      "bytes": 1047
+    },
+    {
+      "source": "v4-public/tools/audit_observer_architecture_prompt.py",
+      "destination": "experiments/alignment-judge/tools/audit_observer_architecture_prompt.py",
+      "sha256": "610831f8082e29649a31ca7055a1ce075c9dfe812e03ce771d61ff9bf391b27a",
+      "bytes": 4199
+    },
+    {
+      "source": "v4-public/tools/build_observer_permutation_audit.py",
+      "destination": "experiments/alignment-judge/tools/build_observer_permutation_audit.py",
+      "sha256": "0adb7810310eae1a644ccc26aac5279629f2812b34b8e48bc73998e89562d237",
+      "bytes": 6360
+    },
+    {
+      "source": "v4-public/tools/build_observer_wrong_union.py",
+      "destination": "experiments/alignment-judge/tools/build_observer_wrong_union.py",
+      "sha256": "365b1d4f086b2b36065cd2c13b2c75215aa135bc03351a9929dfad1270ef7f14",
+      "bytes": 7989
+    },
+    {
+      "source": "v4-public/tools/export_observer_direction_errors.py",
+      "destination": "experiments/alignment-judge/tools/export_observer_direction_errors.py",
+      "sha256": "5d002838d2976b9e6243bdc48ae319845af90fe278d7995b9de8be46f88ebb73",
+      "bytes": 7073
+    },
+    {
+      "source": "v4-public/tools/finalize_observer_expert_prompt_styles.py",
+      "destination": "experiments/alignment-judge/tools/finalize_observer_expert_prompt_styles.py",
+      "sha256": "c50824a3c0b19770fa65ddb70e89db585eeee0fa10b9eec54fd934b441a21ee1",
+      "bytes": 11319
+    },
+    {
+      "source": "v4-public/tools/run_observer_architecture_prompt.py",
+      "destination": "experiments/alignment-judge/tools/run_observer_architecture_prompt.py",
+      "sha256": "94b17f938c11b7f704725a9dde92bf86dca36f04a7feffd375b78dd174123255",
+      "bytes": 10791
+    },
+    {
+      "source": "v4-public/tools/run_observer_bakeoff.py",
+      "destination": "experiments/alignment-judge/tools/run_observer_bakeoff.py",
+      "sha256": "96e18e77867e85515eb2593d80a2bfbb562da493fa52eb009259d9321b02bca1",
+      "bytes": 34546
+    },
+    {
+      "source": "v4-public/tools/run_observer_expert_prompt_style.py",
+      "destination": "experiments/alignment-judge/tools/run_observer_expert_prompt_style.py",
+      "sha256": "8e0a46748f64af26712755534f8448c2791841f5203b35775353facaa5e6f166",
+      "bytes": 9653
+    },
+    {
+      "source": "v4-public/tools/run_observer_mcq.py",
+      "destination": "experiments/alignment-judge/tools/run_observer_mcq.py",
+      "sha256": "0aea55e07718dced8eb071bd2b756d4fd8b309ca9e977aae62cfe3529230c5f3",
+      "bytes": 24837
+    },
+    {
+      "source": "v4-public/tools/run_observer_permutation_audit.py",
+      "destination": "experiments/alignment-judge/tools/run_observer_permutation_audit.py",
+      "sha256": "ab1302a9a24d62b4b0c0fef9de6fe5082d9e7a1b27724a352441654ab00ca68e",
+      "bytes": 7836
+    },
+    {
+      "source": "v4-public/tools/run_observer_prompt_ablation.py",
+      "destination": "experiments/alignment-judge/tools/run_observer_prompt_ablation.py",
+      "sha256": "dbcc1976ec9d998d04a4f28d57183edf69dfae3d776ad0c34c6863fa4fccf42d",
+      "bytes": 9812
+    },
+    {
+      "source": "v4-public/tools/summarize_observer_prompt_ablation.py",
+      "destination": "experiments/alignment-judge/tools/summarize_observer_prompt_ablation.py",
+      "sha256": "8bc6bed1b997fa2fa0b5dfdde932e4cc35337b61d2ea07b86c1f403e9d285aba",
+      "bytes": 7274
+    },
+    {
+      "source": "DUALIGN-SOLIDIFICATION-INTEGRITY-AUDIT.md",
+      "destination": "experiments/solidification-integrity/REPORT.md",
+      "source_sha256": "27b0c4799b888235c9b036abef0595d75c87e8a2787f02f9725dc42b76578775",
+      "destination_sha256": "0176c70dab792b6ff16585d84f877364bcba783b884f9cdb90f7509a3cce4a7c",
+      "bytes": 2476
+    }
+  ],
+  "private_imports": [
+    {
+      "source": "v4-public/OBSERVER-ARCHITECTURE-PROMPT-RECEIPT.json",
+      "destination": "experiments/alignment-judge/private/evidence/OBSERVER-ARCHITECTURE-PROMPT-RECEIPT.json",
+      "sha256": "28e4a0455d4e853855b141ee4cf62a70fd49027a70883d26383152f80d43867c",
+      "bytes": 52049
+    },
+    {
+      "source": "v4-public/OBSERVER-BAKEOFF-RECEIPT.json",
+      "destination": "experiments/alignment-judge/private/evidence/OBSERVER-BAKEOFF-RECEIPT.json",
+      "sha256": "eef6dec4f33fbce716838fa3a1d9c5ef4e9a895da92cab2baa1bff400d243cca",
+      "bytes": 115247
+    },
+    {
+      "source": "v4-public/OBSERVER-EXPERT-P5-RECEIPT.json",
+      "destination": "experiments/alignment-judge/private/evidence/OBSERVER-EXPERT-P5-RECEIPT.json",
+      "sha256": "f24080c177e043793f5f19afbfb179db9b6e7bdcaad5e411dd1bdc5f25eff3a3",
+      "bytes": 48261
+    },
+    {
+      "source": "v4-public/OBSERVER-EXPERT-P6-RECEIPT.json",
+      "destination": "experiments/alignment-judge/private/evidence/OBSERVER-EXPERT-P6-RECEIPT.json",
+      "sha256": "d5528b82fcc1da46d83cea1c781fef722195f07be26bea08f67da8e56a752c10",
+      "bytes": 48262
+    },
+    {
+      "source": "v4-public/OBSERVER-EXPERT-P7-RECEIPT.json",
+      "destination": "experiments/alignment-judge/private/evidence/OBSERVER-EXPERT-P7-RECEIPT.json",
+      "sha256": "018dc8419b1fdd2b20eeff984ff644e923005bc2edd2b18b7fdb725fa83ac07a",
+      "bytes": 48237
+    },
+    {
+      "source": "v4-public/OBSERVER-EXPERT-PROMPT-PERMUTATION-MANIFEST.json",
+      "destination": "experiments/alignment-judge/private/evidence/OBSERVER-EXPERT-PROMPT-PERMUTATION-MANIFEST.json",
+      "sha256": "aaf89c62ed248420cb7ed285a6680d5aba7a3e51b1caccdc5f875df184ae6236",
+      "bytes": 449990
+    },
+    {
+      "source": "v4-public/OBSERVER-MCQ-MANIFEST.json",
+      "destination": "experiments/alignment-judge/private/evidence/OBSERVER-MCQ-MANIFEST.json",
+      "sha256": "63688116b589a8037df6bf94c6cd91462c6fde8f91f806c98c5d683d4d6e423c",
+      "bytes": 2135890
+    },
+    {
+      "source": "v4-public/OBSERVER-MCQ-RECEIPT.json",
+      "destination": "experiments/alignment-judge/private/evidence/OBSERVER-MCQ-RECEIPT.json",
+      "sha256": "fda6fe9afc8a557c255d75914525273ceb59c8db32cceccd20049551bc904b13",
+      "bytes": 2311375
+    },
+    {
+      "source": "v4-public/OBSERVER-PERMUTATION-ARCHITECTURE-RECEIPT.json",
+      "destination": "experiments/alignment-judge/private/evidence/OBSERVER-PERMUTATION-ARCHITECTURE-RECEIPT.json",
+      "sha256": "4f8f10061628f385481284e1afc983c38f606c88e5ab8d60ef3b20aeb5b95c78",
+      "bytes": 23410
+    },
+    {
+      "source": "v4-public/OBSERVER-PERMUTATION-P7-RECEIPT.json",
+      "destination": "experiments/alignment-judge/private/evidence/OBSERVER-PERMUTATION-P7-RECEIPT.json",
+      "sha256": "73098c06013c38a0fdfee610a6b26bb0cf85e837be100b2f63e5511aa6005980",
+      "bytes": 23232
+    },
+    {
+      "source": "v4-public/OBSERVER-PROMPT-ABLATION-RECEIPT.json",
+      "destination": "experiments/alignment-judge/private/evidence/OBSERVER-PROMPT-ABLATION-RECEIPT.json",
+      "sha256": "dad5e0e614c2119f0960673b8f4c07f7acd4367e3506be90c916977768be877e",
+      "bytes": 252049
+    },
+    {
+      "source": "v4-public/OBSERVER-WRONG-UNION-MANIFEST.json",
+      "destination": "experiments/alignment-judge/private/evidence/OBSERVER-WRONG-UNION-MANIFEST.json",
+      "sha256": "24c62e7dee5b58d37e9c1eaae2b9493b209cff5e77ace65e8d94ef25c4b0ac3e",
+      "bytes": 726955
+    },
+    {
+      "source": "v4-private/observer-architecture-prompt-v1/qwen3.5-4b.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-architecture-prompt-v1/qwen3.5-4b.answers.jsonl",
+      "sha256": "4d55297df85bdceb35cd11fb3cb9729135fdb0365f5445e9c3df076db1d8fac6",
+      "bytes": 1588533
+    },
+    {
+      "source": "v4-private/observer-architecture-prompt-v1/qwen3.5-4b.zh-en-errors.private.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-architecture-prompt-v1/qwen3.5-4b.zh-en-errors.private.jsonl",
+      "sha256": "ce0943184e3d5d20c75665bf3a0a1181aa3a8102d83b23141c582f15d4d4be9e",
+      "bytes": 60734
+    },
+    {
+      "source": "v4-private/observer-architecture-prompt-v1/qwen3.5-4b.zh-en-errors.private.md",
+      "destination": "experiments/alignment-judge/private/runs/observer-architecture-prompt-v1/qwen3.5-4b.zh-en-errors.private.md",
+      "sha256": "7169a7a397dd46607ee796d4c27e4f83d78b37d445d33c1a3a903e013826da2c",
+      "bytes": 44264
+    },
+    {
+      "source": "v4-private/observer-bakeoff-v1/embedding_base.json",
+      "destination": "experiments/alignment-judge/private/runs/observer-bakeoff-v1/embedding_base.json",
+      "sha256": "4eaccd545d6173550c5c1c3f2102a207c67e67cda01044e575398a6d1d164ed9",
+      "bytes": 2590534
+    },
+    {
+      "source": "v4-private/observer-bakeoff-v1/embedding_l1.json",
+      "destination": "experiments/alignment-judge/private/runs/observer-bakeoff-v1/embedding_l1.json",
+      "sha256": "ac65ed07872fe13235f405560b84f8469e6d176e89e312151c4c9f243bf8562b",
+      "bytes": 2590953
+    },
+    {
+      "source": "v4-private/observer-bakeoff-v1/embedding_l2.json",
+      "destination": "experiments/alignment-judge/private/runs/observer-bakeoff-v1/embedding_l2.json",
+      "sha256": "634e8ec7536cd045b0d2d197681a100b38c0b7f8c8104d336e1a9a3e564056fc",
+      "bytes": 2590939
+    },
+    {
+      "source": "v4-private/observer-bakeoff-v1/reranker_retrieval.json",
+      "destination": "experiments/alignment-judge/private/runs/observer-bakeoff-v1/reranker_retrieval.json",
+      "sha256": "32827cd44fde389ed89e57fb528ee2f2f895b8f3210de337f800e850f6e2ded3",
+      "bytes": 2454150
+    },
+    {
+      "source": "v4-private/observer-bakeoff-v1/reranker_strict.json",
+      "destination": "experiments/alignment-judge/private/runs/observer-bakeoff-v1/reranker_strict.json",
+      "sha256": "5ad89b0b86ead2638e2e6990eba77b62dbbc5dfc4c1a05d9474e04436d459359",
+      "bytes": 2448086
+    },
+    {
+      "source": "v4-private/observer-expert-prompt-styles-v1/p5.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-expert-prompt-styles-v1/p5.answers.jsonl",
+      "sha256": "03f46cb6213a8e897d06c778cb6043358b704277bedb882d605e363a9f018efe",
+      "bytes": 1557883
+    },
+    {
+      "source": "v4-private/observer-expert-prompt-styles-v1/p6.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-expert-prompt-styles-v1/p6.answers.jsonl",
+      "sha256": "ad74ddf9f14108b0347c44efea6fab79843c8612d20d1cd638172e6225ce6d0e",
+      "bytes": 1561254
+    },
+    {
+      "source": "v4-private/observer-expert-prompt-styles-v1/p7.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-expert-prompt-styles-v1/p7.answers.jsonl",
+      "sha256": "83bdc9fddd7e711a208e0ed6f9bf201c609933bf6fb643aa251caacdb6d1d334",
+      "bytes": 1568546
+    },
+    {
+      "source": "v4-private/observer-expert-prompt-styles-v1/permutation-audit-300.private.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-expert-prompt-styles-v1/permutation-audit-300.private.jsonl",
+      "sha256": "2629736b9adf324138de87c9b49a427b70ff7a30242f18eb1d1059bb51ab558e",
+      "bytes": 812750
+    },
+    {
+      "source": "v4-private/observer-expert-prompt-styles-v1/permutation.architecture-leader.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-expert-prompt-styles-v1/permutation.architecture-leader.answers.jsonl",
+      "sha256": "0323b81271fa125ee350b1200fede42c389edeb5c80d890783463b2f4987377e",
+      "bytes": 249486
+    },
+    {
+      "source": "v4-private/observer-expert-prompt-styles-v1/permutation.p7.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-expert-prompt-styles-v1/permutation.p7.answers.jsonl",
+      "sha256": "8b51bacb9503538d5d91797777171cd0332a391c3026995bcd27cc9639704e57",
+      "bytes": 247750
+    },
+    {
+      "source": "v4-private/observer-mcq-v1/questions.private.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-mcq-v1/questions.private.jsonl",
+      "sha256": "6f061e19355bf8f33d0a92f69f03ef140289dd91631eeeb44b11d2aa630ecc18",
+      "bytes": 3796476
+    },
+    {
+      "source": "v4-private/observer-mcq-v1/qwen3.5-2b.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-mcq-v1/qwen3.5-2b.answers.jsonl",
+      "sha256": "ec66f3ced52214eea96ca8af931eea76e70b0305b874a5ba63c24e3996b3f9f4",
+      "bytes": 1379010
+    },
+    {
+      "source": "v4-private/observer-mcq-v1/qwen3.5-2b.receipt.json",
+      "destination": "experiments/alignment-judge/private/runs/observer-mcq-v1/qwen3.5-2b.receipt.json",
+      "sha256": "aec1ee8ac1478bf8d2fd6b747d307dcd60938c5883f34cc8469412cff0bb3090",
+      "bytes": 23478
+    },
+    {
+      "source": "v4-private/observer-mcq-v1/qwen3.5-4b.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-mcq-v1/qwen3.5-4b.answers.jsonl",
+      "sha256": "95b29a92bafd6c2842b4bb9a699339357f4e35a8ef2bf5ca5b8e62e46bd63e43",
+      "bytes": 1378538
+    },
+    {
+      "source": "v4-private/observer-mcq-v1/qwen3.5-4b.receipt.json",
+      "destination": "experiments/alignment-judge/private/runs/observer-mcq-v1/qwen3.5-4b.receipt.json",
+      "sha256": "255c1d55fead9169aca87abfb67ef5d37f2bdd56911b1d8700631817cf9a2c5f",
+      "bytes": 23529
+    },
+    {
+      "source": "v4-private/observer-mcq-v1/smoke-qwen3.5-2b.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-mcq-v1/smoke-qwen3.5-2b.answers.jsonl",
+      "sha256": "65b4726e74798b906b15528d735adfef424a5f7b75766e220139451335c55613",
+      "bytes": 9495
+    },
+    {
+      "source": "v4-private/observer-mcq-v1/smoke-qwen3.5-2b.receipt.json",
+      "destination": "experiments/alignment-judge/private/runs/observer-mcq-v1/smoke-qwen3.5-2b.receipt.json",
+      "sha256": "1aa491ba03272483f6bce4919bec0c2da5641fde0c134373765e982add211e6d",
+      "bytes": 15181
+    },
+    {
+      "source": "v4-private/observer-mcq-v1/smoke-qwen3.5-4b.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-mcq-v1/smoke-qwen3.5-4b.answers.jsonl",
+      "sha256": "230de6357b84ddb978b420481574a3a5770d990ae0b21776474876e201578b3e",
+      "bytes": 9491
+    },
+    {
+      "source": "v4-private/observer-mcq-v1/smoke-qwen3.5-4b.receipt.json",
+      "destination": "experiments/alignment-judge/private/runs/observer-mcq-v1/smoke-qwen3.5-4b.receipt.json",
+      "sha256": "5457e64ed614aaba7cf8f0c8f0e1a9f14f634722064f3d167fbb4ec7587c1271",
+      "bytes": 15125
+    },
+    {
+      "source": "v4-private/observer-wrong-union-v1/check.bidirectional-entailment.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-wrong-union-v1/check.bidirectional-entailment.answers.jsonl",
+      "sha256": "bd15730ff6761f27e9d965dd3a41f6332be0a44e09239f0907fbde24b9fc838d",
+      "bytes": 116290
+    },
+    {
+      "source": "v4-private/observer-wrong-union-v1/check.bidirectional-entailment.receipt.json",
+      "destination": "experiments/alignment-judge/private/runs/observer-wrong-union-v1/check.bidirectional-entailment.receipt.json",
+      "sha256": "2ee5319f1f873361c5fd1bc51c10bb17b3f7a8c2392fdcac6531abc9953fcb27",
+      "bytes": 45760
+    },
+    {
+      "source": "v4-private/observer-wrong-union-v1/corpus.private.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-wrong-union-v1/corpus.private.jsonl",
+      "sha256": "d70f19ad3dc74d1256f0977238ce26f04641783e1f46050daff6d79bd4f101f4",
+      "bytes": 1151588
+    },
+    {
+      "source": "v4-private/observer-wrong-union-v1/tuning.baseline-1536.aborted-offload-8.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-wrong-union-v1/tuning.baseline-1536.aborted-offload-8.answers.jsonl",
+      "sha256": "cfca40170de23c8cdf215f74f23d6c2fb48df4a61a8a215fc863f276ec38da03",
+      "bytes": 30152
+    },
+    {
+      "source": "v4-private/observer-wrong-union-v1/tuning.baseline-4k.aborted-offload-9.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-wrong-union-v1/tuning.baseline-4k.aborted-offload-9.answers.jsonl",
+      "sha256": "2e48d73ddb4d7f007914755217ed734e7f19263a4ee388412e1b3d5c193524ee",
+      "bytes": 24428
+    },
+    {
+      "source": "v4-private/observer-wrong-union-v1/tuning.bidirectional-entailment.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-wrong-union-v1/tuning.bidirectional-entailment.answers.jsonl",
+      "sha256": "fdfbfef091a30590df7f90fde103cfae74cc7a3fcc27ea3b4cb81f2226619571",
+      "bytes": 273746
+    },
+    {
+      "source": "v4-private/observer-wrong-union-v1/tuning.bidirectional-entailment.receipt.json",
+      "destination": "experiments/alignment-judge/private/runs/observer-wrong-union-v1/tuning.bidirectional-entailment.receipt.json",
+      "sha256": "307bdaa3db42363bb9e3c5d34ff586145ecaa42bab137857f6cfdb5622933781",
+      "bytes": 45974
+    },
+    {
+      "source": "v4-private/observer-wrong-union-v1/tuning.near-miss-elimination.aborted-offload-10.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-wrong-union-v1/tuning.near-miss-elimination.aborted-offload-10.answers.jsonl",
+      "sha256": "3695a974f8f45c4ed785e69c0cb40f04687a278ad874ef277e2c38775ef688a5",
+      "bytes": 31559
+    },
+    {
+      "source": "v4-private/observer-wrong-union-v1/tuning.near-miss-elimination.aborted-slow-33.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-wrong-union-v1/tuning.near-miss-elimination.aborted-slow-33.answers.jsonl",
+      "sha256": "54bc73ad76b88f35eb3322d09d944b6d8f793a222b7ece9e2fa9701343615256",
+      "bytes": 30611
+    },
+    {
+      "source": "v4-private/observer-wrong-union-v1/tuning.near-miss-elimination.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-wrong-union-v1/tuning.near-miss-elimination.answers.jsonl",
+      "sha256": "8f0f7f5c958006e9ffb2c08af80fcabdc8d36bfbb14f1929e0f0de31c8c0e599",
+      "bytes": 272908
+    },
+    {
+      "source": "v4-private/observer-wrong-union-v1/tuning.near-miss-elimination.receipt.json",
+      "destination": "experiments/alignment-judge/private/runs/observer-wrong-union-v1/tuning.near-miss-elimination.receipt.json",
+      "sha256": "8bc87f7449b9a5fa1d1980a3552e2a5cc0a5242077e951a6d47cd133f18833cc",
+      "bytes": 45923
+    },
+    {
+      "source": "v4-private/observer-wrong-union-v1/tuning.two-way-coverage.answers.jsonl",
+      "destination": "experiments/alignment-judge/private/runs/observer-wrong-union-v1/tuning.two-way-coverage.answers.jsonl",
+      "sha256": "45c934d93a4ce184c1bded370d3e53bc4a5bbae4e88aeb3ca07956c8d3f01377",
+      "bytes": 271361
+    },
+    {
+      "source": "v4-private/observer-wrong-union-v1/tuning.two-way-coverage.receipt.json",
+      "destination": "experiments/alignment-judge/private/runs/observer-wrong-union-v1/tuning.two-way-coverage.receipt.json",
+      "sha256": "18a81ef0eb8ecb0bd4dd76489e43884eb0f25e174b1e3c7d7ca72403d6177753",
+      "bytes": 45961
+    },
+    {
+      "source": "v4-private/internal-v1-candidate-groups",
+      "destination": "experiments/alignment-judge/private/sources/internal-v1/candidate-groups.private.jsonl",
+      "sha256": "30a6bbcf4ed9625d39e04c8064aba0a23261fa1207527b148cbe2d1db800f348",
+      "bytes": 189713
+    },
+    {
+      "source": "v4-public/internal-v1-split",
+      "destination": "experiments/alignment-judge/private/sources/internal-v1/split.json",
+      "sha256": "8ab5ca4cb85055c0cc4b5a4bce42c4b73bc10be3ee2e17311747696281ba9ee3",
+      "bytes": 3495
+    },
+    {
+      "source": "lab-v2/internal-reader-natural",
+      "destination": "experiments/alignment-judge/private/sources/reader-natural/cases.jsonl",
+      "sha256": "0190ba27e753f3a8bf68c30dd3087f09287e344d1aadbe1ef959fc3d3cde19e5",
+      "bytes": 311397
+    },
+    {
+      "source": "lab-v2/validation-v4-development",
+      "destination": "experiments/alignment-judge/private/sources/validation-v4/development.cases.jsonl",
+      "sha256": "c5a5c66a8696165cef1ea4d8f9bcc74a825ecbf20729f543bd3e983f9bd556f3",
+      "bytes": 2433734
+    }
+  ],
+  "derived_tracked_files": [
+    {
+      "destination": "experiments/alignment-judge/evidence/DATASET-INDEX.json",
+      "sha256": "9cf8beb88b09234b3c2530f892b692cd15133b324b1abb48c5a760fa75ae31b6",
+      "bytes": 3801,
+      "derived_from": [
+        "OBSERVER-MCQ-MANIFEST.json",
+        "OBSERVER-WRONG-UNION-MANIFEST.json",
+        "OBSERVER-EXPERT-PROMPT-PERMUTATION-MANIFEST.json"
+      ]
+    }
+  ]
+}

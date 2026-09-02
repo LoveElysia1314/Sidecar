@@ -78,6 +78,27 @@ class WindowActionsMixin:
                     self._repair_state.snapshot.relation_id(ordinal), sub, score
                 )
 
+    def _restore_initial_relation_scores(self, ordinals) -> None:
+        """Restore baseline scores after current text is reset to the snapshot."""
+
+        relation_ordinals = sorted({int(ordinal) for ordinal in ordinals})
+        self._invalidate_relation_scores(relation_ordinals)
+        if self._repair_state is None:
+            return
+
+        from dualign.services.repair import current_score_slot_exists
+
+        score_manager = getattr(self, "_score_mgr", None)
+        if score_manager is None:
+            return
+        for ordinal in relation_ordinals:
+            group = self._repair_state.current.group(ordinal)
+            if group is None:
+                continue
+            for row in group.rows:
+                if current_score_slot_exists(group, row.sub):
+                    score_manager.set_ready_score(ordinal, row.sub, row.orig_score)
+
     def _on_open_demo(self):
         """打开 Demo 示例文件对的全新临时副本。
 
@@ -507,27 +528,15 @@ class WindowActionsMixin:
                 self._repair_state = None
                 self._alignment_snapshot = None
                 self._align_stats = result.stats
-                self._alignment_gate = dict(result.gate or {})
+                self._alignment_timing = dict(result.timing or {})
                 report_path = self._session_path()
                 if result.stats.get("load_origin") != "report":
                     from dualign.core import alignment_payload
-                    from dualign.core.calibration import (
-                        resolve_alignment_calibration,
-                    )
                     from dualign.services.cli_pipeline import _provenance
                     from dualign.services.embedding import _try_lazy_load_model
                     from dualign.services.report_io import build_report, save_report
 
                     model = _try_lazy_load_model()
-                    resolved = resolve_alignment_calibration(
-                        model,
-                        calibration_id=getattr(
-                            self._align_config, "calibration_id", ""
-                        ),
-                    )
-                    calibration_id = (
-                        resolved.calibration_id if resolved is not None else ""
-                    )
                     report = build_report(
                         chapter_id=self._current_entry_id,
                         document_a_path=self._src_path,
@@ -539,21 +548,15 @@ class WindowActionsMixin:
                             "rejections": [],
                             "indicators": {"alignment_status": "rejected"},
                         },
-                        alignment=alignment_payload(
-                            result, calibration_id=calibration_id
-                        ),
-                        provenance=_provenance(
-                            model, self._align_config, calibration_id
-                        ),
+                        alignment=alignment_payload(result),
+                        provenance=_provenance(model, self._align_config),
                     )
                     save_report(report, report_path)
                 self._report_file_hash = file_bytes_sha256(report_path)
                 self._report_file_present = os.path.isfile(report_path)
                 reason_labels = {
-                    "no_correspondence": "未检测到足够的双语对应关系",
-                    "order_incompatible": "对应内容的顺序与单调对齐不兼容",
-                    "order_unidentifiable": "无法识别稳定的对应顺序",
-                    "calibration_unavailable": "当前嵌入模型没有匹配的校准资料",
+                    "alignment_timeout": "对齐计算超过 60 秒，已停止",
+                    "input_too_large": "文档规模超过安全处理范围",
                     "empty_document": "至少一侧文档为空",
                 }
                 self._status(
@@ -583,7 +586,7 @@ class WindowActionsMixin:
                 ),
             )
             self._align_stats = result.stats
-            self._alignment_gate = dict(result.gate or {})
+            self._alignment_timing = dict(result.timing or {})
             if hasattr(self, "_score_cache"):
                 self._score_cache.clear()
 
@@ -655,14 +658,8 @@ class WindowActionsMixin:
                 from dualign.services.embedding import _try_lazy_load_model
                 from dualign.services.report_io import build_report, save_report
                 from dualign.core import alignment_payload
-                from dualign.core.calibration import resolve_alignment_calibration
 
                 model = _try_lazy_load_model()
-                resolved = resolve_alignment_calibration(
-                    model,
-                    calibration_id=getattr(self._align_config, "calibration_id", ""),
-                )
-                calibration_id = resolved.calibration_id if resolved is not None else ""
 
                 _report = build_report(
                     chapter_id=self._current_entry_id,
@@ -671,8 +668,8 @@ class WindowActionsMixin:
                     operations=result.all_ops,
                     stats=stats,
                     quality=quality_payload,
-                    alignment=alignment_payload(result, calibration_id=calibration_id),
-                    provenance=_provenance(model, self._align_config, calibration_id),
+                    alignment=alignment_payload(result),
+                    provenance=_provenance(model, self._align_config),
                     repair_log=self._repair_state.repair_log,
                     anomaly_detection_config=self._anomaly_detection_config,
                 )
@@ -1279,7 +1276,9 @@ class WindowActionsMixin:
             self._repair_state.snapshot.relation_id(value) for value in scope
         ]
         self._repair_state = self._repair_state.reset_relations(relation_ids)
-        self._invalidate_relation_scores(list(scope))
+        # Reset restores the exact snapshot text, so its current score is the
+        # known initial score. Do not leave the cell pending or recompute it.
+        self._restore_initial_relation_scores(scope)
         self._reset_accepted_proposals(list(scope))
         self._save_session()
         self._refresh()

@@ -1,0 +1,122 @@
+{
+  "schema": "dualign-alignment-judge-dataset-index/v1",
+  "body_text_in_output": false,
+  "full_evidence_location": "private/evidence",
+  "mcq": {
+    "schema": "dualign-mcq-manifest/v1",
+    "prompt_version": "dualign-exact-equivalence-mcq/v1",
+    "system_prompt_sha256": "cd755bda7e18058e9a22bd115ad7c6f644577a961b42844bb2c9ebb504a5f1a0",
+    "question_count": 1736,
+    "candidate_count_distribution": {
+      "2": 256,
+      "3": 1440,
+      "4": 40
+    },
+    "private_packet": {
+      "bytes": 3796476,
+      "sha256": "6f061e19355bf8f33d0a92f69f03ef140289dd91631eeeb44b11d2aa630ecc18"
+    },
+    "sources": {
+      "counts": {
+        "internal_reader_natural": 256,
+        "internal_v1_k3": 40,
+        "validation_v4_development": 1440
+      },
+      "internal_v1_role_counts": {
+        "dev": 8,
+        "diagnostic_holdout": 8,
+        "train": 24
+      },
+      "natural_cases": {
+        "bytes": 311397,
+        "sha256": "0190ba27e753f3a8bf68c30dd3087f09287e344d1aadbe1ef959fc3d3cde19e5"
+      },
+      "private_groups": {
+        "bytes": 189713,
+        "sha256": "30a6bbcf4ed9625d39e04c8064aba0a23261fa1207527b148cbe2d1db800f348"
+      },
+      "private_split": {
+        "bytes": 3495,
+        "sha256": "8ab5ca4cb85055c0cc4b5a4bce42c4b73bc10be3ee2e17311747696281ba9ee3"
+      },
+      "total_cases": 1736,
+      "total_pairs": 4992,
+      "validation_development": {
+        "bytes": 2433734,
+        "sha256": "c5a5c66a8696165cef1ea4d8f9bcc74a825ecbf20729f543bd3e983f9bd556f3"
+      }
+    }
+  },
+  "wrong_union": {
+    "schema": "dualign-observer-wrong-union-manifest/v1",
+    "counts": {
+      "by_dataset": {
+        "internal_reader_natural": 33,
+        "internal_v1_k3": 21,
+        "validation_v4_development": 368
+      },
+      "by_error_pattern": {
+        "both_wrong": 145,
+        "qwen3.5_2b_wrong_only": 247,
+        "qwen3.5_4b_wrong_only": 30
+      },
+      "by_prompt_split": {
+        "prompt_check": 126,
+        "prompt_tuning": 296
+      },
+      "total": 422
+    },
+    "selection_rule": "qwen3.5:2b_wrong_or_qwen3.5:4b_wrong",
+    "selection_is_error_mined_and_not_fresh_evaluation": true,
+    "split_seed": "dualign-observer-wrong-union-prompt-split/v1",
+    "tuning_fraction_within_dataset_and_error_pattern": 0.7,
+    "private_raw_corpus": {
+      "bytes": 1151588,
+      "contains_body_text": true,
+      "sha256": "d70f19ad3dc74d1256f0977238ce26f04641783e1f46050daff6d79bd4f101f4"
+    }
+  },
+  "second_permutation": {
+    "schema": "dualign-observer-permutation-audit-manifest/v1",
+    "selection_seed": "dualign-observer-second-permutation-audit/v1",
+    "counts": {
+      "by_candidate_count": {
+        "2": 80,
+        "3": 180,
+        "4": 40
+      },
+      "by_dataset": {
+        "internal_reader_natural": 80,
+        "internal_v1_k3": 40,
+        "validation_v4_development": 180
+      },
+      "original_gold_position": {
+        "A": 107,
+        "B": 104,
+        "C": 76,
+        "D": 13
+      },
+      "permuted_gold_position": {
+        "A": 105,
+        "B": 106,
+        "C": 81,
+        "D": 8
+      },
+      "total": 300
+    },
+    "source": {
+      "bytes": 3796476,
+      "sha256": "6f061e19355bf8f33d0a92f69f03ef140289dd91631eeeb44b11d2aa630ecc18"
+    },
+    "private_packet": {
+      "bytes": 812750,
+      "sha256": "2629736b9adf324138de87c9b49a427b70ff7a30242f18eb1d1059bb51ab558e"
+    }
+  },
+  "private_source_hashes": {
+    "internal_v1_candidate_groups": "30a6bbcf4ed9625d39e04c8064aba0a23261fa1207527b148cbe2d1db800f348",
+    "internal_v1_split": "8ab5ca4cb85055c0cc4b5a4bce42c4b73bc10be3ee2e17311747696281ba9ee3",
+    "reader_natural_cases": "0190ba27e753f3a8bf68c30dd3087f09287e344d1aadbe1ef959fc3d3cde19e5",
+    "validation_v4_development": "c5a5c66a8696165cef1ea4d8f9bcc74a825ecbf20729f543bd3e983f9bd556f3"
+  }
+}

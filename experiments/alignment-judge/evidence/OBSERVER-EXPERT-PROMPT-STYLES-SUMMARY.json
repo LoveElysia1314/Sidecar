@@ -1,0 +1,228 @@
+{
+  "schema": "dualign-observer-expert-prompt-style-summary/v1",
+  "scientific_scope": "opened_engineering_suite_only",
+  "model": "qwen3.5:4b",
+  "generation": {
+    "temperature": 0,
+    "think": false,
+    "expected_output": "one option letter"
+  },
+  "questions": 1736,
+  "old_baseline": {
+    "correct": 1561,
+    "accuracy": 0.8991935483870968,
+    "parse_failures": 0
+  },
+  "candidates": [
+    {
+      "name": "architecture_forced_choice",
+      "system_prompt": "You are a bilingual or multilingual alignment judge. Choose the one candidate that best preserves all alignment-relevant information from the reference and adds no unsupported information. Natural translation and faithful paraphrase differences are allowed. Any omission, addition, contradiction, or incorrect text boundary makes a candidate worse. Do not rewrite or explain the text. Return only the best option letter.",
+      "system_prompt_sha256": "94e52c74f7f6cea948723b175caac8a2dbb7c0611b0afe9d3a596269f0aec3ba",
+      "questions": 1736,
+      "correct": 1667,
+      "accuracy": 0.9602534562211982,
+      "accuracy_wilson_95": [
+        0.9500013138216312,
+        0.9684731781491271
+      ],
+      "parse_failures": 0,
+      "latency_wall_seconds_sum": 318.47903630005567,
+      "paired_comparison": {
+        "both_correct": 1551,
+        "both_wrong": 59,
+        "first_only_correct": 10,
+        "mcnemar_exact_two_sided_p": 4.948110035757513e-24,
+        "net_second_minus_first_correct": 106,
+        "prediction_agreement_rate": 0.9256912442396313,
+        "questions": 1736,
+        "same_prediction": 1607,
+        "second_only_correct": 116
+      },
+      "gate_passed": true,
+      "receipt": "OBSERVER-ARCHITECTURE-PROMPT-RECEIPT.json",
+      "receipt_sha256": "28e4a0455d4e853855b141ee4cf62a70fd49027a70883d26383152f80d43867c"
+    },
+    {
+      "name": "P5_information_set_equivalence",
+      "system_prompt": "Treat the reference and each candidate as sets of alignment-relevant information. Choose the candidate whose information set is the same as the reference: it must be neither a subset nor a superset. Faithful translation or paraphrase may change the wording. Reply with only the best option letter.",
+      "system_prompt_sha256": "4e3a5a9e634ec32e53f39307b58abe1adc94eaba7fb830ffa61b4a42b9b1b639",
+      "questions": 1736,
+      "correct": 1590,
+      "accuracy": 0.9158986175115207,
+      "accuracy_wilson_95": [
+        0.9019068213229681,
+        0.928053858530458
+      ],
+      "parse_failures": 0,
+      "latency_wall_seconds_sum": 289.3791389000435,
+      "paired_comparison": {
+        "both_correct": 1577,
+        "both_wrong": 56,
+        "first_only_correct": 90,
+        "mcnemar_exact_two_sided_p": 2.4570971290651306e-15,
+        "net_second_minus_first_correct": -77,
+        "prediction_agreement_rate": 0.9400921658986175,
+        "questions": 1736,
+        "same_prediction": 1632,
+        "second_only_correct": 13
+      },
+      "gate_passed": false,
+      "receipt": "OBSERVER-EXPERT-P5-RECEIPT.json",
+      "receipt_sha256": "f24080c177e043793f5f19afbfb179db9b6e7bdcaad5e411dd1bdc5f25eff3a3"
+    },
+    {
+      "name": "P6_replacement_test",
+      "system_prompt": "Choose the candidate that could replace the reference without changing any alignment-relevant meaning or boundary. If the replacement would lose information or introduce information, that candidate is wrong. Faithful translation or paraphrase is allowed. Reply with only the best option letter.",
+      "system_prompt_sha256": "491110c0d28e11a6032d34eff7111ada3490dd3c2666d94dcdea67191a5dd46e",
+      "questions": 1736,
+      "correct": 1497,
+      "accuracy": 0.8623271889400922,
+      "accuracy_wilson_95": [
+        0.8453171973459495,
+        0.8777371899501794
+      ],
+      "parse_failures": 0,
+      "latency_wall_seconds_sum": 297.15705089998846,
+      "paired_comparison": {
+        "both_correct": 1490,
+        "both_wrong": 62,
+        "first_only_correct": 177,
+        "mcnemar_exact_two_sided_p": 1.0714267651676255e-43,
+        "net_second_minus_first_correct": -170,
+        "prediction_agreement_rate": 0.8928571428571429,
+        "questions": 1736,
+        "same_prediction": 1550,
+        "second_only_correct": 7
+      },
+      "gate_passed": false,
+      "receipt": "OBSERVER-EXPERT-P6-RECEIPT.json",
+      "receipt_sha256": "d5528b82fcc1da46d83cea1c781fef722195f07be26bea08f67da8e56a752c10"
+    },
+    {
+      "name": "P7_mutual_entailment",
+      "system_prompt": "Choose the candidate that is mutually entailing with the reference. Reference-to-candidate and candidate-to-reference are equally required; failure in either direction makes the candidate wrong. Faithful translation or paraphrase is allowed. Reply with only the best option letter.",
+      "system_prompt_sha256": "59dfc979053c8617af133e5757c6c717200ebc8f3e6c0bddc6c3b3180bc42743",
+      "questions": 1736,
+      "correct": 1591,
+      "accuracy": 0.9164746543778802,
+      "accuracy_wilson_95": [
+        0.9025220481229397,
+        0.9285881617579843
+      ],
+      "parse_failures": 0,
+      "latency_wall_seconds_sum": 289.74547150001126,
+      "paired_comparison": {
+        "both_correct": 1575,
+        "both_wrong": 53,
+        "first_only_correct": 92,
+        "mcnemar_exact_two_sided_p": 3.77738189059387e-14,
+        "net_second_minus_first_correct": -76,
+        "prediction_agreement_rate": 0.9372119815668203,
+        "questions": 1736,
+        "same_prediction": 1627,
+        "second_only_correct": 16
+      },
+      "gate_passed": false,
+      "receipt": "OBSERVER-EXPERT-P7-RECEIPT.json",
+      "receipt_sha256": "018dc8419b1fdd2b20eeff984ff644e923005bc2edd2b18b7fdb725fa83ac07a"
+    }
+  ],
+  "strongest_expert_style": "P7_mutual_entailment",
+  "second_permutation_audit": {
+    "sample": {
+      "questions": 300,
+      "manifest": {
+        "bytes": 812750,
+        "path": "${EXPERIMENT_PRIVATE}\\observer-expert-prompt-styles-v1\\permutation-audit-300.private.jsonl",
+        "sha256": "2629736b9adf324138de87c9b49a427b70ff7a30242f18eb1d1059bb51ab558e"
+      }
+    },
+    "architecture_forced_choice": {
+      "original_subset": {
+        "accuracy": 0.9366666666666666,
+        "correct": 281,
+        "questions": 300
+      },
+      "permuted": {
+        "accuracy": 0.94,
+        "accuracy_wilson_95": [
+          0.9071605548470915,
+          0.9617136304753079
+        ],
+        "api_total_seconds_sum": 48.0584311,
+        "correct": 282,
+        "latency_wall_seconds": {
+          "mean": 0.17539541600008912,
+          "p50": 0.1662093000013556,
+          "p95": 0.2740041649999512,
+          "p99": 0.33292908399860593,
+          "sum": 52.61862480002674
+        },
+        "output_tokens": 600,
+        "output_tokens_per_second": 122.3868880778085,
+        "parse_failure_rate": 0.0,
+        "parse_failures": 0,
+        "prompt_tokens": 77598,
+        "questions": 300
+      },
+      "semantic_selection_consistency": {
+        "consistent": 265,
+        "questions": 300,
+        "rate": 0.8833333333333333
+      }
+    },
+    "P7_mutual_entailment": {
+      "original_subset": {
+        "accuracy": 0.9066666666666666,
+        "correct": 272,
+        "questions": 300
+      },
+      "permuted": {
+        "accuracy": 0.9,
+        "accuracy_wilson_95": [
+          0.8608335376153785,
+          0.9290520854049847
+        ],
+        "api_total_seconds_sum": 47.0079284,
+        "correct": 270,
+        "latency_wall_seconds": {
+          "mean": 0.17062441633333342,
+          "p50": 0.1606044499994823,
+          "p95": 0.2721650599989517,
+          "p99": 0.31671030600049555,
+          "sum": 51.18732490000002
+        },
+        "output_tokens": 600,
+        "output_tokens_per_second": 121.15480015936122,
+        "parse_failure_rate": 0.0,
+        "parse_failures": 0,
+        "prompt_tokens": 70998,
+        "questions": 300
+      },
+      "semantic_selection_consistency": {
+        "consistent": 244,
+        "questions": 300,
+        "rate": 0.8133333333333334
+      }
+    },
+    "paired_permuted_architecture_first_P7_second": {
+      "both_correct": 265,
+      "first_only_correct": 17,
+      "second_only_correct": 5,
+      "both_wrong": 13,
+      "questions": 300,
+      "net_second_minus_first_correct": -12,
+      "mcnemar_exact_two_sided_p": 0.01690053939819336
+    }
+  },
+  "decision": {
+    "selected": "architecture_forced_choice",
+    "system_prompt": "You are a bilingual or multilingual alignment judge. Choose the one candidate that best preserves all alignment-relevant information from the reference and adds no unsupported information. Natural translation and faithful paraphrase differences are allowed. Any omission, addition, contradiction, or incorrect text boundary makes a candidate worse. Do not rewrite or explain the text. Return only the best option letter.",
+    "reason": "highest full-suite accuracy; all challenger gates failed; retained lead under the fixed second permutation audit",
+    "expert_style_promoted": false,
+    "position_sensitivity_remains": true
+  },
+  "body_text_in_output": false,
+  "training_performed": false,
+  "shadow_or_confirmation_opened": false
+}

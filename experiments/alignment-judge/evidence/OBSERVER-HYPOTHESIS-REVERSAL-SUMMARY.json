@@ -1,0 +1,320 @@
+{
+  "arms": {
+    "app_harrier_0_6b": {
+      "accuracy": 0.9913594470046083,
+      "by_dataset": {
+        "internal_reader_natural": {
+          "accuracy": 1.0,
+          "cases": 256,
+          "correct": 256
+        },
+        "internal_v1_k3": {
+          "accuracy": 0.85,
+          "cases": 40,
+          "correct": 34
+        },
+        "validation_v4_development": {
+          "accuracy": 0.99375,
+          "cases": 1440,
+          "correct": 1431
+        }
+      },
+      "cases": 1736,
+      "correct": 1721,
+      "instruction_applied_to": "both_anchor_and_candidate",
+      "instruction_sha256": "51e9fbc22ee90e6197531edf5bb498e6b812e4b866a3faa221f6146869fb2ae2",
+      "model": {
+        "details": {
+          "context_length": 32768,
+          "embedding_length": 1024,
+          "families": [
+            "qwen3"
+          ],
+          "family": "qwen3",
+          "format": "gguf",
+          "parameter_size": "596.05M",
+          "quantization_level": "Q8_0"
+        },
+        "digest": "fb1c57107a54da8a6351eba62794c23147f6ef0171362cdd868e7400b84ca460",
+        "name": "leoipulsar/harrier-0.6b:latest",
+        "size": 639448074
+      },
+      "protocol": "ollama_embedding_l2_cosine_strict_positive_margin"
+    },
+    "app_qwen3_embedding_0_6b": {
+      "accuracy": 0.9815668202764977,
+      "by_dataset": {
+        "internal_reader_natural": {
+          "accuracy": 0.98046875,
+          "cases": 256,
+          "correct": 251
+        },
+        "internal_v1_k3": {
+          "accuracy": 0.675,
+          "cases": 40,
+          "correct": 27
+        },
+        "validation_v4_development": {
+          "accuracy": 0.9902777777777778,
+          "cases": 1440,
+          "correct": 1426
+        }
+      },
+      "cases": 1736,
+      "correct": 1704,
+      "instruction_applied_to": "both_anchor_and_candidate",
+      "instruction_sha256": "51e9fbc22ee90e6197531edf5bb498e6b812e4b866a3faa221f6146869fb2ae2",
+      "model": {
+        "details": {
+          "context_length": 32768,
+          "embedding_length": 1024,
+          "families": [
+            "qwen3"
+          ],
+          "family": "qwen3",
+          "format": "gguf",
+          "parameter_size": "595.78M",
+          "quantization_level": "Q8_0"
+        },
+        "digest": "ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d",
+        "name": "qwen3-embedding:0.6b",
+        "size": 639150858
+      },
+      "protocol": "ollama_embedding_l2_cosine_strict_positive_margin"
+    },
+    "app_qwen3_embedding_4b": {
+      "accuracy": 0.9959677419354839,
+      "by_dataset": {
+        "internal_reader_natural": {
+          "accuracy": 0.99609375,
+          "cases": 256,
+          "correct": 255
+        },
+        "internal_v1_k3": {
+          "accuracy": 0.925,
+          "cases": 40,
+          "correct": 37
+        },
+        "validation_v4_development": {
+          "accuracy": 0.9979166666666667,
+          "cases": 1440,
+          "correct": 1437
+        }
+      },
+      "cases": 1736,
+      "correct": 1729,
+      "instruction_applied_to": "both_anchor_and_candidate",
+      "instruction_sha256": "51e9fbc22ee90e6197531edf5bb498e6b812e4b866a3faa221f6146869fb2ae2",
+      "model": {
+        "details": {
+          "context_length": 40960,
+          "embedding_length": 2560,
+          "families": [
+            "qwen3"
+          ],
+          "family": "qwen3",
+          "format": "gguf",
+          "parameter_size": "4.0B",
+          "quantization_level": "Q4_K_M"
+        },
+        "digest": "df5bd2e3c74cd8d069d21dc038f1b359fcdc9458fce1c99bd43c9eb1518ff907",
+        "name": "qwen3-embedding:4b-q4_K_M",
+        "size": 2496704041
+      },
+      "protocol": "ollama_embedding_l2_cosine_strict_positive_margin"
+    },
+    "generative_qwen3_5_4b": {
+      "accuracy": 0.9602534562211982,
+      "by_dataset": {
+        "internal_reader_natural": {
+          "accuracy": 0.9765625,
+          "cases": 256,
+          "correct": 250
+        },
+        "internal_v1_k3": {
+          "accuracy": 0.7,
+          "cases": 40,
+          "correct": 28
+        },
+        "validation_v4_development": {
+          "accuracy": 0.9645833333333333,
+          "cases": 1440,
+          "correct": 1389
+        }
+      },
+      "cases": 1736,
+      "correct": 1667,
+      "model": "qwen3.5:4b",
+      "prompt_variant": "architecture_forced_single_choice/v1",
+      "protocol": "forced_single_choice_valid_letter_only",
+      "system_prompt_sha256": "94e52c74f7f6cea948723b175caac8a2dbb7c0611b0afe9d3a596269f0aec3ba"
+    },
+    "raw_qwen3_embedding_0_6b": {
+      "accuracy": 0.9383640552995391,
+      "by_dataset": {
+        "internal_reader_natural": {
+          "accuracy": 0.94921875,
+          "cases": 256,
+          "correct": 243
+        },
+        "internal_v1_k3": {
+          "accuracy": 0.6,
+          "cases": 40,
+          "correct": 24
+        },
+        "validation_v4_development": {
+          "accuracy": 0.9458333333333333,
+          "cases": 1440,
+          "correct": 1362
+        }
+      },
+      "cases": 1736,
+      "correct": 1629,
+      "instruction_applied_to": "both_anchor_and_candidate",
+      "instruction_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "model": {
+        "details": {
+          "context_length": 32768,
+          "embedding_length": 1024,
+          "families": [
+            "qwen3"
+          ],
+          "family": "qwen3",
+          "format": "gguf",
+          "parameter_size": "595.78M",
+          "quantization_level": "Q8_0"
+        },
+        "digest": "ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d",
+        "name": "qwen3-embedding:0.6b",
+        "size": 639150858
+      },
+      "protocol": "ollama_embedding_l2_cosine_strict_positive_margin"
+    }
+  },
+  "body_text_in_output": false,
+  "case_universe": {
+    "cases": 1736,
+    "datasets": [
+      "internal_v1_k3",
+      "internal_reader_natural",
+      "validation_v4_development"
+    ]
+  },
+  "decision_scope": "rejected_on_opened_engineering_suite_not_a_universal_model_claim",
+  "hypothesis_rejected": "generative forced-choice LLM is more accurate than cosine embedding under the Dualign application protocol",
+  "interpretation_guards": [
+    "All accuracy comparisons use identical case IDs and labels.",
+    "Raw versus application-instruction Qwen3 0.6B changes only the embedding input instruction.",
+    "The suite is opened and development-heavy, so this rejects the prior engineering claim, not a universal claim.",
+    "Latency across generative and embedding architectures is not directly comparable."
+  ],
+  "paired_comparisons": {
+    "app_harrier0_6b_vs_app_qwen0_6b": {
+      "accuracy_difference_percentage_points": 0.9792626728110599,
+      "baseline": "app_qwen3_embedding_0_6b",
+      "baseline_only_correct": 12,
+      "both_correct": 1692,
+      "both_wrong": 3,
+      "candidate": "app_harrier_0_6b",
+      "candidate_only_correct": 29,
+      "cases": 1736,
+      "mcnemar_exact_two_sided_p": 0.011507789735333063,
+      "net_candidate_minus_baseline_correct": 17
+    },
+    "app_harrier0_6b_vs_llm": {
+      "accuracy_difference_percentage_points": 3.110599078341014,
+      "baseline": "generative_qwen3_5_4b",
+      "baseline_only_correct": 13,
+      "both_correct": 1654,
+      "both_wrong": 2,
+      "candidate": "app_harrier_0_6b",
+      "candidate_only_correct": 67,
+      "cases": 1736,
+      "mcnemar_exact_two_sided_p": 6.415141174951122e-10,
+      "net_candidate_minus_baseline_correct": 54
+    },
+    "app_qwen0_6b_vs_llm": {
+      "accuracy_difference_percentage_points": 2.1313364055299537,
+      "baseline": "generative_qwen3_5_4b",
+      "baseline_only_correct": 28,
+      "both_correct": 1639,
+      "both_wrong": 4,
+      "candidate": "app_qwen3_embedding_0_6b",
+      "candidate_only_correct": 65,
+      "cases": 1736,
+      "mcnemar_exact_two_sided_p": 0.0001575707877910854,
+      "net_candidate_minus_baseline_correct": 37
+    },
+    "app_qwen0_6b_vs_raw_qwen0_6b": {
+      "accuracy_difference_percentage_points": 4.320276497695852,
+      "baseline": "raw_qwen3_embedding_0_6b",
+      "baseline_only_correct": 21,
+      "both_correct": 1608,
+      "both_wrong": 11,
+      "candidate": "app_qwen3_embedding_0_6b",
+      "candidate_only_correct": 96,
+      "cases": 1736,
+      "mcnemar_exact_two_sided_p": 1.1987559175109562e-12,
+      "net_candidate_minus_baseline_correct": 75
+    },
+    "app_qwen4b_vs_app_harrier0_6b": {
+      "accuracy_difference_percentage_points": 0.4608294930875576,
+      "baseline": "app_harrier_0_6b",
+      "baseline_only_correct": 7,
+      "both_correct": 1714,
+      "both_wrong": 0,
+      "candidate": "app_qwen3_embedding_4b",
+      "candidate_only_correct": 15,
+      "cases": 1736,
+      "mcnemar_exact_two_sided_p": 0.13380050659179688,
+      "net_candidate_minus_baseline_correct": 8
+    },
+    "app_qwen4b_vs_llm": {
+      "accuracy_difference_percentage_points": 3.5714285714285716,
+      "baseline": "generative_qwen3_5_4b",
+      "baseline_only_correct": 5,
+      "both_correct": 1662,
+      "both_wrong": 2,
+      "candidate": "app_qwen3_embedding_4b",
+      "candidate_only_correct": 67,
+      "cases": 1736,
+      "mcnemar_exact_two_sided_p": 6.387730835678276e-15,
+      "net_candidate_minus_baseline_correct": 62
+    },
+    "llm_vs_raw_qwen0_6b": {
+      "accuracy_difference_percentage_points": 2.1889400921658986,
+      "baseline": "raw_qwen3_embedding_0_6b",
+      "baseline_only_correct": 59,
+      "both_correct": 1570,
+      "both_wrong": 10,
+      "candidate": "generative_qwen3_5_4b",
+      "candidate_only_correct": 97,
+      "cases": 1736,
+      "mcnemar_exact_two_sided_p": 0.002930581611216729,
+      "net_candidate_minus_baseline_correct": 38
+    }
+  },
+  "schema": "dualign-observer-hypothesis-reversal/v1",
+  "sources": {
+    "app_harrier_0_6b": {
+      "bytes": 2588781,
+      "sha256": "1ccf02d55b58c2375055077d7414980f7ca07a98937216ff58eb352d90717700"
+    },
+    "app_qwen3_embedding_0_6b": {
+      "bytes": 2592387,
+      "sha256": "ab21087526224b2c44046803c6133fa6df626682b0e2a294d4c305f5f20576f5"
+    },
+    "app_qwen3_embedding_4b": {
+      "bytes": 2590916,
+      "sha256": "f2b6dbd2455a6c658bfb58de0066dfcda96e4c685844850b7896d30b2102365b"
+    },
+    "generative_qwen3_5_4b": {
+      "bytes": 1588533,
+      "sha256": "4d55297df85bdceb35cd11fb3cb9729135fdb0365f5445e9c3df076db1d8fac6"
+    },
+    "raw_qwen3_embedding_0_6b": {
+      "bytes": 2597352,
+      "sha256": "821c6dd6bff6be9eddac00629a70edc2bf470bcde3b889d8fb9271fee046d7e3"
+    }
+  }
+}

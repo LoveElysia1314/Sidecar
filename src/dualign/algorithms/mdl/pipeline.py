@@ -1,4 +1,4 @@
-"""Production pipeline for statistically gated sparse-MDL alignment."""
+"""Production pipeline for time-bounded sparse-MDL alignment."""
 
 from __future__ import annotations
 
@@ -23,38 +23,15 @@ from dualign.algorithms.mdl.mdl_aligner import (
     mutual_rank_code_evidence,
     normalize_embeddings,
 )
-from dualign.algorithms.mdl.robustness import (
-    MonotoneEvidenceComparison,
-    compare_monotone_evidence,
-    conformal_upper_p,
-    symmetric_nearest_score,
-)
+from dualign.algorithms.mdl.robustness import maximum_monotone_evidence
+from dualign.algorithms.mdl.runtime import AtomicAlignmentTimeout
 from dualign.core.punctuation import UniversalSplitter
-
-
-@dataclass(frozen=True)
-class AlignmentCalibration:
-    """Two empirical reference sets and one declared error rate."""
-
-    existence_null: np.ndarray
-    acceptable_monotone_losses: np.ndarray
-    alpha: float
-
-
-@dataclass(frozen=True)
-class AlignmentGateDecision:
-    accepted: bool
-    reason: str
-    existence_score: float
-    existence_p: float
-    order: MonotoneEvidenceComparison | None
-    order_compatibility_p: float | None
 
 
 @dataclass(frozen=True)
 class MDLPipelineResult:
     status: str
-    gate: AlignmentGateDecision
+    reason: str
     all_ops: list[Operation]
     alternative_ops: list[Operation]
     uncertain_regions: tuple[tuple[tuple[int, int], tuple[int, int]], ...]
@@ -64,59 +41,6 @@ class MDLPipelineResult:
     composition: CounterfactualCompositionResult | None
     alternative_composition: CounterfactualCompositionResult | None
     stats: dict
-
-
-def assess_alignment_applicability(
-    scores: np.ndarray,
-    calibration: AlignmentCalibration,
-) -> AlignmentGateDecision:
-    """Test correspondence, then loss under the monotone evidence model."""
-
-    decision, _evidence = _assess_alignment_applicability(scores, calibration)
-    return decision
-
-
-def _assess_alignment_applicability(
-    scores: np.ndarray,
-    calibration: AlignmentCalibration,
-) -> tuple[AlignmentGateDecision, np.ndarray | None]:
-    """Return the gate decision and rank evidence only when correspondence exists."""
-
-    if not 0.0 < calibration.alpha < 1.0:
-        raise ValueError("显著性水平 alpha 必须位于 (0, 1)")
-    existence_score = symmetric_nearest_score(scores)
-    existence_p = conformal_upper_p(existence_score, calibration.existence_null)
-    if existence_p > calibration.alpha:
-        return (
-            AlignmentGateDecision(
-                accepted=False,
-                reason="no_correspondence",
-                existence_score=existence_score,
-                existence_p=existence_p,
-                order=None,
-                order_compatibility_p=None,
-            ),
-            None,
-        )
-
-    evidence = mutual_rank_code_evidence(scores)
-    order = compare_monotone_evidence(evidence)
-    order_compatibility_p = conformal_upper_p(
-        order.relative_loss,
-        calibration.acceptable_monotone_losses,
-    )
-    accepted = order_compatibility_p > calibration.alpha
-    return (
-        AlignmentGateDecision(
-            accepted=accepted,
-            reason="" if accepted else "order_incompatible",
-            existence_score=existence_score,
-            existence_p=existence_p,
-            order=order,
-            order_compatibility_p=order_compatibility_p,
-        ),
-        evidence,
-    )
 
 
 def _uncertain_regions(
@@ -380,17 +304,8 @@ def align_mdl_pipeline(
     embeddings_a: np.ndarray,
     embeddings_b: np.ndarray,
     encode_fn: Callable[[list[str]], np.ndarray],
-    calibration: AlignmentCalibration,
 ) -> MDLPipelineResult:
-    """Run the converged gate -> sparse atomic MDL -> composition audit.
-
-    Rejected inputs deliberately return no alignment operations.  The
-    algorithm abstains instead of manufacturing a path which downstream code
-    might mistake for a usable alignment.  Accepted inputs are evaluated by
-    both defensible composition codes.  The counterfactual-DLD path is the
-    conservative provisional path; disagreement with posterior reweighting is
-    surfaced as ``needs_review`` rather than hidden behind another threshold.
-    """
+    """Run fixed-time atomic alignment followed by the composition audit."""
 
     started = time.perf_counter()
     source_vectors = normalize_embeddings(embeddings_a)
@@ -400,7 +315,7 @@ def align_mdl_pipeline(
     ):
         raise ValueError("文本行数与嵌入行数不一致")
     if not lines_a or not lines_b:
-        raise ValueError("统计门控研究管线要求两侧文档均非空")
+        raise ValueError("MDL 研究管线要求两侧文档均非空")
 
     scores = observed_cosine_matrix(
         lines_a,
@@ -408,32 +323,37 @@ def align_mdl_pipeline(
         source_vectors,
         target_vectors,
     )
-    gate, evidence = _assess_alignment_applicability(scores, calibration)
-    gate_seconds = time.perf_counter() - started
-    if not gate.accepted:
+    evidence = mutual_rank_code_evidence(scores)
+    _monotone_bits, monotone_pairs = maximum_monotone_evidence(evidence)
+    scaffold = [
+        ((source,), (target,), float(scores[source, target]))
+        for source, target, _weight in monotone_pairs
+    ]
+    preparation_seconds = time.perf_counter() - started
+    atomic_started = time.perf_counter()
+    try:
+        centered = align_centered_frontier_mdl(evidence, scores, scaffold)
+    except AtomicAlignmentTimeout as exc:
         return MDLPipelineResult(
             status="rejected",
-            gate=gate,
+            reason="alignment_timeout",
             all_ops=[],
             alternative_ops=[],
             uncertain_regions=(),
             atomic_ops=[],
-            scaffold=[],
+            scaffold=scaffold,
             centered=None,
             composition=None,
             alternative_composition=None,
-            stats={"gate_seconds": round(gate_seconds, 6)},
+            stats={
+                "preparation_seconds": round(preparation_seconds, 6),
+                "atomic_alignment_seconds": round(exc.elapsed_seconds, 6),
+                "alignment_time_limit_seconds": exc.limit_seconds,
+                "timeout_phase": exc.phase,
+                "total_processing_seconds": round(time.perf_counter() - started, 6),
+            },
         )
-
-    if evidence is None or gate.order is None:
-        raise RuntimeError("通过的统计门控缺少单调证据")
-    scaffold = [
-        ((source,), (target,), float(scores[source, target]))
-        for source, target, _weight in gate.order.monotone_pairs
-    ]
-    centered_started = time.perf_counter()
-    centered = align_centered_frontier_mdl(evidence, scores, scaffold)
-    centered_seconds = time.perf_counter() - centered_started
+    atomic_seconds = time.perf_counter() - atomic_started
     composition_started = time.perf_counter()
     composition_candidates = decision_relevant_candidates(
         centered.semantic_candidates,
@@ -461,7 +381,7 @@ def align_mdl_pipeline(
         composition_candidates,
         cached_encode,
     )
-    composition_seconds = time.perf_counter() - composition_started
+    composition_model_seconds = time.perf_counter() - composition_started
     model_disagreements = _reviewable_uncertain_regions(
         composition.alignment.all_ops,
         posterior.alignment.all_ops,
@@ -478,9 +398,10 @@ def align_mdl_pipeline(
         cached_encode,
     )
     witness_seconds = time.perf_counter() - witness_started
+    composition_seconds = time.perf_counter() - composition_started
     return MDLPipelineResult(
         status="needs_review" if uncertain_regions else "aligned",
-        gate=gate,
+        reason="",
         all_ops=provisional_ops,
         alternative_ops=posterior.alignment.all_ops,
         uncertain_regions=uncertain_regions,
@@ -490,9 +411,12 @@ def align_mdl_pipeline(
         composition=composition,
         alternative_composition=posterior,
         stats={
-            "gate_seconds": round(gate_seconds, 6),
-            "centered_seconds": round(centered_seconds, 6),
-            "composition_seconds": round(composition_seconds, 6),
+            "preparation_seconds": round(preparation_seconds, 6),
+            "atomic_alignment_seconds": round(atomic_seconds, 6),
+            "local_candidate_seconds": centered.window_stats["local_candidate_seconds"],
+            "global_solver_seconds": centered.window_stats["global_solver_seconds"],
+            "composition_processing_seconds": round(composition_seconds, 6),
+            "composition_model_seconds": round(composition_model_seconds, 6),
             "hard_boundary_witness_seconds": round(witness_seconds, 6),
             "composition_proposals_before_pruning": len(centered.semantic_candidates),
             "composition_proposals_after_pruning": len(composition_candidates),
@@ -507,6 +431,6 @@ def align_mdl_pipeline(
             "composition_model_disagreement_regions": len(model_disagreements),
             "hard_boundary_witness_resolutions": len(model_disagreements)
             - len(uncertain_regions),
-            "total_seconds": round(time.perf_counter() - started, 6),
+            "total_processing_seconds": round(time.perf_counter() - started, 6),
         },
     )

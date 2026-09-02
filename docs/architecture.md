@@ -66,10 +66,11 @@ GUI 特判。
 只禁用“校订”模式。缓存命中与新计算必须走相同的预览语义；恢复已有拒绝报告时只读取
 报告，不因打开文件而重写它。
 
-统计门控的工作流决定只有通过或拒绝；`no_correspondence` 与 `order_incompatible` 只作为
-可重建的诊断原因和原始统计量写入报告，不派生不同 GUI 状态。门控通过后才由组合证据
-决定 `aligned / needs_review`，其中 `needs_review` 仍有可消费的暂定关系。缺少校准、
-执行错误或资源不足表示未能评估，不能伪装成内容判断，也不得静默回退 legacy。
+生产流程不再判定文档平行性。空输入、输入规模超过安全处理范围，或原子对齐超过固定的
+60 秒时会产生 `rejected`；这些都是运行条件，不是内容质量结论。其余结果由组合证据决定
+`aligned / needs_review`，其中 `needs_review` 仍有可消费的暂定关系。报告只保存用户可理解
+的结果原因与阶段耗时，不写入校准、工作量代理或内部状态机参数；任何拒绝均不得静默回退
+legacy。
 
 报告序列化只由 `report_io` 负责。运行期 `AlignmentSnapshot/RepairState` 不提供另一套
 `to_dict/from_dict` 快照格式，避免内部撤销状态和正式报告演变成两个可持久化权威来源。
@@ -97,7 +98,7 @@ AI 运行过程的界面反馈采用语义事件而非原始模型输出；待�
 
 ## 算法包边界
 
-`dualign.algorithms.mdl` 是生产求解器；`dualign.core.aligner` 只负责正式结果契约与统计门控，
+`dualign.algorithms.mdl` 是生产求解器；`dualign.core.aligner` 只负责正式结果契约与安全边界，
 不再导入、适配或导出 legacy 算法。冻结的 `legacy_anchor_aligner` 仅由显式
 `legacy-anchor-v1` CLI/benchmark 分支惰性加载，
 不会作为 MDL 拒绝后的回退，也不再向 `dualign.core` 公开锚点阈值、归一化或候选内部函数。

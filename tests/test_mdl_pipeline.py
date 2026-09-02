@@ -1,29 +1,16 @@
 import numpy as np
-import pytest
 
-from dualign.algorithms.mdl import (
-    AlignmentCalibration,
-    align_mdl_pipeline,
-    assess_alignment_applicability,
-)
+import dualign.core.aligner as aligner_module
+from dualign.algorithms.mdl import align_mdl_pipeline
 from dualign.algorithms.mdl.pipeline import (
     _hard_boundary_sum_gain,
     _resolve_hard_boundary_witnesses,
     _reviewable_uncertain_regions,
     _uncertain_regions,
 )
-from dualign.core.aligner import _gate_payload
 
 
-def _calibration():
-    return AlignmentCalibration(
-        existence_null=np.array([0.8, 0.8, 0.8]),
-        acceptable_monotone_losses=np.array([0.0, 0.01, 0.02]),
-        alpha=0.30,
-    )
-
-
-def test_pipeline_abstains_before_alignment_when_correspondence_is_absent():
+def test_pipeline_does_not_semantically_reject_low_correspondence():
     vectors_a = np.eye(3)
     vectors_b = np.full((3, 3), 1.0)
 
@@ -33,34 +20,55 @@ def test_pipeline_abstains_before_alignment_when_correspondence_is_absent():
         vectors_a,
         vectors_b,
         lambda texts: np.ones((len(texts), 3)),
-        _calibration(),
     )
 
-    assert not result.gate.accepted
-    assert result.gate.reason == "no_correspondence"
-    assert result.all_ops == []
-    assert result.centered is None
+    assert result.status == "aligned"
+    assert result.centered is not None
 
 
-def test_correspondence_rejection_skips_rank_and_order_work(monkeypatch):
-    def unexpected_rank(_scores):
-        raise AssertionError("不存在对应关系时不应计算秩证据")
-
+def test_pipeline_stops_atomic_alignment_after_fixed_timeout(monkeypatch):
     monkeypatch.setattr(
-        "dualign.algorithms.mdl.pipeline.mutual_rank_code_evidence",
-        unexpected_rank,
+        "dualign.algorithms.mdl.runtime.ATOMIC_ALIGNMENT_TIMEOUT_SECONDS",
+        0.0,
     )
 
-    gate = assess_alignment_applicability(
-        np.full((3, 3), 0.1),
-        _calibration(),
+    result = align_mdl_pipeline(
+        ["a", "b", "c"],
+        ["x", "y", "z"],
+        np.eye(3),
+        np.full((3, 3), 1.0),
+        lambda texts: np.ones((len(texts), 3)),
     )
 
-    assert not gate.accepted
-    assert gate.reason == "no_correspondence"
-    assert gate.order is None
-    assert gate.order_compatibility_p is None
-    assert "order_compatibility_p" not in _gate_payload(gate)
+    assert result.status == "rejected"
+    assert result.reason == "alignment_timeout"
+    assert result.centered is None
+    assert result.stats["alignment_time_limit_seconds"] == 0.0
+    assert result.stats["timeout_phase"] == "local_candidates"
+
+
+def test_public_aligner_rejects_oversized_matrix_before_solver(monkeypatch):
+    monkeypatch.setattr(aligner_module, "MAXIMUM_SIMILARITY_MATRIX_CELLS", 3)
+    encode_called = False
+
+    def encode(_texts):
+        nonlocal encode_called
+        encode_called = True
+        return np.eye(2)
+
+    result = aligner_module.align(
+        ["a", "b"],
+        ["x", "y"],
+        np.eye(2),
+        np.eye(2),
+        encode_fn=encode,
+    )
+
+    assert result.status == "rejected"
+    assert result.reason == "input_too_large"
+    assert result.stats["matrix_cells"] == 4
+    assert result.stats["maximum_matrix_cells"] == 3
+    assert not encode_called
 
 
 def test_pipeline_uses_rank_scaffold_and_returns_complete_alignment():
@@ -72,10 +80,8 @@ def test_pipeline_uses_rank_scaffold_and_returns_complete_alignment():
         vectors,
         vectors,
         lambda texts: np.ones((len(texts), 3)),
-        _calibration(),
     )
 
-    assert result.gate.accepted
     assert result.status == "aligned"
     assert len(result.scaffold) == 3
     assert [(source, target) for source, target, _score in result.all_ops] == [
@@ -95,51 +101,12 @@ def test_pipeline_gives_repeated_identical_text_pairs_identical_scores():
         vectors_a,
         vectors_b,
         lambda texts: np.ones((len(texts), 2)),
-        _calibration(),
     )
 
-    assert result.gate.accepted
-    assert result.gate.order is not None
-    assert result.gate.order.relative_loss == 0.0
-
-
-def test_single_line_parallel_document_is_not_rejected_for_lack_of_permutation_power():
-    scores = np.array([[1.0]])
-
-    gate = assess_alignment_applicability(
-        scores,
-        _calibration(),
-    )
-
-    assert gate.accepted
-    assert gate.order is not None
-    assert gate.order.relative_loss == 0.0
-
-
-def test_large_order_loss_rejects_without_a_third_gate_state():
-    gate = assess_alignment_applicability(
-        np.fliplr(np.eye(4)),
-        _calibration(),
-    )
-
-    assert not gate.accepted
-    assert gate.reason == "order_incompatible"
-    assert gate.order is not None
-    assert gate.order.relative_loss == pytest.approx(0.75)
-
-
-def test_gate_payload_serializes_monotone_evidence_loss():
-    scores = np.eye(3)
-    gate = assess_alignment_applicability(
-        scores,
-        _calibration(),
-    )
-
-    payload = _gate_payload(gate)
-
-    assert gate.order is not None
-    assert payload["monotone_evidence_loss"] == gate.order.relative_loss == 0.0
-    assert payload["monotone_pairs"] == len(gate.order.monotone_pairs) == 3
+    assert result.status == "aligned"
+    assert result.stats["local_candidate_seconds"] >= 0.0
+    assert result.stats["global_solver_seconds"] >= 0.0
+    assert result.stats["atomic_alignment_seconds"] >= 0.0
 
 
 def test_composition_disagreement_is_returned_as_one_review_region():

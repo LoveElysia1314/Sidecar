@@ -60,11 +60,10 @@ dualign/
 │   ├── providers.py             # ProviderManager (Ollama/LM Studio/自定义)
 │   │
 │   ├── algorithms/              # 正式生成算法实现
-│   │   └── mdl/                 # 统计门控、候选图、组合证据与局部 MDL
+│   │   └── mdl/                 # 候选图、组合证据、局部 MDL 与运行时限
 │   │
 │   ├── core/                    # 稳定公共门面与 legacy 归档
 │   │   ├── aligner.py           # mdl-v1 正式结果契约
-│   │   ├── calibration.py       # embedding 身份绑定的门控校准
 │   │   ├── legacy_anchor_aligner.py # 冻结 benchmark
 │   │   ├── legacy_anchor_quality.py # 冻结的旧报告诊断
 │   │   ├── punctuation.py       # 标点分割 + 语言检测
@@ -214,7 +213,7 @@ python scripts/build_exe.py
 ```bash
 # 需安装 Inno Setup 6
 python scripts/build.py
-# → Dualign_Setup_v0.9.4.exe
+# → Dualign_Setup_v0.9.5.exe
 ```
 
 `scripts/build_exe.py` 只负责 PyInstaller 目录或单文件构建；安装包、便携包和发布 ZIP
