@@ -528,7 +528,6 @@ class WindowActionsMixin:
                 self._repair_state = None
                 self._alignment_snapshot = None
                 self._align_stats = result.stats
-                self._alignment_timing = dict(result.timing or {})
                 report_path = self._session_path()
                 if result.stats.get("load_origin") != "report":
                     from dualign.core import alignment_payload
@@ -586,7 +585,6 @@ class WindowActionsMixin:
                 ),
             )
             self._align_stats = result.stats
-            self._alignment_timing = dict(result.timing or {})
             if hasattr(self, "_score_cache"):
                 self._score_cache.clear()
 

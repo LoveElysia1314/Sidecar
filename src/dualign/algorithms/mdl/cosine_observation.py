@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import numpy as np
 
-COSINE_OBSERVATION_ID = "binary16-exact-text-pair-v1"
-
 
 def _unique_text_vectors(
     texts: list[str], vectors: np.ndarray

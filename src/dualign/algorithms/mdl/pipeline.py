@@ -39,7 +39,6 @@ class MDLPipelineResult:
     scaffold: list[Operation]
     centered: CenteredFrontierMDLResult | None
     composition: CounterfactualCompositionResult | None
-    alternative_composition: CounterfactualCompositionResult | None
     stats: dict
 
 
@@ -344,7 +343,6 @@ def align_mdl_pipeline(
             scaffold=scaffold,
             centered=None,
             composition=None,
-            alternative_composition=None,
             stats={
                 "preparation_seconds": round(preparation_seconds, 6),
                 "atomic_alignment_seconds": round(exc.elapsed_seconds, 6),
@@ -409,7 +407,6 @@ def align_mdl_pipeline(
         scaffold=scaffold,
         centered=centered,
         composition=composition,
-        alternative_composition=posterior,
         stats={
             "preparation_seconds": round(preparation_seconds, 6),
             "atomic_alignment_seconds": round(atomic_seconds, 6),

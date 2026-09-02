@@ -375,7 +375,6 @@ def _get_prompts_dir() -> str:
 
 
 _tool_definitions_cache: list[dict] | None = None
-_tools_cache: list[dict] | None = None
 _region_tool_definitions_cache: list[dict] | None = None
 _region_tools_cache: list[dict] | None = None
 
@@ -392,25 +391,6 @@ def _load_tool_definitions() -> list[dict]:
         tool.setdefault("parameters", {}).setdefault("additionalProperties", False)
     _tool_definitions_cache = definitions
     return definitions
-
-
-def _load_tools() -> list[dict]:
-    """Load the Responses API tool contract lazily."""
-    global _tools_cache
-    if _tools_cache is not None:
-        return _tools_cache
-    openai_tools = []
-    for tool in _load_tool_definitions():
-        openai_tools.append(
-            {
-                "type": "function",
-                "name": tool["name"],
-                "description": tool["description"],
-                "parameters": tool["parameters"],
-            }
-        )
-    _tools_cache = openai_tools
-    return openai_tools
 
 
 def _get_tools_openai() -> list[dict]:

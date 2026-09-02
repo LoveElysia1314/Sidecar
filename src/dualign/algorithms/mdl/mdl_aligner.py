@@ -120,12 +120,6 @@ def _elias_delta_length(value: int) -> int:
     return bit_length + 2 * (bit_length.bit_length() - 1)
 
 
-def _set_max(states: dict[int, float], complexity: int, semantic: float) -> None:
-    current = states.get(complexity)
-    if current is None or semantic > current:
-        states[complexity] = semantic
-
-
 def _prune_dominated_states(states: dict[int, float]) -> None:
     """Drop states no better than a path with lower structural complexity."""
 

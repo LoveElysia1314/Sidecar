@@ -21,7 +21,7 @@
 git clone <repo-url>
 cd dualign
 
-# 同步开发环境（运行时依赖 + Black + pytest）
+# 同步开发环境（运行时依赖 + Black + pytest + Vulture）
 uv sync --extra dev
 
 # 启动嵌入后端
@@ -42,7 +42,7 @@ uv run python scripts/migrate_embedding_cache.py --remove-legacy
 | 分组 | 命令                      | 包含                                  |
 | ---- | ------------------------- | ------------------------------------- |
 | 完整 | `pip install -e .`        | 对齐引擎 + CLI + AI 审校 + GUI 工作台 |
-| 开发 | `uv sync --extra dev`       | 完整安装 + Black + pytest             |
+| 开发 | `uv sync --extra dev`       | 完整安装 + Black + pytest + Vulture   |
 
 ---
 
@@ -125,6 +125,9 @@ uv run --extra dev black .
 # 验证没有遗漏格式化
 uv run --extra dev black --check .
 
+# 审查高置信度未使用代码
+uv run --extra dev vulture --min-confidence 80
+
 # 全部测试
 uv run --extra dev pytest tests/ -v
 
@@ -135,6 +138,9 @@ uv run --extra dev pytest tests/test_repair_state.py -v
 # 覆盖率
 uv run --extra dev pytest tests/ --cov=src/dualign --cov-report=term-missing
 ```
+
+Vulture 的低置信度结果需要逐项核对。Qt 事件处理器、反射入口、枚举成员和供脚本调用的公共
+方法可能没有静态引用，不能仅凭报告删除。
 
 ---
 
@@ -219,6 +225,9 @@ python scripts/build.py
 `scripts/build_exe.py` 只负责 PyInstaller 目录或单文件构建；安装包、便携包和发布 ZIP
 统一由 `scripts/build.py` 生成。`scripts/setup.iss` 是从模板产生并在构建后清理的临时文件，
 不纳入版本控制。
+
+品牌源文件更新后运行 `uv run python scripts/sync_branding.py` 同步运行时资源；发布前可用
+`uv run python scripts/sync_branding.py --check` 检查差异或缺失文件。
 
 ### PyPI 发布
 

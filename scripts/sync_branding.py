@@ -13,9 +13,8 @@ sync_branding.py — 同步品牌资产到运行时资源包
 
 from __future__ import annotations
 
-import hashlib
-import sys
 import filecmp
+import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -43,12 +42,17 @@ def main() -> int:
     missing = 0
     identical = 0
 
+    if not SRC.is_dir():
+        print(f"  ⚠ 源目录不存在: {SRC}")
+        return 1
+
     for src_name, dst_name in SYNC_PAIRS:
         src_file = SRC / src_name
         dst_file = DST / dst_name
 
         if not src_file.is_file():
             print(f"  ⚠ 源文件不存在: {src_file}")
+            missing += 1
             continue
 
         if _files_identical(src_file, dst_file):
@@ -64,10 +68,6 @@ def main() -> int:
             changed += 1
             print(f"  ✓ {src_name} → 已同步")
 
-    if not src_file.is_file():
-        print(f"  ⚠ 源目录不存在: {SRC}")
-        return 1
-
     print()
     print(
         f"  总文件: {len(SYNC_PAIRS)}"
@@ -76,7 +76,7 @@ def main() -> int:
         f"  |  缺失: {missing}"
     )
 
-    if check_only and changed > 0:
+    if check_only and (changed > 0 or missing > 0):
         return 1  # exit code 1 = 有变更
     return 0
 
